@@ -1,0 +1,77 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nautilus-platform"
+version = "0.1.0"
+description = "Crypto algorithmic trading platform built on NautilusTrader"
+requires-python = ">=3.11"
+dependencies = [
+    # Core engine — PIN THIS. Breaking changes between releases.
+    # Check https://github.com/nautechsystems/nautilus_trader/releases before upgrading.
+    "nautilus_trader==1.214.0",
+
+    # API
+    "fastapi>=0.115.0,<1.0",
+    "uvicorn[standard]>=0.32.0",
+
+    # Database
+    "asyncpg>=0.30.0",
+    "alembic>=1.14.0",
+    "sqlalchemy>=2.0",          # For schema definition + Alembic migrations only
+
+    # Redis
+    "redis[hiredis]>=5.0",
+
+    # Data / Analysis
+    "pandas>=2.2",
+    "pyarrow>=18.0",            # Parquet support for NT catalog
+
+    # Config
+    "pydantic>=2.10",
+    "pydantic-settings>=2.6",
+
+    # Indicators (choose one or both)
+    # "TA-Lib>=0.4.32",         # Requires system-level ta-lib install
+    "pandas-ta>=0.3.14b1",
+
+    # Utilities
+    "python-decimal2>=0.1",
+    "orjson>=3.10",             # Fast JSON for API responses
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-cov>=6.0",
+    "ruff>=0.8",
+    "mypy>=1.13",
+    "httpx>=0.28",              # For testing FastAPI
+    "ipykernel>=6.29",          # Jupyter support
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "TCH"]
+ignore = ["E501"]  # Line length handled by formatter
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
