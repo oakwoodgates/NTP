@@ -116,24 +116,33 @@ api/                        ← outermost layer, can import from anything
 ## Prerequisites
 
 - Python 3.11+ (NT requirement)
-- Node.js 18+ (frontend)
-- Docker + Docker Compose (PostgreSQL + TimescaleDB, Redis)
-- A Binance/Bybit API key (for live/paper trading — not needed for backtesting)
+- Node.js 18+ (frontend — Phase 2)
+- Docker + Docker Compose (PostgreSQL + TimescaleDB, Redis — Phase 2)
+- A Binance/Bybit API key (for live/paper trading — Phase 3)
 
 ## Setup
+
+### Phase 1 (current) — NT native workflow
 
 ```bash
 # Clone
 git clone <repo-url>
 cd nautilus-platform
 
-# Infrastructure
-docker compose up -d  # PostgreSQL+TimescaleDB on 5432, Redis on 6379
-
 # Python environment
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+
+# Launch Jupyter
+jupyter notebook notebooks/
+```
+
+### Phase 2+ — Full stack
+
+```bash
+# Infrastructure
+docker compose up -d  # PostgreSQL+TimescaleDB on 5432, Redis on 6379
 
 # Database migrations
 alembic upgrade head
@@ -146,7 +155,11 @@ npm run dev
 
 ## Usage
 
-### Run a backtest
+### Explore strategies in Jupyter (Phase 1)
+
+Open a notebook in `notebooks/`, load data into NT's ParquetDataCatalog, configure a BacktestEngine, and iterate on Strategy subclasses. Results are in-memory DataFrames — plot with matplotlib/plotly, generate HTML tearsheets.
+
+### Run a backtest via CLI (Phase 2+)
 
 ```bash
 python scripts/run_backtest.py \
@@ -156,13 +169,13 @@ python scripts/run_backtest.py \
   --end 2024-12-31
 ```
 
-### Start the API server
+### Start the API server (Phase 2+)
 
 ```bash
 uvicorn src.api.main:app --reload --port 8000
 ```
 
-### Start a live/paper trading node
+### Start a live/paper trading node (Phase 3)
 
 ```bash
 python scripts/run_live.py --config configs/paper_btc.toml
@@ -172,10 +185,11 @@ python scripts/run_live.py --config configs/paper_btc.toml
 
 | Phase | Focus | Status |
 |-------|-------|--------|
-| 1 | Rule-based strategies + backtesting + frontend | 🟡 Active |
-| 2 | Paper trading + live trading | ⬜ Planned |
-| 3 | ML integration (entry/exit timing) | ⬜ Planned |
-| 4 | Experimental (LSTM, LLM, sentiment) | ⬜ Planned |
+| 1 | Strategy development + backtesting (NT native workflow) | 🟡 Active |
+| 2 | Frontend + API + persistence layer | ⬜ Planned |
+| 3 | Paper trading + live trading | ⬜ Planned |
+| 4 | ML integration (entry/exit timing) | ⬜ Planned |
+| 5 | Experimental (LSTM, LLM, sentiment) | ⬜ Planned |
 
 ## Key Constraints
 

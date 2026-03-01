@@ -149,12 +149,22 @@ tests/                # unit/ and integration/
 
 ## Development Phases
 
-**Phase 1 (current):** Rule-based strategies + backtesting + frontend for viewing results.
-**Phase 2:** Paper trading (NT Sandbox mode) + live trading (NT TradingNode).
-**Phase 3:** ML integration — feature engineering, model training, inference in strategy callbacks.
-**Phase 4:** Experimental — LSTM, LLM sentiment, RL agents.
+**Phase 1 (current):** Strategy development + backtesting using NT's native workflow. Jupyter notebooks, BacktestEngine, in-memory results, matplotlib/plotly charts, HTML tearsheets. No custom infrastructure — learn NT's patterns first.
+**Phase 2:** Frontend + API + persistence. FastAPI gateway, React frontend, PostgreSQL+TimescaleDB for backtest result storage.
+**Phase 3:** Paper trading (NT Sandbox mode) + live trading (NT TradingNode). Redis event bridge to frontend.
+**Phase 4:** ML integration — feature engineering, model training, inference in strategy callbacks.
+**Phase 5:** Experimental — LSTM, LLM sentiment, RL agents.
 
 ## Common Tasks
+
+### Phase 1 workflow (current)
+1. Load OHLCV data into NT's `ParquetDataCatalog` (one-time conversion script).
+2. In a Jupyter notebook: configure `BacktestEngine` (venue, instrument, fees, fill model).
+3. Write or tweak a `Strategy` subclass.
+4. Run the backtest, inspect DataFrames (`generate_orders_report()`, `generate_positions_report()`).
+5. Plot equity curves with matplotlib/plotly.
+6. Generate an HTML tearsheet for runs worth saving.
+7. Set `log_level` to `LogLevel.ERROR` in notebooks to avoid stdout flooding.
 
 ### Adding a new strategy
 1. Create a new file in `src/strategies/`.
@@ -163,14 +173,15 @@ tests/                # unit/ and integration/
 4. Register it in the backtest runner config or TradingNode config.
 
 ### Running a backtest
-Use `scripts/run_backtest.py` or the FastAPI endpoint. Results (DataFrames + stats dicts) are persisted to PostgreSQL by the backtest runner.
+**Phase 1:** Directly in Jupyter notebooks using `BacktestEngine`. Results are in-memory DataFrames and stats dicts.
+**Phase 2+:** Use `scripts/run_backtest.py` or the FastAPI endpoint. Results persisted to PostgreSQL.
 
-### Adding a new API endpoint
+### Adding a new API endpoint (Phase 2+)
 1. Create or modify a router in `src/api/routes/`.
 2. Use asyncpg for database queries.
 3. Return Pydantic models with string-encoded decimals for financial values.
 
-### Bridging NT events to the frontend
+### Bridging NT events to the frontend (Phase 2+)
 The `StreamingActor` (in `src/actors/streaming.py`) subscribes to NT MessageBus events and publishes to Redis pub/sub. The FastAPI WebSocket handler reads from Redis pub/sub and pushes to connected clients.
 
 ## Gotchas and Warnings
