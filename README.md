@@ -115,7 +115,7 @@ api/                        ← outermost layer, can import from anything
 
 ## Prerequisites
 
-- Python 3.11+ (NT requirement)
+- Python 3.12+ (NT requirement)
 - Node.js 18+ (frontend — Phase 2)
 - Docker + Docker Compose (PostgreSQL + TimescaleDB, Redis — Phase 2)
 - A Binance/Bybit API key (for live/paper trading — Phase 3)

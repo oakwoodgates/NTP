@@ -118,7 +118,7 @@ React Frontend ←WebSocket/REST→ FastAPI Gateway
 
 ## Code Conventions
 
-- **Python 3.11+** with type hints everywhere.
+- **Python 3.12+** with type hints everywhere.
 - **Pydantic** for API schemas and settings.
 - **asyncpg** for database access (not SQLAlchemy ORM — too much overhead for time-series queries). SQLAlchemy Core is acceptable for schema definition and migrations.
 - **Decimal or NT native types** for all financial values in Python code.
