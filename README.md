@@ -32,7 +32,7 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │                                                      │
 │  Strategies · Actors · RiskEngine · ExecutionEngine  │
 │  BacktestEngine · TradingNode · MessageBus           │
-│  Exchange Adapters (Binance, Bybit, etc.)            │
+│  Exchange Adapters (Hyperliquid, Binance, Bybit...)  │
 │  ParquetDataCatalog · FillModel · Portfolio          │
 └─────────────────────────────────────────────────────┘
 ```
@@ -118,7 +118,7 @@ api/                        ← outermost layer, can import from anything
 - Python 3.12+ (NT requirement)
 - Node.js 18+ (frontend — Phase 2)
 - Docker + Docker Compose (PostgreSQL + TimescaleDB, Redis — Phase 2)
-- A Binance/Bybit API key (for live/paper trading — Phase 3)
+- A Hyperliquid wallet private key (for live/paper trading — Phase 3)
 
 ## Setup
 
@@ -164,7 +164,7 @@ Open a notebook in `notebooks/`, load data into NT's ParquetDataCatalog, configu
 ```bash
 python scripts/run_backtest.py \
   --strategy ema_cross \
-  --instrument BTCUSDT.BINANCE \
+  --instrument BTC-USD-PERP.HYPERLIQUID \
   --start 2024-01-01 \
   --end 2024-12-31
 ```

@@ -38,15 +38,13 @@ NT is pre-v2.0 with breaking changes between releases. The version is pinned in 
 Dependencies flow inward. Outer layers depend on inner layers, never the reverse.
 
 ```
-core/                  ← depends on nothing internal (NT types, stdlib only)
+core/                       ← depends on nothing internal (NT types, stdlib only)
   ↑
-strategies/, actors/   ← depend on core/ (for types, interfaces, constants)
+strategies/, actors/        ← depend on core/ (for types, interfaces, constants)
   ↑
-backtesting/           ← depends on core/, may use strategies/
+backtesting/, persistence/  ← depend on core/ (peers, not interdependent)
   ↑
-persistence/           ← depends on core/ (for types/interfaces)
-  ↑
-api/                   ← depends on persistence/, backtesting/, core/
+api/                        ← depends on persistence/, backtesting/, core/
 ```
 
 Rules:
@@ -80,7 +78,7 @@ React Frontend ←WebSocket/REST→ FastAPI Gateway
                                Exchange Adapters, MessageBus)
                                       ↕
                               ParquetDataCatalog (backtest data)
-                              Exchange APIs (live data + execution)
+                              Exchange APIs (Hyperliquid, Binance, etc.)
 ```
 
 ### What NT Provides (don't rebuild)
@@ -88,12 +86,13 @@ React Frontend ←WebSocket/REST→ FastAPI Gateway
 - L1/L2/L3 order book simulation with configurable FillModel
 - RiskEngine intercepting every order before execution
 - HALTED trading state (kill switch — all orders denied except cancels)
-- 16 exchange adapters (Binance Spot/Futures, Bybit, IB, etc.)
+- Exchange adapters for Binance (Spot/Futures), Bybit, Hyperliquid, Interactive Brokers, dYdX, Kraken, OKX, and others
 - Redis cache integration (positions, orders, account state)
-- Portfolio analyzer (Sharpe, Sortino, drawdown, profit factor, win rate)
-- Built-in indicators (EMA, SMA, MACD, etc.)
+- Portfolio analyzer (Sharpe, Sortino, drawdown, profit factor, win rate) — Rust-ported
+- Built-in indicators (EMA, SMA, MACD, Ichimoku, etc.)
 - Execution reconciliation on startup (crash recovery)
 - HTML tearsheet generation
+- Sandbox execution adapter for paper trading against live data
 
 ### What We Build (NT doesn't provide)
 - **FastAPI gateway:** REST endpoints for triggering backtests, querying results, managing strategies. WebSocket endpoints for live trade streaming.
@@ -164,7 +163,7 @@ tests/                # unit/ and integration/
 4. Run the backtest, inspect DataFrames (`generate_orders_report()`, `generate_positions_report()`).
 5. Plot equity curves with matplotlib/plotly.
 6. Generate an HTML tearsheet for runs worth saving.
-7. Set `log_level` to `LogLevel.ERROR` in notebooks to avoid stdout flooding.
+7. Set `log_level` to `"ERROR"` in `LoggingConfig` to avoid stdout flooding.
 
 ### Adding a new strategy
 1. Create a new file in `src/strategies/`.
@@ -186,9 +185,9 @@ The `StreamingActor` (in `src/actors/streaming.py`) subscribes to NT MessageBus 
 
 ## Gotchas and Warnings
 
-- **NT logging in Jupyter:** NT exceeds Jupyter's stdout rate limits, causing notebooks to hang. Set `log_level` to `LogLevel.ERROR` or `LogLevel.WARNING` in notebook configs.
+- **NT logging in Jupyter:** NT exceeds Jupyter's stdout rate limits, causing notebooks to hang. Set `log_level` to `"ERROR"` or `"WARNING"` in `LoggingConfig`.
 - **NT community is small (~5K Discord).** The "NT + web dashboard" pattern is unprecedented. When stuck, read NT source code directly — don't expect blog posts or SO answers.
-- **NT doesn't use CCXT.** It has its own exchange adapters. If a target exchange isn't in the 16 supported, you'd need to write a custom adapter.
+- **NT doesn't use CCXT.** It has its own exchange adapters. If a target exchange isn't supported, you'd need to write a custom adapter.
 - **Backtest results are in-memory only.** NT's `engine.trader.generate_orders_report()` etc. return pandas DataFrames. The persistence layer must capture these.
 - **Expect 30-40% performance haircut** from backtest to live. If paper lags backtest by >30-40%, investigate before going live.
 - **Slippage modeling matters.** Configure NT's `FillModel`: 0.05-0.1% for top-10 coins, 0.5-2% outside top 100, 5-10% for microcaps.
