@@ -51,3 +51,6 @@ dump.rdb
 secrets/
 *.pem
 *.key
+
+# Local configuration files
+*.local.json
