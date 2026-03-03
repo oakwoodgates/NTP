@@ -26,7 +26,7 @@ dependencies = [
 
     # Data / Analysis
     "pandas>=2.2",
-    "pyarrow>=18.0",            # Parquet support for NT catalog
+    "pyarrow>=22.0.0",          # Parquet support for NT catalog
 
     # Config
     "pydantic>=2.10",
@@ -37,7 +37,6 @@ dependencies = [
     "pandas-ta>=0.3.14b1",
 
     # Utilities
-    "python-decimal2>=0.1",
     "orjson>=3.10",             # Fast JSON for API responses
 ]
 
