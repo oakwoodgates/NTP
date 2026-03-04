@@ -10,3 +10,27 @@ This module contains ONLY:
 This module NEVER imports from other src/ modules.
 If something doesn't fit the above list, it belongs in a more specific module.
 """
+
+from src.core.constants import (
+    CANDLE_LIMIT,
+    HYPERLIQUID_API_URL,
+    HYPERLIQUID_VENUE,
+    INTERVAL_TO_BAR_SPEC,
+    MAKER_FEE,
+    SETTLEMENT_CURRENCY,
+    TAKER_FEE,
+    TS_INIT_DELTAS,
+)
+from src.core.instruments import make_hyperliquid_perp
+
+__all__ = [
+    "CANDLE_LIMIT",
+    "HYPERLIQUID_API_URL",
+    "HYPERLIQUID_VENUE",
+    "INTERVAL_TO_BAR_SPEC",
+    "MAKER_FEE",
+    "SETTLEMENT_CURRENCY",
+    "TAKER_FEE",
+    "TS_INIT_DELTAS",
+    "make_hyperliquid_perp",
+]
