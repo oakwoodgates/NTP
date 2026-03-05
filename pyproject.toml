@@ -38,6 +38,7 @@ dependencies = [
 
     # Utilities
     "orjson>=3.10",             # Fast JSON for API responses
+    "httpx>=0.28",              # HTTP client for data fetching scripts
 ]
 
 [project.optional-dependencies]
@@ -47,7 +48,6 @@ dev = [
     "pytest-cov>=6.0",
     "ruff>=0.8",
     "mypy>=1.13",
-    "httpx>=0.28",              # For testing FastAPI
     "ipykernel>=6.29",          # Jupyter support
     "matplotlib>=3.9",          # Plotting in notebooks
 ]
