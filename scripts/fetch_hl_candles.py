@@ -6,7 +6,7 @@ import argparse
 import shutil
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -33,6 +33,9 @@ COIN_DEFAULTS: dict[str, tuple[int, int, int]] = {
 }
 
 CATALOG_PATH = Path("data/catalog")
+
+
+# ── Hyperliquid API ──────────────────────────────────────────────────
 
 
 def fetch_meta(client: httpx.Client) -> dict:
@@ -112,6 +115,9 @@ def fetch_candles(
     return all_candles
 
 
+# ── Data transformation ──────────────────────────────────────────────
+
+
 def candles_to_dataframe(candles: list[dict]) -> pd.DataFrame:
     """Convert HL candle response to the DataFrame format BarDataWrangler expects.
 
@@ -161,58 +167,58 @@ def validate_dataframe(df: pd.DataFrame, coin: str, interval: str) -> None:
             print(f"  {ts}: gap = {gap}", file=sys.stderr)
 
 
-def clean_catalog_data(bar_type_str: str, instrument_id_str: str) -> None:
+# ── Catalog write ────────────────────────────────────────────────────
+
+
+def clean_catalog_data(bar_type_str: str) -> None:
     """Delete existing catalog data for this bar type to allow clean rewrite.
 
-    ParquetDataCatalog rejects writes with overlapping time ranges.
-    Wipe the relevant parquet files before writing fresh data.
-    """
-    # Bar data lives under: data/catalog/data/bar_{bar_type}/
-    # The bar_type directory name uses the full bar_type string with dots replaced
-    bar_data_dir = CATALOG_PATH / "data" / f"bar-{bar_type_str}"
-    if bar_data_dir.exists():
-        shutil.rmtree(bar_data_dir)
+    ParquetDataCatalog.write_data() with overlapping time ranges produces
+    duplicate bars. Wipe the relevant parquet directory before writing.
 
-    # Also try the pattern NT might use (varies by version)
-    for pattern in CATALOG_PATH.glob(f"data/bar*{instrument_id_str}*"):
-        if pattern.is_dir():
-            shutil.rmtree(pattern)
+    NT's catalog directory naming has changed across versions, so we glob
+    for any directory containing the bar type string to be safe.
+    """
+    data_dir = CATALOG_PATH / "data"
+    if not data_dir.exists():
+        return
+
+    # NT may use "bar-{bar_type_str}" or "bar_{bar_type_str}" or other
+    # separators depending on version. Glob broadly, match narrowly.
+    for path in data_dir.iterdir():
+        if path.is_dir() and bar_type_str in path.name:
+            shutil.rmtree(path)
+            print(f"  Cleaned: {path.name}")
 
 
 def wrangle_and_write(
     df: pd.DataFrame,
-    coin: str,
+    instrument,  # CryptoPerpetual — avoid importing the type in a script
     interval: str,
+    bar_type: BarType,
     catalog: ParquetDataCatalog,
 ) -> int:
     """Wrangle DataFrame to NT Bars and write to catalog. Returns bar count."""
-    defaults = COIN_DEFAULTS[coin]
-    price_prec, size_prec, max_lev = defaults
-
-    instrument = make_hyperliquid_perp(coin, price_prec, size_prec, max_lev)
-
-    step, aggregation = INTERVAL_TO_BAR_SPEC[interval]
-    bar_type_str = f"{instrument.id}-{step}-{aggregation}-LAST-EXTERNAL"
-    bar_type = BarType.from_str(bar_type_str)
-
     wrangler = BarDataWrangler(bar_type=bar_type, instrument=instrument)
 
     ts_init_delta = TS_INIT_DELTAS[interval]
     bars = wrangler.process(df, ts_init_delta=ts_init_delta)
 
-    # Spot check ts_event vs ts_init
+    # Spot check ts_event vs ts_init on first bar
     if bars:
         b = bars[0]
         ts_event = pd.Timestamp(b.ts_event, unit="ns", tz="UTC")
         ts_init = pd.Timestamp(b.ts_init, unit="ns", tz="UTC")
         print(f"  Spot check: ts_event={ts_event}, ts_init={ts_init}, delta={ts_init - ts_event}")
 
-    # Wipe existing data to avoid overlapping interval errors, then write fresh
-    clean_catalog_data(bar_type_str, str(instrument.id))
-    catalog.write_data([instrument])
+    # Wipe existing data to avoid duplicate bars, then write fresh
+    clean_catalog_data(str(bar_type))
     catalog.write_data(bars)
 
     return len(bars)
+
+
+# ── Main ─────────────────────────────────────────────────────────────
 
 
 def main() -> None:
@@ -233,7 +239,7 @@ def main() -> None:
             sys.exit(1)
 
     now = datetime.now(UTC)
-    start_dt = now - pd.Timedelta(days=args.days)
+    start_dt = now - timedelta(days=args.days)
     start_ms = int(start_dt.timestamp() * 1000)
     end_ms = int(now.timestamp() * 1000)
 
@@ -243,7 +249,19 @@ def main() -> None:
         meta = fetch_meta(client)
         validate_coin_metadata(meta, args.coins)
 
+        # Build instruments once per coin, write to catalog before bar data.
+        # The old version wrote the instrument inside wrangle_and_write(),
+        # causing it to be written N times (once per interval per coin).
+        instruments = {}
         for coin in args.coins:
+            price_prec, size_prec, max_lev = COIN_DEFAULTS[coin]
+            inst = make_hyperliquid_perp(coin, price_prec, size_prec, max_lev)
+            instruments[coin] = inst
+            catalog.write_data([inst])
+            print(f"Wrote instrument: {inst.id}")
+
+        for coin in args.coins:
+            instrument = instruments[coin]
             for interval in args.intervals:
                 print(f"Fetching {coin} {interval} ({args.days} days)...")
                 candles = fetch_candles(client, coin, interval, start_ms, end_ms)
@@ -255,7 +273,11 @@ def main() -> None:
                 df = candles_to_dataframe(candles)
                 validate_dataframe(df, coin, interval)
 
-                bar_count = wrangle_and_write(df, coin, interval, catalog)
+                step, aggregation = INTERVAL_TO_BAR_SPEC[interval]
+                bar_type_str = f"{instrument.id}-{step}-{aggregation}-LAST-EXTERNAL"
+                bar_type = BarType.from_str(bar_type_str)
+
+                bar_count = wrangle_and_write(df, instrument, interval, bar_type, catalog)
                 print(f"  Written {bar_count} bars, range: {df.index[0]} -> {df.index[-1]}")
 
                 time.sleep(0.5)
