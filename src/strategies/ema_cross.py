@@ -1,12 +1,13 @@
 """EMA crossover strategy for pipeline validation."""
 
+from datetime import timedelta
 from decimal import Decimal
 
-import pandas as pd
 from nautilus_trader.config import PositiveInt
+from nautilus_trader.core.correctness import PyCondition
 from nautilus_trader.indicators import ExponentialMovingAverage
 from nautilus_trader.model.data import Bar, BarType
-from nautilus_trader.model.enums import OrderSide, TimeInForce
+from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.trading.config import StrategyConfig
 from nautilus_trader.trading.strategy import Strategy
@@ -27,6 +28,10 @@ class EMACrossConfig(StrategyConfig, frozen=True):
         The fast EMA period.
     slow_ema_period : int, default 20
         The slow EMA period.
+    close_positions_on_stop : bool, default True
+        If all open positions should be closed on strategy stop.
+        Set to False to stop the strategy without liquidating (e.g., during
+        a code deploy in live trading).
 
     """
 
@@ -35,6 +40,7 @@ class EMACrossConfig(StrategyConfig, frozen=True):
     trade_size: Decimal
     fast_ema_period: PositiveInt = 10
     slow_ema_period: PositiveInt = 20
+    close_positions_on_stop: bool = True
 
 
 class EMACross(Strategy):
@@ -44,14 +50,25 @@ class EMACross(Strategy):
     Goes short when fast EMA crosses below slow EMA.
     Designed for perpetual futures (supports both directions).
 
+    THIS IS A PIPELINE VALIDATION STRATEGY WITH NO ALPHA ADVANTAGE.
+
     Parameters
     ----------
     config : EMACrossConfig
         The configuration for the instance.
 
+    Raises
+    ------
+    ValueError
+        If `config.fast_ema_period` is not less than `config.slow_ema_period`.
+
     """
 
     def __init__(self, config: EMACrossConfig) -> None:
+        PyCondition.is_true(
+            config.fast_ema_period < config.slow_ema_period,
+            f"{config.fast_ema_period=} must be less than {config.slow_ema_period=}",
+        )
         super().__init__(config)
 
         self.instrument = None
@@ -69,10 +86,15 @@ class EMACross(Strategy):
         self.register_indicator_for_bars(self.config.bar_type, self.fast_ema)
         self.register_indicator_for_bars(self.config.bar_type, self.slow_ema)
 
-        # Request historical bars to hydrate indicators before subscribing
+        # Request enough historical bars to fully hydrate the slowest indicator.
+        # In backtesting this is redundant (bars feed sequentially), but in live
+        # trading this determines how many bars NT fetches from the exchange on
+        # startup. Under-requesting means indicators stay uninitialized for the
+        # first N bars of a live session.
+        lookback_bars = self.config.slow_ema_period + 10
         self.request_bars(
             self.config.bar_type,
-            start=self._clock.utc_now() - pd.Timedelta(days=1),
+            start=self._clock.utc_now() - timedelta(hours=lookback_bars),
         )
         self.subscribe_bars(self.config.bar_type)
 
@@ -106,7 +128,6 @@ class EMACross(Strategy):
             instrument_id=self.config.instrument_id,
             order_side=side,
             quantity=self.instrument.make_qty(self.config.trade_size),
-            time_in_force=TimeInForce.GTC,
         )
         self.submit_order(order)
 
@@ -115,12 +136,13 @@ class EMACross(Strategy):
         self.log.info(f"Filled: {event}")
 
     def on_stop(self) -> None:
-        """Cancel all orders, close all positions, unsubscribe."""
+        """Cancel all orders, optionally close positions, unsubscribe."""
         self.cancel_all_orders(self.config.instrument_id)
-        self.close_all_positions(self.config.instrument_id)
+        if self.config.close_positions_on_stop:
+            self.close_all_positions(self.config.instrument_id)
         self.unsubscribe_bars(self.config.bar_type)
 
     def on_reset(self) -> None:
-        """Reset indicators."""
+        """Reset indicators for engine reuse (parameter sweeps)."""
         self.fast_ema.reset()
         self.slow_ema.reset()
