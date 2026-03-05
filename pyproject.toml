@@ -49,6 +49,7 @@ dev = [
     "mypy>=1.13",
     "httpx>=0.28",              # For testing FastAPI
     "ipykernel>=6.29",          # Jupyter support
+    "matplotlib>=3.9",          # Plotting in notebooks
 ]
 
 [tool.hatch.build.targets.wheel]
