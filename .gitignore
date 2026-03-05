@@ -54,3 +54,6 @@ secrets/
 
 # Local configuration files
 *.local.json
+
+# Claude AI
+.claude/*
