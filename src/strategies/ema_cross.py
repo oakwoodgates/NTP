@@ -9,6 +9,7 @@ from nautilus_trader.indicators import ExponentialMovingAverage
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.trading.config import StrategyConfig
 from nautilus_trader.trading.strategy import Strategy
 
@@ -71,7 +72,7 @@ class EMACross(Strategy):
         )
         super().__init__(config)
 
-        self.instrument = None
+        self.instrument: Instrument | None = None
         self.fast_ema = ExponentialMovingAverage(config.fast_ema_period)
         self.slow_ema = ExponentialMovingAverage(config.slow_ema_period)
 
@@ -124,6 +125,9 @@ class EMACross(Strategy):
 
     def _enter(self, side: OrderSide) -> None:
         """Submit a market order for the given side."""
+        if self.instrument is None:
+            self.log.error("Instrument not loaded — cannot enter position")
+            return
         order = self.order_factory.market(
             instrument_id=self.config.instrument_id,
             order_side=side,
