@@ -21,6 +21,7 @@ from src.core.constants import (
     TAKER_FEE,
     TS_INIT_DELTAS,
 )
+from src.core.utils import bar_type_str
 from src.core.instruments import make_hyperliquid_perp
 
 __all__ = [
@@ -32,5 +33,6 @@ __all__ = [
     "SETTLEMENT_CURRENCY",
     "TAKER_FEE",
     "TS_INIT_DELTAS",
+    "bar_type_str",
     "make_hyperliquid_perp",
 ]
