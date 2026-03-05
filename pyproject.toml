@@ -50,6 +50,8 @@ dev = [
     "mypy>=1.13",
     "ipykernel>=6.29",          # Jupyter support
     "matplotlib>=3.9",          # Plotting in notebooks
+    "plotly>=5.0",               # Interactive plotting in notebooks
+    "nbformat>=4.2",             # Required by Plotly for Jupyter rendering
 ]
 
 [tool.hatch.build.targets.wheel]
