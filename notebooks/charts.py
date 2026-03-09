@@ -19,10 +19,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+from nautilus_trader.model.currencies import USDC
 from nautilus_trader.indicators import (
     ExponentialMovingAverage,
     MovingAverageConvergenceDivergence,
@@ -705,3 +707,163 @@ def _apply_macd_rsi_layout(
 
     # Bottom x-axis date formatting
     fig.update_xaxes(tickformat="%b %d\n%Y", row=3, col=1)
+
+
+# ── Matplotlib display helpers ───────────────────────────────────────────────
+
+
+def plot_equity_curve(
+    analyzer,
+    account_report: pd.DataFrame | None,
+    title: str,
+) -> None:
+    """Plot cumulative returns or account balance fallback.
+
+    Calls ``plt.show()`` directly — designed for inline notebook use.
+
+    Parameters
+    ----------
+    analyzer
+        NT portfolio analyzer (after ``calculate_statistics`` has been called).
+    account_report
+        DataFrame from ``engine.trader.generate_account_report(venue)``,
+        or ``None``. Used as fallback when analyzer returns are empty.
+    title
+        Chart title string (e.g. ``"EMACross(20/50)  BTC 1h"``).
+
+    """
+    fig, ax = plt.subplots(figsize=(14, 5))
+    plotted = False
+
+    try:
+        returns = analyzer.returns()
+        if returns is not None and len(returns) > 0:
+            cumulative = (1 + returns).cumprod()
+            cumulative.plot(ax=ax, label="Cumulative Return")
+            plotted = True
+    except Exception:
+        pass
+
+    if not plotted and account_report is not None and not account_report.empty:
+        account_report.plot(ax=ax, label="Account Balance")
+        ax.set_ylabel("Balance (USDC)")
+        plotted = True
+
+    if plotted:
+        ax.set_title(f"Equity Curve — {title}", fontsize=13)
+        ax.set_xlabel("Time")
+        ax.grid(True, alpha=0.2)
+        ax.legend()
+        plt.tight_layout()
+        plt.show()
+    else:
+        print("No returns or account data available for equity curve.")
+
+
+def print_summary_stats(
+    analyzer,
+    num_positions: int | None = None,
+    currency=USDC,
+) -> None:
+    """Print general, PnL, and returns stats from the analyzer.
+
+    Parameters
+    ----------
+    analyzer
+        NT portfolio analyzer (after ``calculate_statistics`` has been called).
+    num_positions
+        If provided, printed at the end.
+    currency
+        Currency for PnL stats. Default ``USDC``.
+
+    """
+    general_stats = analyzer.get_performance_stats_general()
+    pnl_stats = analyzer.get_performance_stats_pnls(currency)
+    returns_stats = analyzer.get_performance_stats_returns()
+
+    print("=== General ===")
+    for k, v in general_stats.items():
+        print(f"  {k}: {v}")
+
+    print("\n=== PnL (USDC) ===")
+    for k, v in pnl_stats.items():
+        print(f"  {k}: {v}")
+
+    print("\n=== Returns ===")
+    for k, v in returns_stats.items():
+        print(f"  {k}: {v}")
+
+    print(f"\nTotal PnL      : {analyzer.total_pnl(currency)}")
+    print(f"Total PnL %    : {analyzer.total_pnl_percentage(currency)}")
+    if num_positions is not None:
+        print(f"Positions      : {num_positions}")
+
+
+def plot_pnl_heatmap(
+    results_df: pd.DataFrame,
+    row_col: str,
+    col_col: str,
+    value_col: str = "total_pnl",
+    *,
+    row_label: str | None = None,
+    col_label: str | None = None,
+    title: str = "Total PnL (USDC)",
+    fmt: str = ",.0f",
+) -> None:
+    """Diverging RdYlGn heatmap from sweep results DataFrame.
+
+    Calls ``plt.show()`` directly — designed for inline notebook use.
+
+    Parameters
+    ----------
+    results_df
+        DataFrame with at least *row_col*, *col_col*, and *value_col*.
+    row_col
+        Column name for the y-axis (pivot index).
+    col_col
+        Column name for the x-axis (pivot columns).
+    value_col
+        Column to plot. Default ``"total_pnl"``.
+    row_label
+        Y-axis label. Defaults to *row_col*.
+    col_label
+        X-axis label. Defaults to *col_col*.
+    title
+        Chart title.
+    fmt
+        Format string for cell annotations.
+
+    """
+    pivot = results_df.pivot(index=row_col, columns=col_col, values=value_col)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+
+    vmax = max(abs(np.nanmin(pivot.values)), abs(np.nanmax(pivot.values)))
+    im = ax.imshow(
+        pivot.values,
+        cmap="RdYlGn",
+        aspect="auto",
+        vmin=-vmax,
+        vmax=vmax,
+    )
+
+    ax.set_xticks(range(len(pivot.columns)))
+    ax.set_xticklabels([str(c) for c in pivot.columns])
+    ax.set_yticks(range(len(pivot.index)))
+    ax.set_yticklabels([str(i) for i in pivot.index])
+    ax.set_xlabel(col_label or col_col)
+    ax.set_ylabel(row_label or row_col)
+    ax.set_title(title)
+
+    for i in range(len(pivot.index)):
+        for j in range(len(pivot.columns)):
+            val = pivot.values[i, j]
+            if np.isnan(val):
+                continue
+            color = "white" if abs(val) > vmax * 0.6 else "black"
+            ax.text(j, i, f"{val:{fmt}}", ha="center", va="center",
+                    fontsize=10, color=color)
+
+    fig.colorbar(im, ax=ax, label=f"{value_col} (USDC)")
+    plt.tight_layout()
+    plt.show()
