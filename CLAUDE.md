@@ -193,6 +193,7 @@ The `StreamingActor` (in `src/actors/streaming.py`) subscribes to NT MessageBus 
 - **Expect 30-40% performance haircut** from backtest to live. If paper lags backtest by >30-40%, investigate before going live.
 - **Slippage modeling matters.** Configure NT's `FillModel`: 0.05-0.1% for top-10 coins, 0.5-2% outside top 100, 5-10% for microcaps.
 - **NETTING mode position stats:** `cache.positions()` returns only the current Position object per instrument-strategy pair — NOT all historical positions. Closed positions are stored as snapshots. For correct analyzer stats, use `cache.position_snapshots() + cache.positions()` when calling `analyzer.calculate_statistics(account, positions)`. Without this, Win Rate, Long Ratio, Sharpe, and all position-level stats will be wrong.
+- **`analyzer.returns()` requires `calculate_statistics()` first.** `returns()` is a getter for an internal Series that starts empty. It only gets populated when `calculate_statistics()` processes positions. Call `calculate_statistics()` immediately after `engine.run()`, before any plotting or stats access.
 
 ## Communicating with This Developer
 
