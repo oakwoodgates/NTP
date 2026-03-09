@@ -161,9 +161,10 @@ tests/                # unit/ and integration/
 2. In a Jupyter notebook: configure `BacktestEngine` (venue, instrument, fees, fill model).
 3. Write or tweak a `Strategy` subclass.
 4. Run the backtest, inspect DataFrames (`generate_orders_report()`, `generate_positions_report()`).
-5. Plot equity curves with matplotlib/plotly.
-6. Generate an HTML tearsheet for runs worth saving.
-7. Set `log_level` to `"ERROR"` in `LoggingConfig` to avoid stdout flooding.
+5. For analyzer stats: `analyzer.calculate_statistics(account, positions)` where `account = engine.cache.account_for_venue(venue)` and `positions = engine.cache.position_snapshots() + engine.cache.positions()`.
+6. Plot equity curves with matplotlib/plotly.
+7. Generate an HTML tearsheet for runs worth saving.
+8. Set `log_level` to `"ERROR"` in `LoggingConfig` to avoid stdout flooding.
 
 ### Adding a new strategy
 1. Create a new file in `src/strategies/`.
@@ -191,6 +192,7 @@ The `StreamingActor` (in `src/actors/streaming.py`) subscribes to NT MessageBus 
 - **Backtest results are in-memory only.** NT's `engine.trader.generate_orders_report()` etc. return pandas DataFrames. The persistence layer must capture these.
 - **Expect 30-40% performance haircut** from backtest to live. If paper lags backtest by >30-40%, investigate before going live.
 - **Slippage modeling matters.** Configure NT's `FillModel`: 0.05-0.1% for top-10 coins, 0.5-2% outside top 100, 5-10% for microcaps.
+- **NETTING mode position stats:** `cache.positions()` returns only the current Position object per instrument-strategy pair — NOT all historical positions. Closed positions are stored as snapshots. For correct analyzer stats, use `cache.position_snapshots() + cache.positions()` when calling `analyzer.calculate_statistics(account, positions)`. Without this, Win Rate, Long Ratio, Sharpe, and all position-level stats will be wrong.
 
 ## Communicating with This Developer
 
