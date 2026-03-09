@@ -27,6 +27,7 @@ from nautilus_trader.indicators import (
     ExponentialMovingAverage,
     MovingAverageConvergenceDivergence,
     RelativeStrengthIndex,
+    SimpleMovingAverage,
 )
 from nautilus_trader.model.data import Bar
 
@@ -90,6 +91,52 @@ def plot_ema_cross(
     _add_ema_lines(fig, ohlcv, fast_period, slow_period)
     _add_trade_markers(fig, buys, sells, ohlcv)
     _apply_layout(fig, fast_period, slow_period, instrument_label, bar_label, height)
+
+    return fig
+
+
+def plot_sma_cross(
+    bars: list[Bar],
+    fills_report: pd.DataFrame,
+    fast_period: int,
+    slow_period: int,
+    *,
+    instrument_label: str = "BTC-USD-PERP",
+    bar_label: str = "1h",
+    height: int = 600,
+) -> go.Figure:
+    """Candlestick chart with SMA overlays and trade entry markers.
+
+    Parameters
+    ----------
+    bars:
+        Ordered list of NT Bar objects (output of ``catalog.bars()``).
+    fills_report:
+        DataFrame from ``engine.trader.generate_order_fills_report()``.
+    fast_period:
+        Fast SMA period (plotted in amber).
+    slow_period:
+        Slow SMA period (plotted in blue).
+    instrument_label:
+        Display string for the chart title.
+    bar_label:
+        Bar interval label used in the title (e.g. ``"1h"``, ``"4h"``).
+    height:
+        Figure height in pixels.
+
+    Returns
+    -------
+    go.Figure
+        Call ``.show()`` or ``.write_html()`` on the returned figure.
+    """
+    ohlcv = _bars_to_sma_ohlcv(bars, fast_period, slow_period)
+    buys, sells = _parse_fills(fills_report)
+
+    fig = go.Figure()
+    _add_candlesticks(fig, ohlcv)
+    _add_sma_lines(fig, ohlcv, fast_period, slow_period)
+    _add_trade_markers(fig, buys, sells, ohlcv)
+    _apply_sma_layout(fig, fast_period, slow_period, instrument_label, bar_label, height)
 
     return fig
 
@@ -296,6 +343,102 @@ def _apply_layout(
     fig.update_layout(
         title=dict(
             text=f"{instrument_label} · {bar_label} · EMACross({fast_period}/{slow_period})",
+            font=dict(size=15),
+        ),
+        height=height,
+        template="plotly_dark",
+        paper_bgcolor=_BG,
+        plot_bgcolor=_BG,
+        font=dict(color=_TEXT, family="Inter, system-ui, sans-serif"),
+
+        xaxis=dict(
+            rangeslider=dict(visible=True, thickness=0.04),
+            type="date",
+            gridcolor=_GRID,
+            linecolor=_BORDER,
+            tickformat="%b %d\n%Y",
+        ),
+        yaxis=dict(
+            side="right",
+            gridcolor=_GRID,
+            linecolor=_BORDER,
+            tickprefix="$",
+            tickformat=",.0f",
+        ),
+
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.02,
+            xanchor="left",
+            x=0,
+            bgcolor="rgba(0,0,0,0)",
+        ),
+
+        hovermode="x unified",
+        margin=dict(l=0, r=60, t=60, b=0),
+    )
+
+
+# ── SMA helpers ──────────────────────────────────────────────────────────────
+
+def _bars_to_sma_ohlcv(
+    bars: list[Bar],
+    fast_period: int,
+    slow_period: int,
+) -> pd.DataFrame:
+    """Convert NT Bar list to OHLCV DataFrame with SMA columns appended."""
+    fast_sma = SimpleMovingAverage(fast_period)
+    slow_sma = SimpleMovingAverage(slow_period)
+
+    rows = []
+    for bar in bars:
+        fast_sma.handle_bar(bar)
+        slow_sma.handle_bar(bar)
+        rows.append({
+            "ts":    pd.Timestamp(bar.ts_event, unit="ns", tz="UTC"),
+            "open":  float(bar.open),
+            "high":  float(bar.high),
+            "low":   float(bar.low),
+            "close": float(bar.close),
+            "vol":   float(bar.volume),
+            f"SMA{fast_period}": fast_sma.value if fast_sma.initialized else np.nan,
+            f"SMA{slow_period}": slow_sma.value if slow_sma.initialized else np.nan,
+        })
+
+    return pd.DataFrame(rows).set_index("ts")
+
+
+def _add_sma_lines(
+    fig: go.Figure,
+    ohlcv: pd.DataFrame,
+    fast_period: int,
+    slow_period: int,
+) -> None:
+    for col, color in [
+        (f"SMA{fast_period}", _AMBER),
+        (f"SMA{slow_period}", _BLUE),
+    ]:
+        fig.add_trace(go.Scatter(
+            x=ohlcv.index,
+            y=ohlcv[col],
+            name=col,
+            mode="lines",
+            line=dict(color=color, width=1.5),
+        ))
+
+
+def _apply_sma_layout(
+    fig: go.Figure,
+    fast_period: int,
+    slow_period: int,
+    instrument_label: str,
+    bar_label: str,
+    height: int,
+) -> None:
+    fig.update_layout(
+        title=dict(
+            text=f"{instrument_label} · {bar_label} · SMACross({fast_period}/{slow_period})",
             font=dict(size=15),
         ),
         height=height,
