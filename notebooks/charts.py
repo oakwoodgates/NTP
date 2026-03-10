@@ -717,44 +717,8 @@ def plot_pnl_heatmap(
     plt.show()
 
 
-"""
-charts.py  —  Visualisation helpers for NautilusTrader backtest notebooks.
-
-Public API
-----------
-plot_ema_cross(bars, fills_report, *, fast_period, slow_period,
-               instrument_label, bar_label, height) -> go.Figure
-    Plotly interactive candlestick with EMA overlay + trade markers.
-
-plot_sma_cross(bars, fills_report, fast_period, slow_period, *,
-               instrument_label, bar_label, height) -> go.Figure
-    Plotly interactive candlestick with SMA overlay + trade markers.
-
-generate_backtest_html(bars, fills_report, positions_report, *,
-                       fast_period, slow_period, ma_type,
-                       instrument_label, bar_label, starting_capital,
-                       output_path) -> Path
-    Self-contained HTML using TradingView Lightweight Charts.
-    Open in any browser. No server required.
-    Includes: candlestick + MA overlay, trade markers with hover tooltip,
-    summary stats bar, and a full trade history table with click-to-zoom.
-
-NT version: 1.223.0
-Column reference
-    fills_report   : side (BUY/SELL), avg_px (float64), filled_qty (str),
-                     ts_last (pd.Timestamp), ts_init (pd.Timestamp)
-    positions_report: entry (BUY/SELL), side (LONG/SHORT/FLAT),
-                      peak_qty (str), avg_px_open (float64),
-                      avg_px_close (float64|NaN), realized_pnl (str "val CCY"),
-                      realized_return (float64), ts_opened (pd.Timestamp),
-                      ts_closed (pd.Timestamp|pd.NA)
-"""
-
-
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Internal helpers
+# Internal helpers for generate_backtest_html
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _ts_to_unix_s(ts: Any) -> int | None:
@@ -814,12 +778,25 @@ def _parse_money_str(s: Any) -> float | None:
         return None
 
 
-def _fills_to_markers(fills_df: pd.DataFrame) -> tuple[list[dict], dict[int, dict]]:
+def _fills_to_markers(
+    fills_df: pd.DataFrame,
+    ts_to_trade_num: dict[int, int] | None = None,
+) -> tuple[list[dict], dict[int, dict]]:
     """
     Convert fills_report → (tvlc_markers, marker_detail_by_time).
 
     tvlc_markers    passed to candleSeries.setMarkers() — no extra keys.
     marker_detail   keyed by unix-seconds, holds extra data for the tooltip.
+
+    ts_to_trade_num  optional mapping of unix-second timestamp → 1-based trade
+                     number from the trades table, built from positions_report
+                     ts_opened/ts_closed. When provided, the marker label
+                     becomes "#N" instead of "B qty" / "S qty".
+
+    NOTE: position_id on fills is NOT used for matching — in NETTING mode all
+    fills share the same base position_id and cannot be mapped to individual
+    trades. Timestamp matching is exact because each fill creates the event
+    that opens or closes a position.
     """
     if fills_df is None or fills_df.empty:
         return [], {}
@@ -845,20 +822,29 @@ def _fills_to_markers(fills_df: pd.DataFrame) -> tuple[list[dict], dict[int, dic
 
         qty_str = str(qty_raw).rstrip("0").rstrip(".")  # "0.01000000" → "0.01"
 
+        # Resolve trade number by timestamp — position_id cannot be used in
+        # NETTING mode because all fills share the same base position_id.
+        trade_num: int | None = None
+        if ts_to_trade_num is not None and ts_s is not None:
+            trade_num = ts_to_trade_num.get(ts_s)
+
+        marker_text = f"#{trade_num}" if trade_num is not None else f"{'B' if is_buy else 'S'} {qty_str}"
+
         tvlc_markers.append({
             "time":     ts_s,
             "position": "belowBar" if is_buy else "aboveBar",
             "color":    "#26a69a" if is_buy else "#ef5350",
             "shape":    "arrowUp" if is_buy else "arrowDown",
-            "text":     f"{'B' if is_buy else 'S'} {qty_str}",
+            "text":     marker_text,
             "size":     1.5,
         })
 
         detail[ts_s] = {
-            "is_buy": is_buy,
-            "side":   "BUY" if is_buy else "SELL",
-            "qty":    qty_str,
-            "px":     px_fmt,
+            "is_buy":    is_buy,
+            "side":      "BUY" if is_buy else "SELL",
+            "qty":       qty_str,
+            "px":        px_fmt,
+            "trade_num": trade_num,
         }
 
     # TVLC requires markers sorted by time; deduplicate by taking last per ts
@@ -1019,7 +1005,24 @@ def generate_backtest_html(
         if not math.isnan(v)
     ]
 
-    markers, marker_detail = _fills_to_markers(fills_report)
+    # Build unix-second timestamp → 1-based trade number mapping so chart
+    # markers show the trade number from the table.
+    #
+    # position_id cannot be used here: in NETTING mode all fills share the same
+    # base position_id (e.g. "BTC-USD-PERP.HYPERLIQUID-EMACross-000") regardless
+    # of which trade they belong to. Timestamp matching is exact because each
+    # fill creates the event that opens or closes a position.
+    ts_to_trade_num: dict[int, int] = {}
+    if positions_report is not None and not positions_report.empty:
+        for trade_num, (_, pos_row) in enumerate(positions_report.iterrows(), start=1):
+            opened_s = _ts_to_unix_s(pos_row.get("ts_opened"))
+            closed_s = _ts_to_unix_s(pos_row.get("ts_closed"))
+            if opened_s:
+                ts_to_trade_num[opened_s] = trade_num
+            if closed_s:
+                ts_to_trade_num[closed_s] = trade_num
+
+    markers, marker_detail = _fills_to_markers(fills_report, ts_to_trade_num or None)
     position_rows          = _positions_to_rows(positions_report)
     stats                  = _compute_stats(position_rows, starting_capital)
 
@@ -1295,7 +1298,7 @@ const OHLCV         = __OHLCV_JSON__;
 const EMA_FAST_DATA = __EMA_FAST_JSON__;
 const EMA_SLOW_DATA = __EMA_SLOW_JSON__;
 const MARKERS       = __MARKERS_JSON__;
-const MARKER_DETAIL = __MARKER_DETAIL_JSON__;   // {unix_s_str: {is_buy,side,qty,px}}
+const MARKER_DETAIL = __MARKER_DETAIL_JSON__;   // {unix_s_str: {is_buy,side,qty,px,trade_num}}
 const TRADES        = __TRADES_JSON__;
 const STATS         = __STATS_JSON__;
 const FAST_PERIOD   = __FAST__;
@@ -1333,7 +1336,7 @@ const candleSeries = chart.addCandlestickSeries({
 });
 candleSeries.setData(OHLCV);
 
-// Fast EMA
+// Fast MA
 const fastLine = chart.addLineSeries({
   color: '#2196f3', lineWidth: 1,
   priceLineVisible: false, lastValueVisible: true,
@@ -1341,7 +1344,7 @@ const fastLine = chart.addLineSeries({
 });
 fastLine.setData(EMA_FAST_DATA);
 
-// Slow EMA
+// Slow MA
 const slowLine = chart.addLineSeries({
   color: '#ff9800', lineWidth: 1,
   priceLineVisible: false, lastValueVisible: true,
@@ -1401,6 +1404,9 @@ chart.subscribeCrosshairMove(param => {
   if (mDetail) {
     const cls = mDetail.is_buy ? 'buy' : 'sell';
     html += `<hr class="tt-sep">`;
+    if (mDetail.trade_num != null) {
+      html += `<div class="tt-row"><span class="tt-label">Trade</span><span class="tt-value">#${mDetail.trade_num}</span></div>`;
+    }
     html += `<div class="tt-row"><span class="tt-label">Signal</span><span class="tt-${cls}">${mDetail.side}</span></div>`;
     html += `<div class="tt-row"><span class="tt-label">Qty</span><span class="tt-value">${mDetail.qty}</span></div>`;
     html += `<div class="tt-row"><span class="tt-label">Fill px</span><span class="tt-value">${mDetail.px}</span></div>`;
