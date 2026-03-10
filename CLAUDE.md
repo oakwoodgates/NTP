@@ -140,9 +140,10 @@ src/
 alembic/              # Alembic migrations (deployment artifact, not runtime code)
 alembic.ini           # Alembic config
 frontend/             # React application
-scripts/              # CLI runners (run_backtest.py, run_live.py)
-notebooks/            # Jupyter prototyping
+scripts/              # Data pipeline (fetch_hl_candles.py); CLI runners planned for Phase 2+
+notebooks/            # Jupyter prototyping + charts.py plotting helpers
 data/                 # ParquetDataCatalog root (gitignored)
+reports/              # Generated HTML backtest reports (gitignored)
 tests/                # unit/ and integration/
 ```
 
@@ -158,12 +159,12 @@ tests/                # unit/ and integration/
 
 ### Phase 1 workflow (current)
 1. Load OHLCV data into NT's `ParquetDataCatalog` (one-time conversion script).
-2. In a Jupyter notebook: configure `BacktestEngine` (venue, instrument, fees, fill model).
+2. In a Jupyter notebook: configure `BacktestEngine` (venue, instrument, fees, fill model). Use `backtesting/engine.py` helpers (`make_engine()`, `run_single_backtest()`) to avoid boilerplate, or configure manually for custom setups.
 3. Write or tweak a `Strategy` subclass.
 4. Run the backtest, inspect DataFrames (`generate_orders_report()`, `generate_positions_report()`).
 5. For analyzer stats: `analyzer.calculate_statistics(account, positions)` where `account = engine.cache.account_for_venue(venue)` and `positions = engine.cache.position_snapshots() + engine.cache.positions()`.
-6. Plot equity curves with matplotlib/plotly.
-7. Generate an HTML tearsheet for runs worth saving.
+6. Plot with `notebooks/charts.py`: `plot_ohlcv_with_indicators()` for price+indicator charts, `plot_equity_curve()` for equity curves. Also supports raw matplotlib/plotly.
+7. Generate reports: NT's built-in HTML tearsheet, or `generate_backtest_html()` from `charts.py` for interactive TradingView-style reports with OHLCV + trade overlays.
 8. Set `log_level` to `"ERROR"` in `LoggingConfig` to avoid stdout flooding.
 
 ### Adding a new strategy
@@ -174,7 +175,7 @@ tests/                # unit/ and integration/
 
 ### Running a backtest
 **Phase 1:** Directly in Jupyter notebooks using `BacktestEngine`. Results are in-memory DataFrames and stats dicts.
-**Phase 2+:** Use `scripts/run_backtest.py` or the FastAPI endpoint. Results persisted to PostgreSQL.
+**Phase 2+:** Use a CLI runner script (to be created) or the FastAPI endpoint. Results persisted to PostgreSQL.
 
 ### Adding a new API endpoint (Phase 2+)
 1. Create or modify a router in `src/api/routes/`.

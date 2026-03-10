@@ -50,50 +50,36 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 ```
 ├── src/
 │   ├── strategies/          # NT Strategy subclasses
-│   │   ├── __init__.py
-│   │   └── examples/        # Reference implementations
-│   ├── actors/              # Custom NT Actors
-│   │   ├── __init__.py
-│   │   ├── persistence.py   # MessageBus → PostgreSQL writer
-│   │   └── streaming.py     # MessageBus → Redis pub/sub bridge
-│   ├── api/                 # FastAPI application (outermost layer)
-│   │   ├── __init__.py
-│   │   ├── main.py          # App entrypoint
-│   │   ├── routes/          # REST endpoints
-│   │   └── ws/              # WebSocket handlers
-│   ├── persistence/         # Database layer (schemas + repositories)
-│   │   ├── __init__.py
-│   │   ├── models.py        # SQLAlchemy Core / raw SQL schemas
-│   │   └── repositories.py  # Query interfaces
+│   │   ├── ema_cross.py
+│   │   ├── ...
 │   ├── backtesting/         # Backtest orchestration
-│   │   ├── __init__.py
-│   │   ├── runner.py        # BacktestEngine/BacktestNode wrappers
-│   │   └── data_loader.py   # OHLCV → ParquetDataCatalog pipeline
-│   ├── config/              # Configuration management
-│   │   ├── __init__.py
-│   │   └── settings.py      # Single Pydantic Settings model, env var overrides
-│   └── core/                # TIGHT: type aliases, constants, protocols, pure utils
-│       ├── __init__.py
-│       └── types.py         # Price/quantity type discipline
-├── alembic/                 # DB migrations (deployment artifact, not runtime code)
-│   ├── env.py
-│   └── versions/
-├── alembic.ini
-├── frontend/                # React application
-│   ├── src/
-│   └── package.json
-├── scripts/                 # Operational scripts
-│   ├── run_backtest.py      # CLI backtest runner
-│   └── run_live.py          # TradingNode launcher
+│   │   └── engine.py        # make_engine() + run_single_backtest() helpers
+│   ├── core/                # Type aliases, constants, instruments, pure utils
+│   │   ├── constants.py
+│   │   ├── instruments.py
+│   │   └── utils.py
+│   ├── actors/              # Custom NT Actors (planned — Phase 2+)
+│   ├── api/                 # FastAPI application (planned — Phase 2+)
+│   ├── persistence/         # Database layer (planned — Phase 2+)
+│   └── config/              # Pydantic Settings (planned — Phase 2+)
 ├── notebooks/               # Jupyter exploration & prototyping
+│   ├── 01_verify_pipeline.ipynb
+│   ├── 02_backtest_ema_cross.ipynb
+│   ├── ...
+│   └── charts.py            # Plotting helpers (plotly, matplotlib, HTML reports)
+├── scripts/
+│   └── fetch_hl_candles.py  # Hyperliquid OHLCV data fetcher
 ├── data/                    # ParquetDataCatalog root (gitignored)
+├── reports/                 # Generated HTML backtest reports (gitignored)
 ├── tests/
 │   ├── unit/
-│   ├── integration/
-│   └── conftest.py
+│   │   └── test_core.py
+│   └── integration/         # (planned)
+├── alembic/                 # DB migrations (Phase 2+)
+├── frontend/                # React application (Phase 2+)
 ├── pyproject.toml
-├── CLAUDE.md
 ├── docker-compose.yml       # PostgreSQL + TimescaleDB + Redis
+├── CLAUDE.md
 └── README.md
 ```
 
@@ -127,7 +113,7 @@ api/                        ← outermost layer, can import from anything
 ```bash
 # Clone
 git clone <repo-url>
-cd nautilus-platform
+cd NTP
 
 # Python environment
 python -m venv .venv
