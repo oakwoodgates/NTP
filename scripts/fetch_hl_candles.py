@@ -179,13 +179,11 @@ def clean_catalog_data(bar_type_str: str) -> None:
     NT's catalog directory naming has changed across versions, so we glob
     for any directory containing the bar type string to be safe.
     """
-    data_dir = CATALOG_PATH / "data"
-    if not data_dir.exists():
+    bar_dir = CATALOG_PATH / "data" / "bar"
+    if not bar_dir.exists():
         return
 
-    # NT may use "bar-{bar_type_str}" or "bar_{bar_type_str}" or other
-    # separators depending on version. Glob broadly, match narrowly.
-    for path in data_dir.iterdir():
+    for path in bar_dir.iterdir():
         if path.is_dir() and bar_type_str in path.name:
             shutil.rmtree(path)
             print(f"  Cleaned: {path.name}")
