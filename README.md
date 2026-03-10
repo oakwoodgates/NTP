@@ -1,18 +1,18 @@
 # Nautilus Trading Platform
 
-A crypto algorithmic trading platform built on [NautilusTrader](https://nautilustrader.io/), with a FastAPI gateway and React frontend for backtest analysis, live monitoring, and strategy management.
+A crypto algorithmic trading platform built on [NautilusTrader](https://nautilustrader.io/), with custom Actors for persistence and alerting, Grafana for monitoring, and a FastAPI + React frontend planned for Phase 3.
 
 ## Architecture
 
-**Modular monolith, event-driven.** NautilusTrader is the core engine (installed as a pip dependency). Everything else — API, frontend, persistence, bridging — is custom code that orchestrates NT.
+**Modular monolith, event-driven.** NautilusTrader is the core engine (installed as a pip dependency). Everything else — Actors, persistence, alerting, API, frontend — is custom code that orchestrates NT.
 
 ```
-┌─────────────────────────────────────────────────────┐
+┌─────────────────────────────────────────────────────┐  Phase 3
 │                  React Frontend                      │
 │   TradingView charts · Strategy rankings · P&L      │
 └──────────────────────┬──────────────────────────────┘
                        │ REST + WebSocket
-┌──────────────────────┴──────────────────────────────┐
+┌──────────────────────┴──────────────────────────────┐  Phase 3
 │                  FastAPI Gateway                      │
 │   Backtest triggers · Results API · Live streaming   │
 └──────┬───────────────────────────────────┬──────────┘
@@ -21,10 +21,9 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │   PostgreSQL    │              │      Redis          │
 │  + TimescaleDB  │              │  Cache + Pub/Sub    │
 │                 │              │                     │
-│ Backtest results│              │ Live state (NT)     │
-│ Trade history   │              │ Event streaming     │
-│ Strategy meta   │              │ Frontend bridge     │
-│ OHLCV (query)   │              │                     │
+│ Fills, positions│              │ Live state (NT)     │
+│ Account history │              │ Event streaming     │
+│ Strategy meta   │              │ (Phase 3 bridge)    │
 └──────┬──────────┘              └─────────┬──────────┘
        │                                   │
 ┌──────┴───────────────────────────────────┴──────────┐
@@ -35,15 +34,29 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │  Exchange Adapters (Hyperliquid, Binance, Bybit...)  │
 │  ParquetDataCatalog · FillModel · Portfolio          │
 └─────────────────────────────────────────────────────┘
+       │ writes                   │ alerts
+┌──────┴──────────┐    ┌──────────┴──────────┐
+│ PersistenceActor│    │    AlertActor        │  Phase 2
+│ (inside node)   │    │   (inside node)      │
+└─────────────────┘    └─────────────────────┘
+                                 │ Telegram
+┌──────────────────┐
+│     Grafana      │  Phase 2 — reads PostgreSQL
+│  Balance · PnL   │  Not locked in
+│  Fills · Stats   │
+└──────────────────┘
 ```
 
 ### Key Design Decisions
 
 - **NT as a library, not a fork.** We subclass `Strategy`, `Actor`, configure engines, call `node.run()`. NT's repo is never modified.
-- **PostgreSQL + TimescaleDB** for all persistent data. Prices stored as `NUMERIC` or integer (smallest unit) — never floats.
-- **Redis** for real-time layer. NT uses it natively for cache; we add pub/sub for bridging trade events to the frontend.
+- **Actors are the extension point.** `PersistenceActor` and `AlertActor` live inside the TradingNode process, subscribe to NT's MessageBus, and do the work (DB writes, Telegram) via `create_task()` — never blocking the event loop.
+- **PostgreSQL + TimescaleDB** for all persistent data. Prices stored as `NUMERIC` — never floats.
+- **Redis** for real-time layer. NT uses it natively for cache; we add a `StreamingActor` in Phase 3 for bridging trade events to the frontend.
 - **NT's ParquetDataCatalog** for feeding historical data to the backtester. Coexists with TimescaleDB (Parquet for NT, TimescaleDB for API queries).
-- **Event-driven everywhere.** NT's MessageBus is the backbone. Custom Actors bridge events to persistence and frontend. No polling loops.
+- **Grafana for ambient monitoring** in Phase 2. Reads PostgreSQL directly. Not locked in — replace with any tool at any time without touching the persistence layer.
+- **Backend before UI.** Phase 2 delivers paper and live trading with full persistence and alerting. The custom React frontend is Phase 3, built against real data from Phase 2 runs instead of theoretical event shapes.
+- **Event-driven everywhere.** NT's MessageBus is the backbone. Custom Actors bridge events to persistence and the frontend. No polling loops.
 
 ## Project Structure
 
@@ -52,33 +65,43 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │   ├── strategies/          # NT Strategy subclasses
 │   │   ├── ema_cross.py
 │   │   ├── ...
+│   ├── actors/              # Custom NT Actors
+│   │   ├── persistence.py   # PersistenceActor — writes fills/positions to PostgreSQL
+│   │   └── alert.py         # AlertActor — Telegram notifications
 │   ├── backtesting/         # Backtest orchestration
 │   │   └── engine.py        # make_engine() + run_single_backtest() helpers
-│   ├── core/                # Type aliases, constants, instruments, pure utils
-│   │   ├── constants.py
-│   │   ├── instruments.py
-│   │   └── utils.py
-│   ├── actors/              # Custom NT Actors (planned — Phase 2+)
-│   ├── api/                 # FastAPI application (planned — Phase 2+)
-│   ├── persistence/         # Database layer (planned — Phase 2+)
-│   └── config/              # Pydantic Settings (planned — Phase 2+)
+│   ├── persistence/         # SQLAlchemy Core table definitions (no ORM)
+│   │   └── schema.py
+│   ├── config/              # Pydantic Settings
+│   │   └── settings.py      # get_settings() — single source of truth
+│   ├── api/                 # FastAPI application (Phase 3)
+│   └── core/                # Type aliases, constants, instruments, pure utils
+│       ├── constants.py
+│       ├── instruments.py
+│       └── utils.py
+├── grafana/
+│   ├── provisioning/        # Declarative datasource + dashboard config
+│   └── dashboards/          # Dashboard JSON (committed)
 ├── notebooks/               # Jupyter exploration & prototyping
 │   ├── 01_verify_pipeline.ipynb
 │   ├── 02_backtest_ema_cross.ipynb
 │   ├── ...
 │   └── charts.py            # Plotting helpers (plotly, matplotlib, HTML reports)
 ├── scripts/
-│   └── fetch_hl_candles.py  # Hyperliquid OHLCV data fetcher
+│   ├── fetch_hl_candles.py  # Hyperliquid OHLCV data fetcher
+│   ├── run_sandbox.py       # Paper trading runner (SandboxExecutionClient)
+│   └── run_live.py          # Live trading runner (HyperliquidExecClient)
 ├── data/                    # ParquetDataCatalog root (gitignored)
 ├── reports/                 # Generated HTML backtest reports (gitignored)
 ├── tests/
 │   ├── unit/
 │   │   └── test_core.py
-│   └── integration/         # (planned)
-├── alembic/                 # DB migrations (Phase 2+)
-├── frontend/                # React application (Phase 2+)
+│   └── integration/
+├── alembic/                 # DB migrations
+├── frontend/                # React application (Phase 3)
 ├── pyproject.toml
-├── docker-compose.yml       # PostgreSQL + TimescaleDB + Redis
+├── docker-compose.yml       # PostgreSQL + TimescaleDB + Redis + Grafana
+├── .env.example             # Secrets template (committed)
 ├── CLAUDE.md
 └── README.md
 ```
@@ -102,36 +125,46 @@ api/                        ← outermost layer, can import from anything
 ## Prerequisites
 
 - Python 3.12+ (NT requirement)
-- Node.js 18+ (frontend — Phase 2)
-- Docker + Docker Compose (PostgreSQL + TimescaleDB, Redis — Phase 2)
-- A Hyperliquid wallet private key (for live/paper trading — Phase 3)
+- Docker + Docker Compose (PostgreSQL + TimescaleDB, Redis, Grafana)
+- Node.js 18+ (frontend — Phase 3)
+- A Hyperliquid wallet private key (for live/paper trading)
 
 ## Setup
 
-### Phase 1 (current) — NT native workflow
+### Phase 1 (complete) — NT native workflow
 
 ```bash
-# Clone
 git clone <repo-url>
 cd NTP
-
-# Python environment
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
-
-# Launch Jupyter
 jupyter notebook notebooks/
 ```
 
-### Phase 2+ — Full stack
+### Phase 2 (current) — Paper + live trading
 
 ```bash
 # Infrastructure
-docker compose up -d  # PostgreSQL+TimescaleDB on 5432, Redis on 6379
+cp .env.example .env
+# Edit .env — fill in POSTGRES_PASSWORD, TELEGRAM_TOKEN, HL credentials
+docker compose up -d
 
-# Database migrations
+# Migrations
 alembic upgrade head
+
+# Paper trading
+python scripts/run_sandbox.py
+
+# Monitoring
+open http://localhost:3000   # Grafana (admin / your GRAFANA_PASSWORD)
+```
+
+### Phase 3+ — Full stack
+
+```bash
+# API server
+uvicorn src.api.main:app --reload --port 8000
 
 # Frontend
 cd frontend
@@ -145,41 +178,42 @@ npm run dev
 
 Open a notebook in `notebooks/`, load data into NT's ParquetDataCatalog, configure a BacktestEngine, and iterate on Strategy subclasses. Results are in-memory DataFrames — plot with matplotlib/plotly, generate HTML tearsheets.
 
-### Run a backtest via CLI (Phase 2+)
+### Run paper trading (Phase 2)
 
 ```bash
-python scripts/run_backtest.py \
-  --strategy ema_cross \
-  --instrument BTC-USD-PERP.HYPERLIQUID \
-  --start 2024-01-01 \
-  --end 2024-12-31
+python scripts/run_sandbox.py
 ```
 
-### Start the API server (Phase 2+)
+Uses NT's `SandboxExecutionClient` against live Hyperliquid market data. Every fill and closed position persists to PostgreSQL via `PersistenceActor`. Telegram alerts fire on fills and position changes. Monitor at `http://localhost:3000`.
+
+### Run live trading (Phase 2 — after paper validation)
+
+```bash
+# Requires HL_TESTNET=false in .env — set explicitly
+python scripts/run_live.py
+```
+
+### Start the API server (Phase 3)
 
 ```bash
 uvicorn src.api.main:app --reload --port 8000
-```
-
-### Start a live/paper trading node (Phase 3)
-
-```bash
-python scripts/run_live.py --config configs/paper_btc.toml
 ```
 
 ## Development Phases
 
 | Phase | Focus | Status |
 |-------|-------|--------|
-| 1 | Strategy development + backtesting (NT native workflow) | 🟡 Active |
-| 2 | Frontend + API + persistence layer | ⬜ Planned |
-| 3 | Paper trading + live trading | ⬜ Planned |
+| 1 | Strategy development + backtesting (NT native workflow, Jupyter) | ✅ Complete |
+| 2 | TradingNode deployment, PersistenceActor, AlertActor, paper + live trading | 🟡 Active |
+| 3 | StreamingActor + FastAPI gateway + React frontend | ⬜ Planned |
 | 4 | ML integration (entry/exit timing) | ⬜ Planned |
-| 5 | Experimental (LSTM, LLM, sentiment) | ⬜ Planned |
+| 5 | Experimental (LSTM, LLM, sentiment, RL) | ⬜ Planned |
 
 ## Key Constraints
 
 - **NautilusTrader is pre-v2.0** — pin the version, expect API breakage between releases.
-- **No floats for prices** — NT uses 128-bit fixed-point. Maintain this in PostgreSQL (`NUMERIC`), API responses (string-encoded decimals), and frontend.
+- **No floats for prices** — NT uses 128-bit fixed-point. Maintain this in PostgreSQL (`NUMERIC`), asyncpg inserts (`str(nt_type)`), API responses (string-encoded decimals), and frontend.
+- **Actor callbacks must never block** — use `self.create_task()` for all I/O. Blocking the event loop stalls the TradingNode.
+- **TradingNode is not Jupyter-compatible** — asyncio event loop conflicts. Run from scripts, not notebooks.
 - **The "NT + web dashboard" pattern has no community precedent.** When stuck, read NT source code — docs and community posts won't cover integration patterns.
 - **LGPL-3.0 license** — NT can be used as a library without affecting your project's license, but modifications to NT's own source must be shared.

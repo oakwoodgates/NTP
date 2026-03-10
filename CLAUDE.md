@@ -2,7 +2,7 @@
 
 ## What This Project Is
 
-A crypto algorithmic trading platform. NautilusTrader (NT) is the core engine, installed as a pip dependency. We build everything around it: FastAPI API, React frontend, PostgreSQL persistence, Redis event bridging.
+A crypto algorithmic trading platform. NautilusTrader (NT) is the core engine, installed as a pip dependency. We build everything around it: custom Actors for persistence and alerting, a FastAPI gateway (Phase 3), React frontend (Phase 3), PostgreSQL persistence, Redis event bridging (Phase 3).
 
 This is a solo-developer hobby project with production-grade ambitions. The developer is a senior software engineer who is technically strong, opinionated about architecture, and hates fighting frameworks.
 
@@ -14,22 +14,29 @@ NT uses 128-bit fixed-point integers internally (`Price`, `Quantity`, `Money` ty
 - **API responses:** String-encoded decimals (`"0.00123456"`) or integer smallest-unit. Never JSON floats.
 - **Python code:** Use `Decimal` from stdlib or NT's native types. Never `float` for financial values.
 - **Frontend:** String or BigNumber library. Never JavaScript `Number` for prices.
+- **asyncpg inserts:** Convert NT types to `str` before passing to asyncpg for NUMERIC columns. `str(event.last_px)` not `float(event.last_px)`.
 
 ### Event-Driven, Not Polling
 NT is event-driven (Actor model, MessageBus pub/sub). All custom code must follow this pattern:
 - Custom Actors subscribe to events on the MessageBus.
 - No `while True: sleep(1)` loops for checking state.
-- WebSocket push to frontend, not REST polling.
+- WebSocket push to frontend, not REST polling (Phase 3).
 
 ### Don't Fight NautilusTrader
 NT is the framework. Work with its patterns:
 - Subclass `Strategy` for trading logic. Use its callbacks: `on_start()`, `on_bar()`, `on_quote_tick()`, `on_order_filled()`, etc.
-- Subclass `Actor` for non-trading components (persistence, streaming, monitoring).
+- Subclass `Actor` for non-trading components (persistence, alerting, streaming).
 - Use `MessageBus` pub/sub for inter-component communication.
 - Use NT's native types (`InstrumentId`, `BarType`, `Price`, `Quantity`, `OrderSide`, etc.) — don't reinvent.
 - Use NT's `ParquetDataCatalog` for feeding backtests — don't build a custom data loader that bypasses it.
 - Use NT's `BacktestEngine` (low-level) or `BacktestNode` (high-level) — don't write your own backtesting loop.
 - Use NT's `RiskEngine` and trading states (`ACTIVE`, `REDUCING`, `HALTED`) — don't build a parallel risk system.
+
+### Actor Callbacks Must Never Block
+NT's MessageBus dispatches events synchronously on a single thread. Any blocking operation in an Actor callback (`on_order_filled`, `on_position_closed`, timer callbacks) stalls the entire TradingNode.
+- All I/O (database writes, HTTP requests) must use `self.create_task(coroutine)`.
+- Never `await` directly in a callback method.
+- Never call `asyncio.run()` or `loop.run_until_complete()` from inside a callback.
 
 ### Pin NT Version
 NT is pre-v2.0 with breaking changes between releases. The version is pinned in `pyproject.toml`. Never upgrade without testing in a branch first.
@@ -67,7 +74,7 @@ Rules:
 ## Architecture Context
 
 ```
-React Frontend ←WebSocket/REST→ FastAPI Gateway
+React Frontend ←WebSocket/REST→ FastAPI Gateway        ← Phase 3
                                       ↕
                               PostgreSQL+TimescaleDB (persistence)
                               Redis (cache + pub/sub)
@@ -79,6 +86,9 @@ React Frontend ←WebSocket/REST→ FastAPI Gateway
                                       ↕
                               ParquetDataCatalog (backtest data)
                               Exchange APIs (Hyperliquid, Binance, etc.)
+
+Grafana ←SQL→ PostgreSQL                               ← Phase 2 monitoring
+Telegram ←HTTP→ AlertActor (inside TradingNode)        ← Phase 2 alerting
 ```
 
 ### What NT Provides (don't rebuild)
@@ -87,33 +97,39 @@ React Frontend ←WebSocket/REST→ FastAPI Gateway
 - RiskEngine intercepting every order before execution
 - HALTED trading state (kill switch — all orders denied except cancels)
 - Exchange adapters for Binance (Spot/Futures), Bybit, Hyperliquid, Interactive Brokers, dYdX, Kraken, OKX, and others
+- Sandbox execution adapter for paper trading against live data (SandboxExecutionClient)
 - Redis cache integration (positions, orders, account state)
 - Portfolio analyzer (Sharpe, Sortino, drawdown, profit factor, win rate) — Rust-ported
 - Built-in indicators (EMA, SMA, MACD, Ichimoku, etc.)
 - Execution reconciliation on startup (crash recovery)
 - HTML tearsheet generation
-- Sandbox execution adapter for paper trading against live data
 
 ### What We Build (NT doesn't provide)
-- **FastAPI gateway:** REST endpoints for triggering backtests, querying results, managing strategies. WebSocket endpoints for live trade streaming.
-- **React frontend:** TradingView Lightweight Charts with buy/sell overlays, strategy comparison tables, equity curves, P&L dashboards.
-- **Persistence layer:** Write NT's in-memory backtest results (DataFrames, stats dicts) to PostgreSQL+TimescaleDB. Custom Actors to persist live trade events.
-- **Redis pub/sub bridge:** Custom Actor subscribes to NT MessageBus events, publishes to Redis pub/sub. FastAPI reads Redis pub/sub, pushes to frontend via WebSocket.
-- **Data pipeline:** Convert existing OHLCV data (from a separate ingestion platform) into NT's ParquetDataCatalog format.
+- **PersistenceActor:** custom Actor inside TradingNode that subscribes to NT MessageBus events and writes fills, positions, and account snapshots to PostgreSQL.
+- **AlertActor:** custom Actor inside TradingNode that sends Telegram notifications on fills, position changes, and drawdown threshold breaches.
+- **Grafana dashboards:** ambient monitoring reading from PostgreSQL. Not locked in — data is in PostgreSQL and accessible to any tool.
+- **FastAPI gateway (Phase 3):** REST endpoints for querying results, managing strategies. WebSocket endpoints for live trade streaming.
+- **StreamingActor (Phase 3):** bridges NT MessageBus to Redis Streams for external consumers (FastAPI WebSocket handler). Deferred until Phase 3 because there is no external consumer until then.
+- **React frontend (Phase 3):** TradingView Lightweight Charts with buy/sell overlays, strategy comparison tables, equity curves, P&L dashboards.
+- **Data pipeline:** converts existing OHLCV data into NT's ParquetDataCatalog format.
 
 ## Tech Stack
 
 | Component | Technology | Notes |
 |-----------|-----------|-------|
 | Trading engine | NautilusTrader | Pinned version, pip dependency |
-| API | FastAPI + asyncpg | Async everywhere |
-| Database | PostgreSQL 16 + TimescaleDB | Hypertables for time-series |
-| Cache/Pub-sub | Redis | NT native cache + custom pub/sub |
-| Backtest data | NT ParquetDataCatalog | Parquet files on disk |
-| Frontend | React + TradingView Lightweight Charts | Vite build |
-| Indicators | NT built-in + TA-Lib or pandas-ta | C core / Numba accelerated |
+| Persistence | asyncpg → PostgreSQL 16 + TimescaleDB | Actors write directly via asyncpg pool |
 | Migrations | Alembic | |
-| Process mgmt | systemd (production) | For TradingNode long-running process |
+| Cache | Redis | NT native cache (positions, orders, account state) |
+| Pub/sub bridge | Redis Streams via StreamingActor | Phase 3 — deferred |
+| Alerting | Telegram Bot API via AlertActor | aiohttp inside TradingNode |
+| Monitoring | Grafana | Reads PostgreSQL; not locked in |
+| Backtest data | NT ParquetDataCatalog | Parquet files on disk |
+| API | FastAPI + asyncpg | Phase 3 |
+| Frontend | React + TradingView Lightweight Charts | Phase 3 |
+| Indicators | NT built-in + TA-Lib or pandas-ta | C core / Numba accelerated |
+| Process mgmt | Docker Compose (infra) + venv (TradingNode, dev) | |
+| Config | Pydantic Settings | Single settings.py, env var overrides, .env file |
 
 ## Code Conventions
 
@@ -122,25 +138,36 @@ React Frontend ←WebSocket/REST→ FastAPI Gateway
 - **asyncpg** for database access (not SQLAlchemy ORM — too much overhead for time-series queries). SQLAlchemy Core is acceptable for schema definition and migrations.
 - **Decimal or NT native types** for all financial values in Python code.
 - **NUMERIC** columns in PostgreSQL for all financial values.
+- **str(nt_type) for asyncpg inserts** — `str(event.last_px)` produces `"65432.1"` which asyncpg handles as NUMERIC. Never float().
 - **JSONB columns** for strategy parameters (schema flexibility).
 - **Every table includes `strategy_id`** for multi-strategy support.
-- **ISO 8601 timestamps with timezone** everywhere. NT uses nanosecond-resolution Unix timestamps internally.
+- **Every table includes `run_id`** (UUID) for grouping rows by TradingNode run.
+- **ISO 8601 timestamps with timezone** everywhere. NT uses nanosecond-resolution Unix timestamps internally — convert with `datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc)`.
 
 ## Project Structure
 
 ```
 src/
 ├── strategies/       # NT Strategy subclasses (trading logic)
-├── actors/           # NT Actor subclasses (persistence bridge, streaming bridge)
-├── api/              # FastAPI app, routes, WebSocket handlers
-├── persistence/      # DB schemas, repositories (no migrations — those are in alembic/)
+├── actors/           # NT Actor subclasses (persistence, alerting)
+│   ├── persistence.py    # PersistenceActor — writes to PostgreSQL
+│   └── alert.py          # AlertActor — Telegram notifications
+├── api/              # FastAPI app, routes, WebSocket handlers (Phase 3)
+├── persistence/      # DB schemas (SQLAlchemy Core), no migrations
 ├── backtesting/      # Backtest orchestration (wraps NT's BacktestEngine/Node)
-├── config/           # Pydantic Settings model (single settings.py, env var overrides)
+├── config/           # Pydantic Settings model
+│   └── settings.py       # get_settings() — single source of truth
 └── core/             # TIGHT SCOPE: type aliases, constants, interface protocols, pure utils
 alembic/              # Alembic migrations (deployment artifact, not runtime code)
 alembic.ini           # Alembic config
-frontend/             # React application
-scripts/              # Data pipeline (fetch_hl_candles.py); CLI runners planned for Phase 2+
+grafana/
+├── provisioning/     # Declarative datasource + dashboard provisioning (committed)
+└── dashboards/       # Dashboard JSON files (committed)
+frontend/             # React application (Phase 3)
+scripts/
+├── fetch_hl_candles.py   # Hyperliquid OHLCV data fetcher
+├── run_sandbox.py        # Paper trading runner (SandboxExecutionClient)
+└── run_live.py           # Live trading runner (HyperliquidExecClient)
 notebooks/            # Jupyter prototyping + charts.py plotting helpers
 data/                 # ParquetDataCatalog root (gitignored)
 reports/              # Generated HTML backtest reports (gitignored)
@@ -149,52 +176,70 @@ tests/                # unit/ and integration/
 
 ## Development Phases
 
-**Phase 1 (current):** Strategy development + backtesting using NT's native workflow. Jupyter notebooks, BacktestEngine, in-memory results, matplotlib/plotly charts, HTML tearsheets. No custom infrastructure — learn NT's patterns first.
-**Phase 2:** Frontend + API + persistence. FastAPI gateway, React frontend, PostgreSQL+TimescaleDB for backtest result storage.
-**Phase 3:** Paper trading (NT Sandbox mode) + live trading (NT TradingNode). Redis event bridge to frontend.
+**Phase 1 (complete):** Strategy development + backtesting using NT's native workflow. Jupyter notebooks, BacktestEngine, in-memory results, matplotlib/plotly charts, HTML tearsheets. No custom infrastructure — learn NT's patterns first.
+
+**Phase 2 (current):** Deploy TradingNode, write PersistenceActor and AlertActor, paper trade via NT's Sandbox adapter, validate all fills and positions write to PostgreSQL, monitor via Grafana and Telegram. No FastAPI, no frontend. Backend before UI. Build the UI against real live data in Phase 3.
+
+**Phase 3:** StreamingActor (Redis Streams bridge) + FastAPI gateway + React frontend. Build the web product against real data from Phase 2 paper trading runs. WebSocket streaming from live TradingNode to browser.
+
 **Phase 4:** ML integration — feature engineering, model training, inference in strategy callbacks.
+
 **Phase 5:** Experimental — LSTM, LLM sentiment, RL agents.
 
 ## Common Tasks
 
-### Phase 1 workflow (current)
+### Phase 1 workflow (backtesting)
 1. Load OHLCV data into NT's `ParquetDataCatalog` (one-time conversion script).
-2. In a Jupyter notebook: configure `BacktestEngine` (venue, instrument, fees, fill model). Use `backtesting/engine.py` helpers (`make_engine()`, `run_single_backtest()`) to avoid boilerplate, or configure manually for custom setups.
+2. In a Jupyter notebook: configure `BacktestEngine` (venue, instrument, fees, fill model). Use `backtesting/engine.py` helpers (`make_engine()`, `run_single_backtest()`) to avoid boilerplate.
 3. Write or tweak a `Strategy` subclass.
 4. Run the backtest, inspect DataFrames (`generate_orders_report()`, `generate_positions_report()`).
 5. For analyzer stats: `analyzer.calculate_statistics(account, positions)` where `account = engine.cache.account_for_venue(venue)` and `positions = engine.cache.position_snapshots() + engine.cache.positions()`.
-6. Plot with `notebooks/charts.py`: `plot_ohlcv_with_indicators()` for price+indicator charts, `plot_equity_curve()` for equity curves. Also supports raw matplotlib/plotly.
-7. Generate reports: NT's built-in HTML tearsheet, or `generate_backtest_html()` from `charts.py` for interactive TradingView-style reports with OHLCV + trade overlays.
+6. Plot with `notebooks/charts.py`.
+7. Generate HTML tearsheets with `generate_backtest_html()`.
 8. Set `log_level` to `"ERROR"` in `LoggingConfig` to avoid stdout flooding.
+
+### Phase 2 workflow (paper trading)
+1. Start infrastructure: `docker compose up -d`
+2. Run migrations: `alembic upgrade head`
+3. Start paper trading: `python scripts/run_sandbox.py`
+4. Verify Telegram alert fires on first fill.
+5. Verify `order_fills` table has rows after first fill: `SELECT COUNT(*) FROM order_fills;`
+6. Open Grafana at `http://localhost:3000` — check balance and fill panels.
+7. Let it run. Check daily. After 2+ weeks with stable behavior, proceed to live.
 
 ### Adding a new strategy
 1. Create a new file in `src/strategies/`.
 2. Subclass `nautilus_trader.trading.strategy.Strategy`.
 3. Implement `on_start()`, `on_bar()` (or `on_quote_tick()`), and order management callbacks.
-4. Register it in the backtest runner config or TradingNode config.
+4. Add it to the runner script config (`run_sandbox.py` or `run_live.py`).
 
 ### Running a backtest
-**Phase 1:** Directly in Jupyter notebooks using `BacktestEngine`. Results are in-memory DataFrames and stats dicts.
-**Phase 2+:** Use a CLI runner script (to be created) or the FastAPI endpoint. Results persisted to PostgreSQL.
+**Phase 1/2:** Directly in Jupyter notebooks using `BacktestEngine`. Results are in-memory DataFrames and stats dicts.
+**Phase 3+:** FastAPI endpoint. Results persisted to PostgreSQL.
 
-### Adding a new API endpoint (Phase 2+)
+### Adding a new API endpoint (Phase 3+)
 1. Create or modify a router in `src/api/routes/`.
 2. Use asyncpg for database queries.
 3. Return Pydantic models with string-encoded decimals for financial values.
 
-### Bridging NT events to the frontend (Phase 2+)
-The `StreamingActor` (in `src/actors/streaming.py`) subscribes to NT MessageBus events and publishes to Redis pub/sub. The FastAPI WebSocket handler reads from Redis pub/sub and pushes to connected clients.
+### Bridging NT events to the frontend (Phase 3)
+The `StreamingActor` (in `src/actors/streaming.py`) subscribes to NT MessageBus events and publishes to Redis Streams. The FastAPI WebSocket handler reads from Redis Streams and pushes to connected clients. This is deliberately deferred to Phase 3.
 
 ## Gotchas and Warnings
 
 - **NT logging in Jupyter:** NT exceeds Jupyter's stdout rate limits, causing notebooks to hang. Set `log_level` to `"ERROR"` or `"WARNING"` in `LoggingConfig`.
+- **TradingNode is not Jupyter-compatible.** Running a `TradingNode` inside a notebook causes asyncio event loop conflicts. The TradingNode is a long-running blocking process — run it from `scripts/run_sandbox.py` or `scripts/run_live.py` in a terminal, not a notebook.
 - **NT community is small (~5K Discord).** The "NT + web dashboard" pattern is unprecedented. When stuck, read NT source code directly — don't expect blog posts or SO answers.
 - **NT doesn't use CCXT.** It has its own exchange adapters. If a target exchange isn't supported, you'd need to write a custom adapter.
-- **Backtest results are in-memory only.** NT's `engine.trader.generate_orders_report()` etc. return pandas DataFrames. The persistence layer must capture these.
-- **Expect 30-40% performance haircut** from backtest to live. If paper lags backtest by >30-40%, investigate before going live.
+- **Backtest results are in-memory only.** NT's `engine.trader.generate_orders_report()` etc. return pandas DataFrames. The persistence layer captures these for Phase 3 API queries.
+- **Expect 30-40% performance haircut** from backtest to live, and paper to live. If paper lags backtest by >30-40%, investigate before going live.
 - **Slippage modeling matters.** Configure NT's `FillModel`: 0.05-0.1% for top-10 coins, 0.5-2% outside top 100, 5-10% for microcaps.
-- **NETTING mode position stats:** `cache.positions()` returns only the current Position object per instrument-strategy pair — NOT all historical positions. Closed positions are stored as snapshots. For correct analyzer stats, use `cache.position_snapshots() + cache.positions()` when calling `analyzer.calculate_statistics(account, positions)`. Without this, Win Rate, Long Ratio, Sharpe, and all position-level stats will be wrong.
-- **`analyzer.returns()` requires `calculate_statistics()` first.** `returns()` is a getter for an internal Series that starts empty. It only gets populated when `calculate_statistics()` processes positions. Call `calculate_statistics()` immediately after `engine.run()`, before any plotting or stats access.
+- **NETTING mode position stats:** `cache.positions()` returns only the current Position object per instrument-strategy pair — NOT all historical positions. Closed positions are stored as snapshots. For correct analyzer stats, use `cache.position_snapshots() + cache.positions()`.
+- **`analyzer.returns()` requires `calculate_statistics()` first.** Call `calculate_statistics()` immediately after `engine.run()`, before any plotting or stats access.
+- **Actor callbacks must never block.** Use `self.create_task()` for all I/O. Awaiting directly in `on_order_filled` or similar callbacks will stall the TradingNode.
+- **asyncpg pool creation must happen inside the event loop.** Create the pool in `on_start()` via `self.create_task(self._init_pool())`, not in `__init__`.
+- **NT financial types to PostgreSQL NUMERIC:** Always `str(event.last_px)`, never `float(event.last_px)`. asyncpg accepts strings for NUMERIC columns and preserves precision.
+- **HL_TESTNET defaults to True.** `run_live.py` requires explicitly setting `HL_TESTNET=false` in `.env` to trade on mainnet. Intentional friction.
 
 ## Communicating with This Developer
 
