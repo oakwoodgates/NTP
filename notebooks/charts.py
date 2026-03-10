@@ -19,6 +19,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import json
+import math
+import textwrap
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -867,3 +873,899 @@ def plot_pnl_heatmap(
     fig.colorbar(im, ax=ax, label=f"{value_col} (USDC)")
     plt.tight_layout()
     plt.show()
+
+
+"""
+charts.py  —  Visualisation helpers for NautilusTrader backtest notebooks.
+
+Public API
+----------
+plot_ema_cross(bars, fills_report, *, fast_period, slow_period,
+               instrument_label, bar_label) -> go.Figure
+    Plotly interactive candlestick with EMA overlay + trade markers.
+    Renders inside Jupyter with .show(). Returns Figure for further use.
+
+generate_backtest_html(bars, fills_report, positions_report, *,
+                       fast_period, slow_period, instrument_label,
+                       bar_label, starting_capital, output_path) -> Path
+    Self-contained HTML using TradingView Lightweight Charts.
+    Open in any browser. No server required.
+    Includes: candlestick + EMA overlay, trade markers with hover tooltip,
+    summary stats bar, and a full trade history table with click-to-zoom.
+
+NT version: 1.223.0
+Column reference
+    fills_report   : side (BUY/SELL), avg_px (float64), filled_qty (str),
+                     ts_last (pd.Timestamp), ts_init (pd.Timestamp)
+    positions_report: entry (BUY/SELL), side (LONG/SHORT/FLAT),
+                      peak_qty (str), avg_px_open (float64),
+                      avg_px_close (float64|NaN), realized_pnl (str "val CCY"),
+                      realized_return (float64), ts_opened (pd.Timestamp),
+                      ts_closed (pd.Timestamp|pd.NA)
+"""
+
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Internal helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ts_to_unix_s(ts: Any) -> int | None:
+    """Convert NT timestamp representations to Unix seconds integer."""
+    if ts is None:
+        return None
+    if isinstance(ts, pd.Timestamp):
+        return int(ts.timestamp())
+    if isinstance(ts, (int, float)):
+        if math.isnan(float(ts)):
+            return None
+        v = int(ts)
+        # NT internal timestamps are nanoseconds (> 1e15 for post-2001 dates)
+        if v > 10**15:
+            return v // 1_000_000_000
+        if v > 10**12:
+            return v // 1_000_000
+        return v
+    try:
+        return int(pd.Timestamp(ts).timestamp())
+    except Exception:
+        return None
+
+
+def _bars_to_df(bars: list) -> pd.DataFrame:
+    """Convert NT Bar list to DataFrame with unix-second time and OHLCV."""
+    rows = [
+        {
+            "time":   _ts_to_unix_s(b.ts_event),
+            "open":   float(b.open),
+            "high":   float(b.high),
+            "low":    float(b.low),
+            "close":  float(b.close),
+            "volume": float(b.volume),
+        }
+        for b in bars
+    ]
+    df = pd.DataFrame(rows).dropna(subset=["time"])
+    df["time"] = df["time"].astype(int)
+    return df.sort_values("time").reset_index(drop=True)
+
+
+def _ema_series(close: pd.Series, period: int) -> pd.Series:
+    """EMA using span=period, adjust=False — same formula NT uses internally."""
+    return close.ewm(span=period, adjust=False).mean()
+
+
+def _parse_money_str(s: Any) -> float | None:
+    """Parse NT money string '123.45 USDC' → 123.45. Returns None on failure."""
+    if s is None or str(s) in ("None", "nan", "NaT", "<NA>"):
+        return None
+    try:
+        return float(str(s).split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _fills_to_markers(fills_df: pd.DataFrame) -> tuple[list[dict], dict[int, dict]]:
+    """
+    Convert fills_report → (tvlc_markers, marker_detail_by_time).
+
+    tvlc_markers    passed to candleSeries.setMarkers() — no extra keys.
+    marker_detail   keyed by unix-seconds, holds extra data for the tooltip.
+    """
+    if fills_df is None or fills_df.empty:
+        return [], {}
+
+    tvlc_markers: list[dict] = []
+    detail: dict[int, dict] = {}
+
+    for _, row in fills_df.iterrows():
+        ts_s = _ts_to_unix_s(row.get("ts_last") or row.get("ts_init"))
+        if ts_s is None:
+            continue
+
+        side_raw = str(row.get("side", "")).upper()
+        is_buy = "BUY" in side_raw
+
+        qty_raw = row.get("filled_qty", row.get("quantity", "?"))
+        px_raw  = row.get("avg_px", "?")
+
+        try:
+            px_fmt = f"{float(px_raw):,.2f}"
+        except (ValueError, TypeError):
+            px_fmt = str(px_raw)
+
+        qty_str = str(qty_raw).rstrip("0").rstrip(".")  # "0.01000000" → "0.01"
+
+        tvlc_markers.append({
+            "time":     ts_s,
+            "position": "belowBar" if is_buy else "aboveBar",
+            "color":    "#26a69a" if is_buy else "#ef5350",
+            "shape":    "arrowUp" if is_buy else "arrowDown",
+            "text":     f"{'B' if is_buy else 'S'} {qty_str}",
+            "size":     1.5,
+        })
+
+        detail[ts_s] = {
+            "is_buy": is_buy,
+            "side":   "BUY" if is_buy else "SELL",
+            "qty":    qty_str,
+            "px":     px_fmt,
+        }
+
+    # TVLC requires markers sorted by time; deduplicate by taking last per ts
+    seen: dict[int, dict] = {}
+    for m in tvlc_markers:
+        seen[m["time"]] = m
+    tvlc_markers = sorted(seen.values(), key=lambda m: m["time"])
+
+    return tvlc_markers, detail
+
+
+def _positions_to_rows(positions_df: pd.DataFrame) -> list[dict]:
+    """Convert positions_report → list of plain dicts for the HTML trade table."""
+    if positions_df is None or positions_df.empty:
+        return []
+
+    rows: list[dict] = []
+
+    for _, row in positions_df.iterrows():
+        ts_opened = row.get("ts_opened")
+        ts_closed = row.get("ts_closed")
+
+        opened_s   = _ts_to_unix_s(ts_opened)
+        closed_s   = _ts_to_unix_s(ts_closed)
+
+        opened_str = str(ts_opened)[:19].replace("T", " ") if opened_s else "—"
+        closed_str = str(ts_closed)[:19].replace("T", " ") if closed_s else "Open"
+
+        # entry (BUY/SELL) is the directional signal; side is FLAT once closed
+        entry = str(row.get("entry", "")).upper()
+        side_label = "Long" if entry == "BUY" else "Short" if entry == "SELL" else "?"
+
+        # Quantities — peak_qty is the filled size; quantity is 0 after close
+        qty_raw = row.get("peak_qty", row.get("quantity", "?"))
+        qty_str = str(qty_raw).rstrip("0").rstrip(".")
+
+        # Prices
+        def _fmt_px(col: str) -> str:
+            v = row.get(col)
+            try:
+                fv = float(v)
+                return f"{fv:,.2f}" if not math.isnan(fv) else "—"
+            except (ValueError, TypeError):
+                return "—"
+
+        entry_px = _fmt_px("avg_px_open")
+        exit_px  = _fmt_px("avg_px_close")
+
+        # PnL — stored as string "value CURRENCY" in positions_report
+        pnl = _parse_money_str(row.get("realized_pnl"))
+
+        # Return — stored as fraction (0.05 = 5 %)
+        try:
+            ret_frac = float(row.get("realized_return", 0) or 0)
+        except (ValueError, TypeError):
+            ret_frac = 0.0
+
+        rows.append({
+            "opened":     opened_str,
+            "closed":     closed_str,
+            "opened_ts_s": opened_s or 0,
+            "side":       side_label,
+            "qty":        qty_str,
+            "entry_px":   entry_px,
+            "exit_px":    exit_px,
+            "pnl":        pnl,
+            "realized_return": ret_frac,
+        })
+
+    return rows
+
+
+def _compute_stats(position_rows: list[dict], starting_capital: float) -> dict:
+    """Derive summary statistics from position rows."""
+    pnls = [r["pnl"] for r in position_rows if r["pnl"] is not None]
+    if not pnls:
+        return {}
+
+    total_pnl   = sum(pnls)
+    winners     = [p for p in pnls if p > 0]
+    losers      = [p for p in pnls if p < 0]
+    gross_win   = sum(winners)
+    gross_loss  = abs(sum(losers))
+
+    return {
+        "total_pnl":      round(total_pnl, 4),
+        "total_pnl_pct":  round(total_pnl / starting_capital * 100, 4) if starting_capital else 0,
+        "num_trades":     len(pnls),
+        "win_rate":       round(len(winners) / len(pnls) * 100, 2),
+        "avg_win":        round(gross_win  / len(winners), 4) if winners else 0,
+        "avg_loss":       round(-gross_loss / len(losers), 4) if losers else 0,
+        "profit_factor":  round(gross_win / gross_loss, 4) if gross_loss else None,
+        "total_wins":     len(winners),
+        "total_losses":   len(losers),
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public: Plotly chart (in-notebook)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_ema_cross(
+    bars: list,
+    fills_report: pd.DataFrame,
+    *,
+    fast_period: int = 20,
+    slow_period: int  = 50,
+    instrument_label: str = "",
+    bar_label: str = "1h",
+) -> go.Figure:
+    """
+    Plotly candlestick with EMA overlay and trade markers.
+
+    Parameters
+    ----------
+    bars            NT Bar list from ParquetDataCatalog.
+    fills_report    DataFrame from engine.trader.generate_order_fills_report().
+    fast_period     Fast EMA period (for overlay line).
+    slow_period     Slow EMA period (for overlay line).
+    instrument_label  Display label for chart title.
+    bar_label       Timeframe string for chart title (e.g. "1h").
+
+    Returns
+    -------
+    go.Figure  — call .show() or pass to fig.show(config=...) in Jupyter.
+    """
+    df = _bars_to_df(bars)
+    if df.empty:
+        raise ValueError("bars is empty — nothing to plot.")
+
+    timestamps = pd.to_datetime(df["time"], unit="s", utc=True)
+    fast_ema   = _ema_series(df["close"], fast_period)
+    slow_ema   = _ema_series(df["close"], slow_period)
+
+    fig = go.Figure()
+
+    # ── Candlestick ──────────────────────────────────────────────────────────
+    fig.add_trace(go.Candlestick(
+        x=timestamps,
+        open=df["open"], high=df["high"], low=df["low"], close=df["close"],
+        name="Price",
+        increasing_line_color="#26a69a",
+        decreasing_line_color="#ef5350",
+        increasing_fillcolor="#26a69a",
+        decreasing_fillcolor="#ef5350",
+        showlegend=False,
+    ))
+
+    # ── EMA lines ────────────────────────────────────────────────────────────
+    fig.add_trace(go.Scatter(
+        x=timestamps, y=fast_ema,
+        mode="lines", name=f"EMA {fast_period}",
+        line=dict(color="#2196f3", width=1.2),
+    ))
+    fig.add_trace(go.Scatter(
+        x=timestamps, y=slow_ema,
+        mode="lines", name=f"EMA {slow_period}",
+        line=dict(color="#ff9800", width=1.2),
+    ))
+
+    # ── Trade markers ────────────────────────────────────────────────────────
+    if fills_report is not None and not fills_report.empty:
+        buy_ts, buy_px, buy_text   = [], [], []
+        sell_ts, sell_px, sell_text = [], [], []
+
+        for _, row in fills_report.iterrows():
+            ts = row.get("ts_last") or row.get("ts_init")
+            if ts is None:
+                continue
+            ts_dt  = pd.Timestamp(ts) if not isinstance(ts, pd.Timestamp) else ts
+            side   = str(row.get("side", "")).upper()
+            px     = float(row.get("avg_px", 0))
+            qty    = str(row.get("filled_qty", "?")).rstrip("0").rstrip(".")
+            label  = f"{'BUY' if 'BUY' in side else 'SELL'} {qty} @ {px:,.2f}"
+
+            if "BUY" in side:
+                buy_ts.append(ts_dt)
+                buy_px.append(px * 0.9995)   # just below bar low for visual clarity
+                buy_text.append(label)
+            else:
+                sell_ts.append(ts_dt)
+                sell_px.append(px * 1.0005)
+                sell_text.append(label)
+
+        if buy_ts:
+            fig.add_trace(go.Scatter(
+                x=buy_ts, y=buy_px, mode="markers",
+                name="Buy", text=buy_text, hoverinfo="text+x",
+                marker=dict(symbol="triangle-up", color="#26a69a", size=10),
+            ))
+        if sell_ts:
+            fig.add_trace(go.Scatter(
+                x=sell_ts, y=sell_px, mode="markers",
+                name="Sell", text=sell_text, hoverinfo="text+x",
+                marker=dict(symbol="triangle-down", color="#ef5350", size=10),
+            ))
+
+    # ── Layout ───────────────────────────────────────────────────────────────
+    title = f"{instrument_label}  {bar_label}  — EMA {fast_period}/{slow_period}"
+    fig.update_layout(
+        title=dict(text=title, font=dict(size=14)),
+        template="plotly_dark",
+        paper_bgcolor="#131722",
+        plot_bgcolor="#131722",
+        xaxis=dict(
+            rangeslider=dict(visible=False),
+            gridcolor="#1e222d",
+            showgrid=True,
+        ),
+        yaxis=dict(gridcolor="#1e222d", showgrid=True),
+        legend=dict(
+            orientation="h", yanchor="bottom", y=1.01,
+            xanchor="left", x=0,
+        ),
+        margin=dict(l=40, r=40, t=60, b=40),
+        hovermode="x unified",
+    )
+
+    return fig
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public: self-contained TVLC HTML
+# ─────────────────────────────────────────────────────────────────────────────
+
+def generate_backtest_html(
+    bars: list,
+    fills_report: pd.DataFrame,
+    positions_report: pd.DataFrame,
+    *,
+    fast_period: int = 20,
+    slow_period: int  = 50,
+    instrument_label: str = "",
+    bar_label: str = "1h",
+    starting_capital: float = 10_000.0,
+    output_path: str | Path | None = None,
+) -> Path:
+    """
+    Generate a self-contained HTML backtest report using TradingView Lightweight Charts.
+
+    The output file requires only a browser — no server, no dependencies to install.
+
+    Parameters
+    ----------
+    bars              NT Bar list from ParquetDataCatalog.
+    fills_report      engine.trader.generate_order_fills_report()
+    positions_report  engine.trader.generate_positions_report()
+    fast_period       Fast EMA period.
+    slow_period       Slow EMA period.
+    instrument_label  Display label (e.g. "BTC-USD-PERP.HYPERLIQUID").
+    bar_label         Timeframe string (e.g. "1h").
+    starting_capital  Used for total-return % calculation.
+    output_path       Where to write the HTML file. If None, writes to
+                      backtest_<timestamp>.html in the current directory.
+
+    Returns
+    -------
+    Path  — absolute path to the generated HTML file.
+    """
+    # ── Prepare data ─────────────────────────────────────────────────────────
+    df = _bars_to_df(bars)
+    if df.empty:
+        raise ValueError("bars is empty — nothing to plot.")
+
+    ohlcv_json = json.dumps(
+        df[["time", "open", "high", "low", "close"]].to_dict(orient="records")
+    )
+
+    fast_ema_data = [
+        {"time": int(t), "value": round(v, 6)}
+        for t, v in zip(df["time"], _ema_series(df["close"], fast_period))
+        if not math.isnan(v)
+    ]
+    slow_ema_data = [
+        {"time": int(t), "value": round(v, 6)}
+        for t, v in zip(df["time"], _ema_series(df["close"], slow_period))
+        if not math.isnan(v)
+    ]
+
+    markers, marker_detail = _fills_to_markers(fills_report)
+    position_rows          = _positions_to_rows(positions_report)
+    stats                  = _compute_stats(position_rows, starting_capital)
+
+    # ── Resolve output path ──────────────────────────────────────────────────
+    if output_path is None:
+        ts_str = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+        output_path = Path(f"backtest_{ts_str}.html")
+    output_path = Path(output_path).resolve()
+
+    # ── Render template ──────────────────────────────────────────────────────
+    title    = f"Backtest — {instrument_label} {bar_label}  EMA {fast_period}/{slow_period}"
+    subtitle = (
+        f"{len(df):,} bars"
+        + (f"  ·  {stats.get('num_trades', 0)} trades" if stats else "")
+        + (f"  ·  capital {starting_capital:,.0f} USDC" if starting_capital else "")
+    )
+
+    html = _HTML_TEMPLATE.replace("__TITLE__",          title)
+    html = html.replace("__SUBTITLE__",                 subtitle)
+    html = html.replace("__FAST__",                     str(fast_period))
+    html = html.replace("__SLOW__",                     str(slow_period))
+    html = html.replace("__OHLCV_JSON__",               ohlcv_json)
+    html = html.replace("__EMA_FAST_JSON__",            json.dumps(fast_ema_data))
+    html = html.replace("__EMA_SLOW_JSON__",            json.dumps(slow_ema_data))
+    html = html.replace("__MARKERS_JSON__",             json.dumps(markers))
+    html = html.replace("__MARKER_DETAIL_JSON__",       json.dumps(marker_detail))
+    html = html.replace("__TRADES_JSON__",              json.dumps(position_rows))
+    html = html.replace("__STATS_JSON__",               json.dumps(stats))
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(html, encoding="utf-8")
+    print(f"✓ Backtest HTML written → {output_path}")
+    return output_path
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HTML template
+# ─────────────────────────────────────────────────────────────────────────────
+
+_HTML_TEMPLATE = textwrap.dedent("""\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>__TITLE__</title>
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  background: #131722;
+  color: #d1d4dc;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+header {
+  padding: 14px 20px 12px;
+  border-bottom: 1px solid #2a2e39;
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  background: #1a1e2d;
+}
+header h1 { font-size: 15px; font-weight: 600; color: #e1e4ec; }
+header .subtitle { font-size: 12px; color: #787b86; }
+
+/* ── Legend ──────────────────────────────────────────────────────────────── */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 20px;
+  padding: 8px 16px;
+  border-bottom: 1px solid #2a2e39;
+  background: #131722;
+}
+.legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #787b86; }
+.legend-line { width: 14px; height: 2px; border-radius: 1px; flex-shrink: 0; }
+.legend-arrow-up {
+  width: 0; height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-bottom: 8px solid #26a69a;
+  flex-shrink: 0;
+}
+.legend-arrow-down {
+  width: 0; height: 0;
+  border-left: 5px solid transparent;
+  border-right: 5px solid transparent;
+  border-top: 8px solid #ef5350;
+  flex-shrink: 0;
+}
+
+/* ── Chart container ─────────────────────────────────────────────────────── */
+#chart-container {
+  position: relative;
+  width: 100%;
+  height: 520px;
+  border-bottom: 1px solid #2a2e39;
+}
+#chart { width: 100%; height: 100%; }
+
+/* ── Hover tooltip ───────────────────────────────────────────────────────── */
+#tooltip {
+  position: absolute;
+  display: none;
+  background: #1e222d;
+  border: 1px solid #363a45;
+  border-radius: 4px;
+  padding: 9px 12px;
+  font-size: 12px;
+  pointer-events: none;
+  z-index: 20;
+  min-width: 155px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.5);
+}
+#tooltip .tt-time  { color: #787b86; font-size: 11px; margin-bottom: 5px; }
+#tooltip .tt-row   { display: flex; justify-content: space-between; gap: 14px; line-height: 1.7; }
+#tooltip .tt-label { color: #787b86; }
+#tooltip .tt-value { color: #d1d4dc; font-variant-numeric: tabular-nums; }
+#tooltip .tt-buy   { color: #26a69a; font-weight: 600; }
+#tooltip .tt-sell  { color: #ef5350; font-weight: 600; }
+#tooltip .tt-sep   { border: none; border-top: 1px solid #2a2e39; margin: 5px 0; }
+
+/* ── Stats bar ───────────────────────────────────────────────────────────── */
+.stats-bar {
+  display: flex;
+  flex-wrap: wrap;
+  border-bottom: 1px solid #2a2e39;
+  background: #181c2a;
+}
+.stat-cell {
+  flex: 1;
+  min-width: 110px;
+  padding: 11px 14px;
+  border-right: 1px solid #2a2e39;
+  text-align: center;
+}
+.stat-cell:last-child { border-right: none; }
+.stat-label {
+  font-size: 10px;
+  color: #787b86;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  margin-bottom: 4px;
+}
+.stat-value { font-size: 15px; font-weight: 600; color: #e1e4ec; }
+.stat-value.pos { color: #26a69a; }
+.stat-value.neg { color: #ef5350; }
+
+/* ── Trades section ──────────────────────────────────────────────────────── */
+.trades-header {
+  padding: 10px 16px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #787b86;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  border-bottom: 1px solid #2a2e39;
+  background: #181c2a;
+}
+.trades-wrap { overflow-x: auto; max-height: 420px; overflow-y: auto; }
+
+table.trades {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+table.trades thead th {
+  padding: 8px 12px;
+  text-align: left;
+  color: #787b86;
+  font-weight: 500;
+  border-bottom: 1px solid #2a2e39;
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  background: #131722;
+  z-index: 1;
+}
+table.trades thead th.r { text-align: right; }
+table.trades tbody tr {
+  border-bottom: 1px solid #1a1e2a;
+  cursor: pointer;
+  transition: background 0.08s;
+}
+table.trades tbody tr:hover  { background: #1a1e2e; }
+table.trades tbody tr.active { background: #1e2b3a; outline: 1px solid #2196f340; }
+table.trades td {
+  padding: 7px 12px;
+  white-space: nowrap;
+  color: #b2b5be;
+}
+table.trades td.r  { text-align: right; font-variant-numeric: tabular-nums; }
+table.trades td.id { color: #787b86; font-size: 11px; }
+.badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+.badge.long  { background: rgba(38,166,154,0.12); color: #26a69a; }
+.badge.short { background: rgba(239,83,80,0.12);  color: #ef5350; }
+td.pnl.pos { color: #26a69a; }
+td.pnl.neg { color: #ef5350; }
+.no-trades { padding: 28px; text-align: center; color: #787b86; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>__TITLE__</h1>
+  <span class="subtitle">__SUBTITLE__</span>
+</header>
+
+<div class="legend">
+  <div class="legend-item">
+    <div class="legend-line" style="background:#2196f3"></div>
+    <span>EMA __FAST__ (fast)</span>
+  </div>
+  <div class="legend-item">
+    <div class="legend-line" style="background:#ff9800"></div>
+    <span>EMA __SLOW__ (slow)</span>
+  </div>
+  <div class="legend-item">
+    <div class="legend-arrow-up"></div>
+    <span>Long entry</span>
+  </div>
+  <div class="legend-item">
+    <div class="legend-arrow-down"></div>
+    <span>Short entry</span>
+  </div>
+</div>
+
+<div id="chart-container">
+  <div id="chart"></div>
+  <div id="tooltip"></div>
+</div>
+
+<div class="stats-bar" id="stats-bar"></div>
+
+<div class="trades-header">
+  Trade History &mdash; <span id="trade-count">0</span> closed positions
+</div>
+<div class="trades-wrap">
+  <table class="trades">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Opened (UTC)</th>
+        <th>Closed (UTC)</th>
+        <th>Side</th>
+        <th class="r">Size</th>
+        <th class="r">Entry Px</th>
+        <th class="r">Exit Px</th>
+        <th class="r">PnL</th>
+        <th class="r">Return %</th>
+      </tr>
+    </thead>
+    <tbody id="trades-body"></tbody>
+  </table>
+</div>
+
+<script>
+// ── Injected data (serialised by Python) ─────────────────────────────────────
+const OHLCV         = __OHLCV_JSON__;
+const EMA_FAST_DATA = __EMA_FAST_JSON__;
+const EMA_SLOW_DATA = __EMA_SLOW_JSON__;
+const MARKERS       = __MARKERS_JSON__;
+const MARKER_DETAIL = __MARKER_DETAIL_JSON__;   // {unix_s_str: {is_buy,side,qty,px}}
+const TRADES        = __TRADES_JSON__;
+const STATS         = __STATS_JSON__;
+const FAST_PERIOD   = __FAST__;
+const SLOW_PERIOD   = __SLOW__;
+
+// ── Chart ─────────────────────────────────────────────────────────────────────
+const chartEl = document.getElementById('chart');
+
+const chart = LightweightCharts.createChart(chartEl, {
+  layout: {
+    background: { type: 'solid', color: '#131722' },
+    textColor: '#d1d4dc',
+  },
+  grid: {
+    vertLines: { color: '#1e222d' },
+    horzLines: { color: '#1e222d' },
+  },
+  crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+  rightPriceScale: { borderColor: '#2a2e39' },
+  timeScale: {
+    borderColor: '#2a2e39',
+    timeVisible: true,
+    secondsVisible: false,
+  },
+  handleScroll: true,
+  handleScale: true,
+});
+
+// Candlestick series
+const candleSeries = chart.addCandlestickSeries({
+  upColor:         '#26a69a', downColor:         '#ef5350',
+  borderUpColor:   '#26a69a', borderDownColor:   '#ef5350',
+  wickUpColor:     '#26a69a', wickDownColor:     '#ef5350',
+});
+candleSeries.setData(OHLCV);
+
+// Fast EMA
+const fastLine = chart.addLineSeries({
+  color: '#2196f3', lineWidth: 1,
+  priceLineVisible: false, lastValueVisible: true,
+  title: 'EMA' + FAST_PERIOD,
+});
+fastLine.setData(EMA_FAST_DATA);
+
+// Slow EMA
+const slowLine = chart.addLineSeries({
+  color: '#ff9800', lineWidth: 1,
+  priceLineVisible: false, lastValueVisible: true,
+  title: 'EMA' + SLOW_PERIOD,
+});
+slowLine.setData(EMA_SLOW_DATA);
+
+// Markers
+if (MARKERS.length > 0) {
+  candleSeries.setMarkers(MARKERS);
+}
+
+chart.timeScale().fitContent();
+
+// Resize
+const ro = new ResizeObserver(entries => {
+  if (entries.length === 0) return;
+  const { width, height } = entries[0].contentRect;
+  chart.applyOptions({ width, height });
+});
+ro.observe(chartEl);
+
+// ── Hover tooltip ─────────────────────────────────────────────────────────────
+const tooltipEl   = document.getElementById('tooltip');
+
+// Build a lookup keyed by timestamp string (MARKER_DETAIL keys are strings from JSON)
+const detailByTs  = {};
+for (const [k, v] of Object.entries(MARKER_DETAIL)) {
+  detailByTs[parseInt(k)] = v;
+}
+
+function fmtNum(n, dec = 2) {
+  if (n == null) return '—';
+  return parseFloat(n).toLocaleString('en-US', {
+    minimumFractionDigits: dec, maximumFractionDigits: dec
+  });
+}
+
+chart.subscribeCrosshairMove(param => {
+  if (!param || !param.time || !param.point) {
+    tooltipEl.style.display = 'none';
+    return;
+  }
+  const bar = param.seriesData.get(candleSeries);
+  if (!bar) { tooltipEl.style.display = 'none'; return; }
+
+  const tsMs = param.time * 1000;
+  const tsStr = new Date(tsMs).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
+  const mDetail = detailByTs[param.time];
+
+  let html = `<div class="tt-time">${tsStr}</div>`;
+  html += `<div class="tt-row"><span class="tt-label">O</span><span class="tt-value">${fmtNum(bar.open)}</span></div>`;
+  html += `<div class="tt-row"><span class="tt-label">H</span><span class="tt-value">${fmtNum(bar.high)}</span></div>`;
+  html += `<div class="tt-row"><span class="tt-label">L</span><span class="tt-value">${fmtNum(bar.low)}</span></div>`;
+  html += `<div class="tt-row"><span class="tt-label">C</span><span class="tt-value">${fmtNum(bar.close)}</span></div>`;
+
+  if (mDetail) {
+    const cls = mDetail.is_buy ? 'buy' : 'sell';
+    html += `<hr class="tt-sep">`;
+    html += `<div class="tt-row"><span class="tt-label">Signal</span><span class="tt-${cls}">${mDetail.side}</span></div>`;
+    html += `<div class="tt-row"><span class="tt-label">Qty</span><span class="tt-value">${mDetail.qty}</span></div>`;
+    html += `<div class="tt-row"><span class="tt-label">Fill px</span><span class="tt-value">${mDetail.px}</span></div>`;
+  }
+
+  tooltipEl.innerHTML = html;
+
+  // Position tooltip — flip sides at chart edge
+  const cw = chartEl.clientWidth;
+  const ttW = 165;
+  let x = param.point.x + 16;
+  let y = Math.max(0, param.point.y - 12);
+  if (x + ttW > cw) x = param.point.x - ttW - 8;
+  tooltipEl.style.left    = x + 'px';
+  tooltipEl.style.top     = y + 'px';
+  tooltipEl.style.display = 'block';
+});
+
+// ── Stats bar ──────────────────────────────────────────────────────────────────
+(function renderStats() {
+  const bar = document.getElementById('stats-bar');
+  if (!STATS || Object.keys(STATS).length === 0) { bar.style.display = 'none'; return; }
+
+  const sign = v => v > 0 ? 'pos' : (v < 0 ? 'neg' : '');
+  const pf   = STATS.profit_factor;
+  const pfStr = (pf == null) ? '—' : (pf > 999 ? '∞' : fmtNum(pf));
+
+  const cells = [
+    { label: 'Total PnL',     value: fmtNum(STATS.total_pnl),         sfx: ' USDC',  cls: sign(STATS.total_pnl) },
+    { label: 'Return',        value: fmtNum(STATS.total_pnl_pct) + '%', sfx: '',      cls: sign(STATS.total_pnl_pct) },
+    { label: 'Trades',        value: STATS.num_trades,                  sfx: '',      cls: '' },
+    { label: 'Win Rate',      value: fmtNum(STATS.win_rate, 1) + '%',   sfx: '',      cls: STATS.win_rate >= 50 ? 'pos' : 'neg' },
+    { label: 'Avg Win',       value: fmtNum(STATS.avg_win),             sfx: '',      cls: 'pos' },
+    { label: 'Avg Loss',      value: fmtNum(STATS.avg_loss),            sfx: '',      cls: 'neg' },
+    { label: 'Profit Factor', value: pfStr,                              sfx: '',      cls: (pf != null && pf >= 1) ? 'pos' : 'neg' },
+  ];
+
+  bar.innerHTML = cells.map(c =>
+    `<div class="stat-cell">
+      <div class="stat-label">${c.label}</div>
+      <div class="stat-value ${c.cls}">${c.value}${c.sfx}</div>
+    </div>`
+  ).join('');
+})();
+
+// ── Trade table ───────────────────────────────────────────────────────────────
+(function renderTrades() {
+  const tbody = document.getElementById('trades-body');
+  document.getElementById('trade-count').textContent = TRADES.length;
+
+  if (TRADES.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="9" class="no-trades">No closed positions found</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = TRADES.map((t, i) => {
+    const isLong   = t.side === 'Long';
+    const pnl      = t.pnl;
+    const pnlCls   = (pnl == null) ? '' : (pnl >= 0 ? 'pos' : 'neg');
+    const pnlStr   = (pnl == null) ? '—' : (pnl >= 0 ? '+' : '') + fmtNum(pnl);
+    const ret      = t.realized_return;
+    const retStr   = (ret == null) ? '—' : (ret >= 0 ? '+' : '') + fmtNum(ret * 100, 2) + '%';
+    const retCls   = (ret == null) ? '' : (ret >= 0 ? 'pos' : 'neg');
+
+    return `<tr data-ts="${t.opened_ts_s || 0}" onclick="scrollChart(this)">
+      <td class="id">${i + 1}</td>
+      <td>${t.opened}</td>
+      <td>${t.closed}</td>
+      <td><span class="badge ${isLong ? 'long' : 'short'}">${t.side}</span></td>
+      <td class="r">${t.qty}</td>
+      <td class="r">${t.entry_px}</td>
+      <td class="r">${t.exit_px}</td>
+      <td class="r pnl ${pnlCls}">${pnlStr}</td>
+      <td class="r pnl ${retCls}">${retStr}</td>
+    </tr>`;
+  }).join('');
+})();
+
+// ── Click table row → zoom chart to that trade ─────────────────────────────────
+function scrollChart(row) {
+  document.querySelectorAll('table.trades tr.active')
+    .forEach(r => r.classList.remove('active'));
+  row.classList.add('active');
+
+  const ts = parseInt(row.dataset.ts);
+  if (!ts || OHLCV.length < 2) return;
+
+  const barSec = OHLCV[1].time - OHLCV[0].time;   // bar duration in seconds
+  const window = barSec * 60;                       // show 60 bars around trade
+
+  chart.timeScale().setVisibleRange({
+    from: ts - window / 2,
+    to:   ts + window / 2,
+  });
+}
+</script>
+</body>
+</html>
+""")
