@@ -57,3 +57,6 @@ secrets/
 
 # Claude AI
 .claude/*
+
+# Test reports
+reports/
