@@ -53,53 +53,33 @@ _AMBER       = "#f5c518"
 _BLUE        = "#2196f3"
 
 
+# ── MA class dispatch ────────────────────────────────────────────────────────
+
+_MA_CLASSES = {"EMA": ExponentialMovingAverage, "SMA": SimpleMovingAverage}
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def plot_ema_cross(
     bars: list[Bar],
     fills_report: pd.DataFrame,
-    fast_period: int,
-    slow_period: int,
     *,
-    instrument_label: str = "BTC-USD-PERP",
+    fast_period: int = 20,
+    slow_period: int = 50,
+    instrument_label: str = "",
     bar_label: str = "1h",
     height: int = 600,
 ) -> go.Figure:
-    """Candlestick chart with EMA overlays and trade entry markers.
-
-    Parameters
-    ----------
-    bars:
-        Ordered list of NT Bar objects (output of ``catalog.bars()``).
-    fills_report:
-        DataFrame from ``engine.trader.generate_order_fills_report()``.
-        Handled defensively — missing or empty DataFrames produce a chart
-        without trade markers rather than raising.
-    fast_period:
-        Fast EMA period (plotted in amber).
-    slow_period:
-        Slow EMA period (plotted in blue).
-    instrument_label:
-        Display string for the chart title.
-    bar_label:
-        Bar interval label used in the title (e.g. ``"1h"``, ``"4h"``).
-    height:
-        Figure height in pixels.
-
-    Returns
-    -------
-    go.Figure
-        Call ``.show()`` or ``.write_html()`` on the returned figure.
-    """
-    ohlcv = _bars_to_ohlcv(bars, fast_period, slow_period)
+    """Candlestick chart with EMA overlays and trade entry markers."""
+    ohlcv = _bars_to_ma_ohlcv(bars, fast_period, slow_period, ma_type="EMA")
     buys, sells = _parse_fills(fills_report)
 
     fig = go.Figure()
     _add_candlesticks(fig, ohlcv)
-    _add_ema_lines(fig, ohlcv, fast_period, slow_period)
+    _add_ma_lines(fig, ohlcv, fast_period, slow_period, ma_type="EMA")
     _add_trade_markers(fig, buys, sells, ohlcv)
-    _apply_layout(fig, fast_period, slow_period, instrument_label, bar_label, height)
-
+    title = f"{instrument_label} · {bar_label} · EMACross({fast_period}/{slow_period})"
+    _apply_base_layout(fig, title, height)
     return fig
 
 
@@ -113,57 +93,36 @@ def plot_sma_cross(
     bar_label: str = "1h",
     height: int = 600,
 ) -> go.Figure:
-    """Candlestick chart with SMA overlays and trade entry markers.
-
-    Parameters
-    ----------
-    bars:
-        Ordered list of NT Bar objects (output of ``catalog.bars()``).
-    fills_report:
-        DataFrame from ``engine.trader.generate_order_fills_report()``.
-    fast_period:
-        Fast SMA period (plotted in amber).
-    slow_period:
-        Slow SMA period (plotted in blue).
-    instrument_label:
-        Display string for the chart title.
-    bar_label:
-        Bar interval label used in the title (e.g. ``"1h"``, ``"4h"``).
-    height:
-        Figure height in pixels.
-
-    Returns
-    -------
-    go.Figure
-        Call ``.show()`` or ``.write_html()`` on the returned figure.
-    """
-    ohlcv = _bars_to_sma_ohlcv(bars, fast_period, slow_period)
+    """Candlestick chart with SMA overlays and trade entry markers."""
+    ohlcv = _bars_to_ma_ohlcv(bars, fast_period, slow_period, ma_type="SMA")
     buys, sells = _parse_fills(fills_report)
 
     fig = go.Figure()
     _add_candlesticks(fig, ohlcv)
-    _add_sma_lines(fig, ohlcv, fast_period, slow_period)
+    _add_ma_lines(fig, ohlcv, fast_period, slow_period, ma_type="SMA")
     _add_trade_markers(fig, buys, sells, ohlcv)
-    _apply_sma_layout(fig, fast_period, slow_period, instrument_label, bar_label, height)
-
+    title = f"{instrument_label} · {bar_label} · SMACross({fast_period}/{slow_period})"
+    _apply_base_layout(fig, title, height)
     return fig
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
 
-def _bars_to_ohlcv(
+def _bars_to_ma_ohlcv(
     bars: list[Bar],
     fast_period: int,
     slow_period: int,
+    ma_type: str = "EMA",
 ) -> pd.DataFrame:
-    """Convert NT Bar list to OHLCV DataFrame with EMA columns appended."""
-    fast_ema = ExponentialMovingAverage(fast_period)
-    slow_ema = ExponentialMovingAverage(slow_period)
+    """Convert NT Bar list to OHLCV DataFrame with MA columns appended."""
+    ma_cls = _MA_CLASSES[ma_type]
+    fast_ma = ma_cls(fast_period)
+    slow_ma = ma_cls(slow_period)
 
     rows = []
     for bar in bars:
-        fast_ema.handle_bar(bar)
-        slow_ema.handle_bar(bar)
+        fast_ma.handle_bar(bar)
+        slow_ma.handle_bar(bar)
         rows.append({
             "ts":    pd.Timestamp(bar.ts_event, unit="ns", tz="UTC"),
             "open":  float(bar.open),
@@ -171,8 +130,8 @@ def _bars_to_ohlcv(
             "low":   float(bar.low),
             "close": float(bar.close),
             "vol":   float(bar.volume),
-            f"EMA{fast_period}": fast_ema.value if fast_ema.initialized else np.nan,
-            f"EMA{slow_period}": slow_ema.value if slow_ema.initialized else np.nan,
+            f"{ma_type}{fast_period}": fast_ma.value if fast_ma.initialized else np.nan,
+            f"{ma_type}{slow_period}": slow_ma.value if slow_ma.initialized else np.nan,
         })
 
     return pd.DataFrame(rows).set_index("ts")
@@ -239,25 +198,6 @@ def _add_candlesticks(
         fig.add_trace(trace, row=row, col=1)
     else:
         fig.add_trace(trace)
-
-
-def _add_ema_lines(
-    fig: go.Figure,
-    ohlcv: pd.DataFrame,
-    fast_period: int,
-    slow_period: int,
-) -> None:
-    for col, color in [
-        (f"EMA{fast_period}", _AMBER),
-        (f"EMA{slow_period}", _BLUE),
-    ]:
-        fig.add_trace(go.Scatter(
-            x=ohlcv.index,
-            y=ohlcv[col],
-            name=col,
-            mode="lines",
-            line=dict(color=color, width=1.5),
-        ))
 
 
 def _add_trade_markers(
@@ -340,92 +280,16 @@ def _add_marker_trace(
         fig.add_trace(trace)
 
 
-def _apply_layout(
-    fig: go.Figure,
-    fast_period: int,
-    slow_period: int,
-    instrument_label: str,
-    bar_label: str,
-    height: int,
-) -> None:
-    fig.update_layout(
-        title=dict(
-            text=f"{instrument_label} · {bar_label} · EMACross({fast_period}/{slow_period})",
-            font=dict(size=15),
-        ),
-        height=height,
-        template="plotly_dark",
-        paper_bgcolor=_BG,
-        plot_bgcolor=_BG,
-        font=dict(color=_TEXT, family="Inter, system-ui, sans-serif"),
-
-        xaxis=dict(
-            rangeslider=dict(visible=True, thickness=0.04),
-            type="date",
-            gridcolor=_GRID,
-            linecolor=_BORDER,
-            tickformat="%b %d\n%Y",
-        ),
-        yaxis=dict(
-            side="right",
-            gridcolor=_GRID,
-            linecolor=_BORDER,
-            tickprefix="$",
-            tickformat=",.0f",
-        ),
-
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="left",
-            x=0,
-            bgcolor="rgba(0,0,0,0)",
-        ),
-
-        hovermode="x unified",
-        margin=dict(l=0, r=60, t=60, b=0),
-    )
-
-
-# ── SMA helpers ──────────────────────────────────────────────────────────────
-
-def _bars_to_sma_ohlcv(
-    bars: list[Bar],
-    fast_period: int,
-    slow_period: int,
-) -> pd.DataFrame:
-    """Convert NT Bar list to OHLCV DataFrame with SMA columns appended."""
-    fast_sma = SimpleMovingAverage(fast_period)
-    slow_sma = SimpleMovingAverage(slow_period)
-
-    rows = []
-    for bar in bars:
-        fast_sma.handle_bar(bar)
-        slow_sma.handle_bar(bar)
-        rows.append({
-            "ts":    pd.Timestamp(bar.ts_event, unit="ns", tz="UTC"),
-            "open":  float(bar.open),
-            "high":  float(bar.high),
-            "low":   float(bar.low),
-            "close": float(bar.close),
-            "vol":   float(bar.volume),
-            f"SMA{fast_period}": fast_sma.value if fast_sma.initialized else np.nan,
-            f"SMA{slow_period}": slow_sma.value if slow_sma.initialized else np.nan,
-        })
-
-    return pd.DataFrame(rows).set_index("ts")
-
-
-def _add_sma_lines(
+def _add_ma_lines(
     fig: go.Figure,
     ohlcv: pd.DataFrame,
     fast_period: int,
     slow_period: int,
+    ma_type: str = "EMA",
 ) -> None:
     for col, color in [
-        (f"SMA{fast_period}", _AMBER),
-        (f"SMA{slow_period}", _BLUE),
+        (f"{ma_type}{fast_period}", _AMBER),
+        (f"{ma_type}{slow_period}", _BLUE),
     ]:
         fig.add_trace(go.Scatter(
             x=ohlcv.index,
@@ -436,19 +300,15 @@ def _add_sma_lines(
         ))
 
 
-def _apply_sma_layout(
+def _apply_base_layout(
     fig: go.Figure,
-    fast_period: int,
-    slow_period: int,
-    instrument_label: str,
-    bar_label: str,
+    title: str,
     height: int,
+    *,
+    rangeslider: bool = True,
 ) -> None:
     fig.update_layout(
-        title=dict(
-            text=f"{instrument_label} · {bar_label} · SMACross({fast_period}/{slow_period})",
-            font=dict(size=15),
-        ),
+        title=dict(text=title, font=dict(size=15)),
         height=height,
         template="plotly_dark",
         paper_bgcolor=_BG,
@@ -456,7 +316,7 @@ def _apply_sma_layout(
         font=dict(color=_TEXT, family="Inter, system-ui, sans-serif"),
 
         xaxis=dict(
-            rangeslider=dict(visible=True, thickness=0.04),
+            rangeslider=dict(visible=rangeslider, thickness=0.04),
             type="date",
             gridcolor=_GRID,
             linecolor=_BORDER,
@@ -677,30 +537,12 @@ def _apply_macd_rsi_layout(
         f"{instrument_label} · {bar_label} · "
         f"MACD({macd_fast}/{macd_slow}/{macd_signal}) + RSI({rsi_period})"
     )
+    _apply_base_layout(fig, title, height, rangeslider=False)
 
-    fig.update_layout(
-        title=dict(text=title, font=dict(size=15)),
-        height=height,
-        template="plotly_dark",
-        paper_bgcolor=_BG,
-        plot_bgcolor=_BG,
-        font=dict(color=_TEXT, family="Inter, system-ui, sans-serif"),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom",
-            y=1.02,
-            xanchor="left",
-            x=0,
-            bgcolor="rgba(0,0,0,0)",
-        ),
-        hovermode="x unified",
-        margin=dict(l=0, r=60, t=60, b=0),
-    )
-
-    # Disable rangeslider on the bottom x-axis (row 3)
+    # Disable rangeslider on all subplot x-axes
     fig.update_xaxes(rangeslider_visible=False)
 
-    # Style all axes
+    # Style all subplot axes
     for i in range(1, 4):
         fig.update_xaxes(gridcolor=_GRID, linecolor=_BORDER, row=i, col=1)
         fig.update_yaxes(gridcolor=_GRID, linecolor=_BORDER, side="right", row=i, col=1)
@@ -881,16 +723,20 @@ charts.py  —  Visualisation helpers for NautilusTrader backtest notebooks.
 Public API
 ----------
 plot_ema_cross(bars, fills_report, *, fast_period, slow_period,
-               instrument_label, bar_label) -> go.Figure
+               instrument_label, bar_label, height) -> go.Figure
     Plotly interactive candlestick with EMA overlay + trade markers.
-    Renders inside Jupyter with .show(). Returns Figure for further use.
+
+plot_sma_cross(bars, fills_report, fast_period, slow_period, *,
+               instrument_label, bar_label, height) -> go.Figure
+    Plotly interactive candlestick with SMA overlay + trade markers.
 
 generate_backtest_html(bars, fills_report, positions_report, *,
-                       fast_period, slow_period, instrument_label,
-                       bar_label, starting_capital, output_path) -> Path
+                       fast_period, slow_period, ma_type,
+                       instrument_label, bar_label, starting_capital,
+                       output_path) -> Path
     Self-contained HTML using TradingView Lightweight Charts.
     Open in any browser. No server required.
-    Includes: candlestick + EMA overlay, trade markers with hover tooltip,
+    Includes: candlestick + MA overlay, trade markers with hover tooltip,
     summary stats bar, and a full trade history table with click-to-zoom.
 
 NT version: 1.223.0
@@ -951,8 +797,10 @@ def _bars_to_df(bars: list) -> pd.DataFrame:
     return df.sort_values("time").reset_index(drop=True)
 
 
-def _ema_series(close: pd.Series, period: int) -> pd.Series:
-    """EMA using span=period, adjust=False — same formula NT uses internally."""
+def _ma_series(close: pd.Series, period: int, ma_type: str = "EMA") -> pd.Series:
+    """MA using pandas — EMA (ewm) or SMA (rolling)."""
+    if ma_type == "SMA":
+        return close.rolling(window=period).mean()
     return close.ewm(span=period, adjust=False).mean()
 
 
@@ -1109,130 +957,6 @@ def _compute_stats(position_rows: list[dict], starting_capital: float) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Public: Plotly chart (in-notebook)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def plot_ema_cross(
-    bars: list,
-    fills_report: pd.DataFrame,
-    *,
-    fast_period: int = 20,
-    slow_period: int  = 50,
-    instrument_label: str = "",
-    bar_label: str = "1h",
-) -> go.Figure:
-    """
-    Plotly candlestick with EMA overlay and trade markers.
-
-    Parameters
-    ----------
-    bars            NT Bar list from ParquetDataCatalog.
-    fills_report    DataFrame from engine.trader.generate_order_fills_report().
-    fast_period     Fast EMA period (for overlay line).
-    slow_period     Slow EMA period (for overlay line).
-    instrument_label  Display label for chart title.
-    bar_label       Timeframe string for chart title (e.g. "1h").
-
-    Returns
-    -------
-    go.Figure  — call .show() or pass to fig.show(config=...) in Jupyter.
-    """
-    df = _bars_to_df(bars)
-    if df.empty:
-        raise ValueError("bars is empty — nothing to plot.")
-
-    timestamps = pd.to_datetime(df["time"], unit="s", utc=True)
-    fast_ema   = _ema_series(df["close"], fast_period)
-    slow_ema   = _ema_series(df["close"], slow_period)
-
-    fig = go.Figure()
-
-    # ── Candlestick ──────────────────────────────────────────────────────────
-    fig.add_trace(go.Candlestick(
-        x=timestamps,
-        open=df["open"], high=df["high"], low=df["low"], close=df["close"],
-        name="Price",
-        increasing_line_color="#26a69a",
-        decreasing_line_color="#ef5350",
-        increasing_fillcolor="#26a69a",
-        decreasing_fillcolor="#ef5350",
-        showlegend=False,
-    ))
-
-    # ── EMA lines ────────────────────────────────────────────────────────────
-    fig.add_trace(go.Scatter(
-        x=timestamps, y=fast_ema,
-        mode="lines", name=f"EMA {fast_period}",
-        line=dict(color="#2196f3", width=1.2),
-    ))
-    fig.add_trace(go.Scatter(
-        x=timestamps, y=slow_ema,
-        mode="lines", name=f"EMA {slow_period}",
-        line=dict(color="#ff9800", width=1.2),
-    ))
-
-    # ── Trade markers ────────────────────────────────────────────────────────
-    if fills_report is not None and not fills_report.empty:
-        buy_ts, buy_px, buy_text   = [], [], []
-        sell_ts, sell_px, sell_text = [], [], []
-
-        for _, row in fills_report.iterrows():
-            ts = row.get("ts_last") or row.get("ts_init")
-            if ts is None:
-                continue
-            ts_dt  = pd.Timestamp(ts) if not isinstance(ts, pd.Timestamp) else ts
-            side   = str(row.get("side", "")).upper()
-            px     = float(row.get("avg_px", 0))
-            qty    = str(row.get("filled_qty", "?")).rstrip("0").rstrip(".")
-            label  = f"{'BUY' if 'BUY' in side else 'SELL'} {qty} @ {px:,.2f}"
-
-            if "BUY" in side:
-                buy_ts.append(ts_dt)
-                buy_px.append(px * 0.9995)   # just below bar low for visual clarity
-                buy_text.append(label)
-            else:
-                sell_ts.append(ts_dt)
-                sell_px.append(px * 1.0005)
-                sell_text.append(label)
-
-        if buy_ts:
-            fig.add_trace(go.Scatter(
-                x=buy_ts, y=buy_px, mode="markers",
-                name="Buy", text=buy_text, hoverinfo="text+x",
-                marker=dict(symbol="triangle-up", color="#26a69a", size=10),
-            ))
-        if sell_ts:
-            fig.add_trace(go.Scatter(
-                x=sell_ts, y=sell_px, mode="markers",
-                name="Sell", text=sell_text, hoverinfo="text+x",
-                marker=dict(symbol="triangle-down", color="#ef5350", size=10),
-            ))
-
-    # ── Layout ───────────────────────────────────────────────────────────────
-    title = f"{instrument_label}  {bar_label}  — EMA {fast_period}/{slow_period}"
-    fig.update_layout(
-        title=dict(text=title, font=dict(size=14)),
-        template="plotly_dark",
-        paper_bgcolor="#131722",
-        plot_bgcolor="#131722",
-        xaxis=dict(
-            rangeslider=dict(visible=False),
-            gridcolor="#1e222d",
-            showgrid=True,
-        ),
-        yaxis=dict(gridcolor="#1e222d", showgrid=True),
-        legend=dict(
-            orientation="h", yanchor="bottom", y=1.01,
-            xanchor="left", x=0,
-        ),
-        margin=dict(l=40, r=40, t=60, b=40),
-        hovermode="x unified",
-    )
-
-    return fig
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Public: self-contained TVLC HTML
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1242,7 +966,8 @@ def generate_backtest_html(
     positions_report: pd.DataFrame,
     *,
     fast_period: int = 20,
-    slow_period: int  = 50,
+    slow_period: int = 50,
+    ma_type: str = "EMA",
     instrument_label: str = "",
     bar_label: str = "1h",
     starting_capital: float = 10_000.0,
@@ -1258,8 +983,9 @@ def generate_backtest_html(
     bars              NT Bar list from ParquetDataCatalog.
     fills_report      engine.trader.generate_order_fills_report()
     positions_report  engine.trader.generate_positions_report()
-    fast_period       Fast EMA period.
-    slow_period       Slow EMA period.
+    fast_period       Fast MA period.
+    slow_period       Slow MA period.
+    ma_type           "EMA" or "SMA".
     instrument_label  Display label (e.g. "BTC-USD-PERP.HYPERLIQUID").
     bar_label         Timeframe string (e.g. "1h").
     starting_capital  Used for total-return % calculation.
@@ -1279,14 +1005,14 @@ def generate_backtest_html(
         df[["time", "open", "high", "low", "close"]].to_dict(orient="records")
     )
 
-    fast_ema_data = [
+    fast_ma_data = [
         {"time": int(t), "value": round(v, 6)}
-        for t, v in zip(df["time"], _ema_series(df["close"], fast_period))
+        for t, v in zip(df["time"], _ma_series(df["close"], fast_period, ma_type))
         if not math.isnan(v)
     ]
-    slow_ema_data = [
+    slow_ma_data = [
         {"time": int(t), "value": round(v, 6)}
-        for t, v in zip(df["time"], _ema_series(df["close"], slow_period))
+        for t, v in zip(df["time"], _ma_series(df["close"], slow_period, ma_type))
         if not math.isnan(v)
     ]
 
@@ -1301,7 +1027,7 @@ def generate_backtest_html(
     output_path = Path(output_path).resolve()
 
     # ── Render template ──────────────────────────────────────────────────────
-    title    = f"Backtest — {instrument_label} {bar_label}  EMA {fast_period}/{slow_period}"
+    title    = f"Backtest — {instrument_label} {bar_label}  {ma_type} {fast_period}/{slow_period}"
     subtitle = (
         f"{len(df):,} bars"
         + (f"  ·  {stats.get('num_trades', 0)} trades" if stats else "")
@@ -1312,9 +1038,10 @@ def generate_backtest_html(
     html = html.replace("__SUBTITLE__",                 subtitle)
     html = html.replace("__FAST__",                     str(fast_period))
     html = html.replace("__SLOW__",                     str(slow_period))
+    html = html.replace("__MA_TYPE__",                  ma_type)
     html = html.replace("__OHLCV_JSON__",               ohlcv_json)
-    html = html.replace("__EMA_FAST_JSON__",            json.dumps(fast_ema_data))
-    html = html.replace("__EMA_SLOW_JSON__",            json.dumps(slow_ema_data))
+    html = html.replace("__EMA_FAST_JSON__",            json.dumps(fast_ma_data))
+    html = html.replace("__EMA_SLOW_JSON__",            json.dumps(slow_ma_data))
     html = html.replace("__MARKERS_JSON__",             json.dumps(markers))
     html = html.replace("__MARKER_DETAIL_JSON__",       json.dumps(marker_detail))
     html = html.replace("__TRADES_JSON__",              json.dumps(position_rows))
@@ -1514,11 +1241,11 @@ td.pnl.neg { color: #ef5350; }
 <div class="legend">
   <div class="legend-item">
     <div class="legend-line" style="background:#2196f3"></div>
-    <span>EMA __FAST__ (fast)</span>
+    <span>__MA_TYPE__ __FAST__ (fast)</span>
   </div>
   <div class="legend-item">
     <div class="legend-line" style="background:#ff9800"></div>
-    <span>EMA __SLOW__ (slow)</span>
+    <span>__MA_TYPE__ __SLOW__ (slow)</span>
   </div>
   <div class="legend-item">
     <div class="legend-arrow-up"></div>
@@ -1570,6 +1297,7 @@ const TRADES        = __TRADES_JSON__;
 const STATS         = __STATS_JSON__;
 const FAST_PERIOD   = __FAST__;
 const SLOW_PERIOD   = __SLOW__;
+const MA_TYPE       = '__MA_TYPE__';
 
 // ── Chart ─────────────────────────────────────────────────────────────────────
 const chartEl = document.getElementById('chart');
@@ -1606,7 +1334,7 @@ candleSeries.setData(OHLCV);
 const fastLine = chart.addLineSeries({
   color: '#2196f3', lineWidth: 1,
   priceLineVisible: false, lastValueVisible: true,
-  title: 'EMA' + FAST_PERIOD,
+  title: MA_TYPE + FAST_PERIOD,
 });
 fastLine.setData(EMA_FAST_DATA);
 
@@ -1614,7 +1342,7 @@ fastLine.setData(EMA_FAST_DATA);
 const slowLine = chart.addLineSeries({
   color: '#ff9800', lineWidth: 1,
   priceLineVisible: false, lastValueVisible: true,
-  title: 'EMA' + SLOW_PERIOD,
+  title: MA_TYPE + SLOW_PERIOD,
 });
 slowLine.setData(EMA_SLOW_DATA);
 
