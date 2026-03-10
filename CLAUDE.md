@@ -33,10 +33,11 @@ NT is the framework. Work with its patterns:
 - Use NT's `RiskEngine` and trading states (`ACTIVE`, `REDUCING`, `HALTED`) — don't build a parallel risk system.
 
 ### Actor Callbacks Must Never Block
-NT's MessageBus dispatches events synchronously on a single thread. Any blocking operation in an Actor callback (`on_order_filled`, `on_position_closed`, timer callbacks) stalls the entire TradingNode.
-- All I/O (database writes, HTTP requests) must use `self.create_task(coroutine)`.
-- Never `await` directly in a callback method.
-- Never call `asyncio.run()` or `loop.run_until_complete()` from inside a callback.
+NT's MessageBus dispatches events synchronously on a single thread. Any blocking operation in an Actor callback (`on_order_filled`, timer callbacks) stalls the entire TradingNode.
+- All I/O (database writes, HTTP requests) must use `self.run_in_executor(callable, args)` which runs the callable in a ThreadPoolExecutor.
+- Inside executor callables, `asyncio.run()` is safe for wrapping async libraries like asyncpg.
+- Never do blocking I/O directly in a callback method — always dispatch to the executor.
+- Actor imports from `nautilus_trader.common.actor` (NOT `nautilus_trader.trading.actor`).
 
 ### Pin NT Version
 NT is pre-v2.0 with breaking changes between releases. The version is pinned in `pyproject.toml`. Never upgrade without testing in a branch first.
@@ -118,11 +119,11 @@ Telegram ←HTTP→ AlertActor (inside TradingNode)        ← Phase 2 alerting
 | Component | Technology | Notes |
 |-----------|-----------|-------|
 | Trading engine | NautilusTrader | Pinned version, pip dependency |
-| Persistence | asyncpg → PostgreSQL 16 + TimescaleDB | Actors write directly via asyncpg pool |
+| Persistence | asyncpg → PostgreSQL 16 + TimescaleDB | Actors write via asyncpg in executor threads |
 | Migrations | Alembic | |
 | Cache | Redis | NT native cache (positions, orders, account state) |
 | Pub/sub bridge | Redis Streams via StreamingActor | Phase 3 — deferred |
-| Alerting | Telegram Bot API via AlertActor | aiohttp inside TradingNode |
+| Alerting | Telegram Bot API via AlertActor | httpx (sync, in executor thread) |
 | Monitoring | Grafana | Reads PostgreSQL; not locked in |
 | Backtest data | NT ParquetDataCatalog | Parquet files on disk |
 | API | FastAPI + asyncpg | Phase 3 |
@@ -236,10 +237,15 @@ The `StreamingActor` (in `src/actors/streaming.py`) subscribes to NT MessageBus 
 - **Slippage modeling matters.** Configure NT's `FillModel`: 0.05-0.1% for top-10 coins, 0.5-2% outside top 100, 5-10% for microcaps.
 - **NETTING mode position stats:** `cache.positions()` returns only the current Position object per instrument-strategy pair — NOT all historical positions. Closed positions are stored as snapshots. For correct analyzer stats, use `cache.position_snapshots() + cache.positions()`.
 - **`analyzer.returns()` requires `calculate_statistics()` first.** Call `calculate_statistics()` immediately after `engine.run()`, before any plotting or stats access.
-- **Actor callbacks must never block.** Use `self.create_task()` for all I/O. Awaiting directly in `on_order_filled` or similar callbacks will stall the TradingNode.
-- **asyncpg pool creation must happen inside the event loop.** Create the pool in `on_start()` via `self.create_task(self._init_pool())`, not in `__init__`.
+- **Actor callbacks must never block.** Use `self.run_in_executor(callable, args)` for all I/O. Blocking directly in `on_order_filled` or similar callbacks stalls the TradingNode.
+- **asyncpg in Actor executors:** Use `asyncio.run(asyncpg.connect(...))` inside `run_in_executor` callables. A fresh connection per write is acceptable at hourly-bar frequency. No connection pool needed in Phase 2.
+- **Actor has no `create_task`.** NT 1.223.0 Actor uses `run_in_executor` (ThreadPoolExecutor) for I/O, not `create_task`. Strategy has different APIs than Actor.
+- **Position events in Actors:** Override `on_event(self, event)` and check `isinstance(event, PositionClosed)`. Actor has `on_order_filled` but no `on_position_closed` callback.
 - **NT financial types to PostgreSQL NUMERIC:** Always `str(event.last_px)`, never `float(event.last_px)`. asyncpg accepts strings for NUMERIC columns and preserves precision.
 - **HL_TESTNET defaults to True.** `run_live.py` requires explicitly setting `HL_TESTNET=false` in `.env` to trade on mainnet. Intentional friction.
+- **HyperliquidDataClientConfig needs NO credentials.** Just `testnet=False` for real market data. Credentials are only needed on the exec client.
+- **HyperliquidExecClientConfig uses `private_key` + `vault_address`** (NOT `wallet_address`). Verified in NT 1.223.0.
+- **Adapter factories must be registered.** Call `node.add_data_client_factory("HYPERLIQUID", HyperliquidLiveDataClientFactory)` and `node.add_exec_client_factory(...)` before `node.build()`.
 
 ## Communicating with This Developer
 

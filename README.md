@@ -50,7 +50,7 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 ### Key Design Decisions
 
 - **NT as a library, not a fork.** We subclass `Strategy`, `Actor`, configure engines, call `node.run()`. NT's repo is never modified.
-- **Actors are the extension point.** `PersistenceActor` and `AlertActor` live inside the TradingNode process, subscribe to NT's MessageBus, and do the work (DB writes, Telegram) via `create_task()` — never blocking the event loop.
+- **Actors are the extension point.** `PersistenceActor` and `AlertActor` live inside the TradingNode process, subscribe to NT's MessageBus, and do the work (DB writes, Telegram) via `run_in_executor()` — I/O runs in a thread pool without blocking the event loop.
 - **PostgreSQL + TimescaleDB** for all persistent data. Prices stored as `NUMERIC` — never floats.
 - **Redis** for real-time layer. NT uses it natively for cache; we add a `StreamingActor` in Phase 3 for bridging trade events to the frontend.
 - **NT's ParquetDataCatalog** for feeding historical data to the backtester. Coexists with TimescaleDB (Parquet for NT, TimescaleDB for API queries).
@@ -180,11 +180,13 @@ Open a notebook in `notebooks/`, load data into NT's ParquetDataCatalog, configu
 
 ### Run paper trading (Phase 2)
 
+Requires infrastructure running first (`docker compose up -d` + `alembic upgrade head`).
+
 ```bash
 python scripts/run_sandbox.py
 ```
 
-Uses NT's `SandboxExecutionClient` against live Hyperliquid market data. Every fill and closed position persists to PostgreSQL via `PersistenceActor`. Telegram alerts fire on fills and position changes. Monitor at `http://localhost:3000`.
+Uses NT's `SandboxExecutionClient` against live Hyperliquid market data. Every fill and closed position persists to PostgreSQL via `PersistenceActor`. Telegram alerts fire on fills and position changes (if `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` are set in `.env`). Monitor at `http://localhost:3000`.
 
 ### Run live trading (Phase 2 — after paper validation)
 
@@ -213,7 +215,7 @@ uvicorn src.api.main:app --reload --port 8000
 
 - **NautilusTrader is pre-v2.0** — pin the version, expect API breakage between releases.
 - **No floats for prices** — NT uses 128-bit fixed-point. Maintain this in PostgreSQL (`NUMERIC`), asyncpg inserts (`str(nt_type)`), API responses (string-encoded decimals), and frontend.
-- **Actor callbacks must never block** — use `self.create_task()` for all I/O. Blocking the event loop stalls the TradingNode.
+- **Actor callbacks must never block** — use `self.run_in_executor()` for all I/O. Blocking the event loop stalls the TradingNode.
 - **TradingNode is not Jupyter-compatible** — asyncio event loop conflicts. Run from scripts, not notebooks.
 - **The "NT + web dashboard" pattern has no community precedent.** When stuck, read NT source code — docs and community posts won't cover integration patterns.
 - **LGPL-3.0 license** — NT can be used as a library without affecting your project's license, but modifications to NT's own source must be shared.
