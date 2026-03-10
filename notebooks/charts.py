@@ -514,7 +514,7 @@ def _add_rsi_panel(
         (rsi_oversold, _GREEN, "OS"),
         (0.50, _GRID, "50"),
     ]:
-        fig.add_hline(
+        fig.add_hline(  # type: ignore[arg-type]  # plotly stubs type row/col as str
             y=level, row=row, col=1,
             line_dash="dash", line_color=color, line_width=1,
             annotation_text=label,
@@ -580,7 +580,7 @@ def plot_equity_curve(
         Chart title string (e.g. ``"EMACross(20/50)  BTC 1h"``).
 
     """
-    fig, ax = plt.subplots(figsize=(14, 5))
+    _, ax = plt.subplots(figsize=(14, 5))
     plotted = False
 
     try:
@@ -870,6 +870,17 @@ def _fills_to_markers(fills_df: pd.DataFrame) -> tuple[list[dict], dict[int, dic
     return tvlc_markers, detail
 
 
+def _fmt_px(v: Any) -> str:
+    """Format a price value for display, returning '—' for missing/NaN."""
+    if v is None:
+        return "—"
+    try:
+        fv = float(v)
+        return f"{fv:,.2f}" if not math.isnan(fv) else "—"
+    except (ValueError, TypeError):
+        return "—"
+
+
 def _positions_to_rows(positions_df: pd.DataFrame) -> list[dict]:
     """Convert positions_report → list of plain dicts for the HTML trade table."""
     if positions_df is None or positions_df.empty:
@@ -896,16 +907,8 @@ def _positions_to_rows(positions_df: pd.DataFrame) -> list[dict]:
         qty_str = str(qty_raw).rstrip("0").rstrip(".")
 
         # Prices
-        def _fmt_px(col: str) -> str:
-            v = row.get(col)
-            try:
-                fv = float(v)
-                return f"{fv:,.2f}" if not math.isnan(fv) else "—"
-            except (ValueError, TypeError):
-                return "—"
-
-        entry_px = _fmt_px("avg_px_open")
-        exit_px  = _fmt_px("avg_px_close")
+        entry_px = _fmt_px(row.get("avg_px_open"))
+        exit_px  = _fmt_px(row.get("avg_px_close"))
 
         # PnL — stored as string "value CURRENCY" in positions_report
         pnl = _parse_money_str(row.get("realized_pnl"))
