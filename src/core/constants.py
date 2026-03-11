@@ -13,8 +13,8 @@ HYPERLIQUID_API_URL = "https://api.hyperliquid.xyz/info"
 
 # Fees — Hyperliquid base tier (VIP 0).
 # Fees are tiered by 30d volume and HLP staking. Base tier used here.
-# The NT adapter also adds builder fees for live trading (1bp taker, 0.5bp maker)
-# — irrelevant for backtesting.
+# NautilusTrader 1.224.0 removed builder fee charges from the Hyperliquid
+# adapter; these maker/taker fees now match live execution more closely.
 MAKER_FEE = Decimal("0.00010")
 TAKER_FEE = Decimal("0.00035")
 

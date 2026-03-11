@@ -135,7 +135,22 @@ Then restart: Ctrl+C the running node, `python scripts/run_sandbox.py`.
 4. **Terminal** — check for errors in TradingNode stdout
 5. **Compare to backtest** — if paper results lag backtest by >30-40%, investigate
 
-## 7. When to Go Live
+## 7. NautilusTrader upgrades
+
+This project currently pins NautilusTrader `1.224.0` in `pyproject.toml`. When
+upgrading NautilusTrader in future:
+
+- Re-run the canonical EMA Cross backtest notebook to sanity-check P&L,
+  drawdown, and trade counts (matching-engine changes can legitimately move
+  these a bit between releases).
+- Re-run `scripts/run_sandbox.py` and verify that fills, positions, and account
+  snapshots still write cleanly into PostgreSQL and that Telegram alerts fire
+  on fills/position changes.
+- Skim the upstream `RELEASES.md` for any Hyperliquid changes (this project
+  trades only on Hyperliquid for now) and adjust comments/docs if behavior
+  changes (e.g. builder fee handling).
+
+## 8. When to Go Live
 
 1. Paper trade for **2+ weeks** with stable behavior
 2. Verify fill prices match expected levels
