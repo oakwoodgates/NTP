@@ -1,0 +1,14 @@
+apiVersion: 1
+datasources:
+  - name: PostgreSQL
+    type: postgres
+    uid: PostgreSQL
+    url: postgres:5432
+    database: ${POSTGRES_DB:-nautilus_platform}
+    user: ${POSTGRES_USER:-nautilus}
+    secureJsonData:
+      password: ${POSTGRES_PASSWORD:-nautilus_dev}
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1600
+      timescaledb: true

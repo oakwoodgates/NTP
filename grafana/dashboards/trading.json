@@ -1,0 +1,389 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "links": [],
+  "templating": {
+    "list": [
+      {
+        "name": "strategy_id",
+        "type": "query",
+        "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+        "query": "SELECT DISTINCT strategy_id FROM strategy_runs ORDER BY strategy_id",
+        "includeAll": true,
+        "allValue": "%",
+        "current": { "text": "All", "value": "$__all" },
+        "multi": false,
+        "refresh": 1
+      },
+      {
+        "name": "run_id",
+        "type": "query",
+        "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+        "query": "SELECT id::text FROM strategy_runs WHERE strategy_id LIKE '$strategy_id' ORDER BY started_at DESC LIMIT 20",
+        "includeAll": true,
+        "allValue": "%",
+        "current": { "text": "All", "value": "$__all" },
+        "multi": false,
+        "refresh": 1
+      },
+      {
+        "name": "run_mode",
+        "type": "query",
+        "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+        "query": "SELECT DISTINCT run_mode FROM strategy_runs ORDER BY run_mode",
+        "includeAll": true,
+        "allValue": "%",
+        "current": { "text": "All", "value": "$__all" },
+        "multi": false,
+        "refresh": 1
+      }
+    ]
+  },
+  "panels": [
+    {
+      "title": "Account Balance",
+      "type": "timeseries",
+      "id": 1,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": { "lineWidth": 2, "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT ts AS time, balance_total AS \"Balance\" FROM account_snapshots WHERE $__timeFilter(ts) AND run_id::text LIKE '$run_id' ORDER BY ts",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Cumulative PnL",
+      "type": "timeseries",
+      "id": 2,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": { "lineWidth": 2, "fillOpacity": 10, "spanNulls": true }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT ts_closed AS time, SUM(realized_pnl) OVER (ORDER BY ts_closed) AS \"Cumulative PnL\" FROM positions WHERE $__timeFilter(ts_closed) AND run_id::text LIKE '$run_id' ORDER BY ts_closed",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Drawdown %",
+      "type": "timeseries",
+      "id": 3,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "lineWidth": 2,
+            "fillOpacity": 20,
+            "fillColor": "rgba(255, 0, 0, 0.1)",
+            "spanNulls": true
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": -0.05 },
+              { "color": "red", "value": -0.10 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "rawSql": "WITH peak AS (SELECT ts, balance_total, MAX(balance_total) OVER (ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS peak_balance FROM account_snapshots WHERE $__timeFilter(ts) AND run_id::text LIKE '$run_id') SELECT ts AS time, CASE WHEN peak_balance > 0 THEN -(peak_balance - balance_total) / peak_balance ELSE 0 END AS \"Drawdown\" FROM peak ORDER BY ts",
+          "format": "time_series",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Position PnL Distribution",
+      "type": "barchart",
+      "id": 4,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": { "fillOpacity": 80 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 0 }
+            ]
+          },
+          "color": { "mode": "thresholds" }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "vertical",
+        "xTickLabelRotation": -45,
+        "showValue": "auto"
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT position_id AS \"Position\", realized_pnl AS \"PnL\" FROM positions WHERE run_id::text LIKE '$run_id' ORDER BY ts_closed DESC LIMIT 30",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Win Rate",
+      "type": "stat",
+      "id": 5,
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 16 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 0.4 },
+              { "color": "green", "value": 0.5 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT CASE WHEN COUNT(*) > 0 THEN COUNT(*) FILTER (WHERE realized_pnl > 0)::float / COUNT(*) ELSE 0 END AS \"Win Rate\" FROM positions WHERE run_id::text LIKE '$run_id'",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Total PnL",
+      "type": "stat",
+      "id": 6,
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 16 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 0 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COALESCE(SUM(realized_pnl), 0) AS \"Total PnL\" FROM positions WHERE run_id::text LIKE '$run_id'",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Total Trades",
+      "type": "stat",
+      "id": 7,
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 16 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) AS \"Fills\" FROM order_fills WHERE run_id::text LIKE '$run_id'",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Positions Closed",
+      "type": "stat",
+      "id": 8,
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 20 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "blue", "value": null }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) AS \"Positions\" FROM positions WHERE run_id::text LIKE '$run_id'",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Avg Win / Avg Loss",
+      "type": "stat",
+      "id": 9,
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 20 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT CASE WHEN COALESCE(AVG(realized_pnl) FILTER (WHERE realized_pnl < 0), 0) != 0 THEN ABS(AVG(realized_pnl) FILTER (WHERE realized_pnl > 0) / AVG(realized_pnl) FILTER (WHERE realized_pnl < 0)) ELSE 0 END AS \"Win/Loss Ratio\" FROM positions WHERE run_id::text LIKE '$run_id'",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Max Drawdown",
+      "type": "stat",
+      "id": 10,
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 20 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": -0.05 },
+              { "color": "red", "value": -0.10 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "rawSql": "WITH peak AS (SELECT balance_total, MAX(balance_total) OVER (ORDER BY ts ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS peak_balance FROM account_snapshots WHERE run_id::text LIKE '$run_id') SELECT MIN(CASE WHEN peak_balance > 0 THEN -(peak_balance - balance_total) / peak_balance ELSE 0 END) AS \"Max Drawdown\" FROM peak",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Recent Fills",
+      "type": "table",
+      "id": 11,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "targets": [
+        {
+          "rawSql": "SELECT ts, strategy_id, instrument_id, order_side, last_qty, last_px, commission, liquidity_side FROM order_fills WHERE run_id::text LIKE '$run_id' ORDER BY ts DESC LIMIT 50",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Recent Positions",
+      "type": "table",
+      "id": 12,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "realized_pnl" },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "red", "value": null },
+                    { "color": "green", "value": 0 }
+                  ]
+                }
+              },
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT ts_closed, strategy_id, instrument_id, entry_side, peak_qty, avg_px_open, avg_px_close, realized_pnl, realized_return FROM positions WHERE run_id::text LIKE '$run_id' ORDER BY ts_closed DESC LIMIT 50",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Active Runs",
+      "type": "table",
+      "id": 13,
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 32 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "targets": [
+        {
+          "rawSql": "SELECT id, strategy_id, instrument_id, run_mode, started_at, stopped_at FROM strategy_runs WHERE strategy_id LIKE '$strategy_id' ORDER BY started_at DESC LIMIT 20",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["trading"],
+  "time": { "from": "now-7d", "to": "now" },
+  "timepicker": {},
+  "timezone": "utc",
+  "title": "Trading Overview",
+  "uid": "trading-overview"
+}
