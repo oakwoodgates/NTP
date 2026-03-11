@@ -92,10 +92,10 @@ Change these in `.env`:
 
 ```bash
 # Strategy: EMACross | SMACross | EMACrossATR | MACDRSI
-STRATEGY=EMACrossATR
+STRATEGY=EMACross
 
 # Instrument: BTC | ETH | SOL
-INSTRUMENT_ID=ETH-USD-PERP.HYPERLIQUID
+INSTRUMENT_ID=BTC-USD-PERP.HYPERLIQUID
 
 # Adjust trade size to keep ~$50-100 notional
 TRADE_SIZE=0.01
