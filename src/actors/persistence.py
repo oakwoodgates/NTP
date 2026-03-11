@@ -105,15 +105,18 @@ class PersistenceActor(Actor):
         if balance is None:
             return
         ts = datetime.now(tz=UTC)
+        balance_total = str(balance.total.as_decimal())
+        balance_free = str(balance.free.as_decimal())
+        balance_locked = str(balance.locked.as_decimal())
         try:
             asyncio.run(self._async_insert_snapshot(
                 ts,
                 uuid.UUID(self.config.run_id),
                 self.config.venue,
                 "USDC",
-                str(balance.total),
-                str(balance.free),
-                str(balance.locked),
+                balance_total,
+                balance_free,
+                balance_locked,
             ))
         except Exception as e:
             self.log.error(f"PersistenceActor: snapshot insert failed: {e}")

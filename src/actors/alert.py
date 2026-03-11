@@ -57,8 +57,8 @@ class AlertActor(Actor):
             pnl = event.realized_pnl
             pnl_str = str(pnl) if pnl else "N/A"
             try:
-                pnl_val = float(str(pnl).split()[0]) if pnl else 0.0
-                result = "WIN" if pnl_val >= 0 else "LOSS"
+                pnl_val = pnl.as_decimal() if pnl else Decimal("0")
+                result = "WIN" if pnl_val >= Decimal("0") else "LOSS"
             except (ValueError, AttributeError):
                 result = "CLOSED"
             msg = (
@@ -78,7 +78,7 @@ class AlertActor(Actor):
         balance = account.balance(USDC)
         if balance is None:
             return
-        current = Decimal(str(balance.total))
+        current = balance.total.as_decimal()
         if self._peak_balance is None or current > self._peak_balance:
             self._peak_balance = current
             self._alerted_drawdown = False

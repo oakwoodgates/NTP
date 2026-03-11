@@ -193,11 +193,22 @@ def main() -> None:
     node.trader.add_strategy(strategy)
 
     node.build()
+    interrupted = False
     try:
         node.run()
+    except KeyboardInterrupt:
+        interrupted = True
+        print("KeyboardInterrupt received, coordinating shutdown...")
     finally:
+        try:
+            node.stop()
+        except Exception as exc:
+            print(f"Warning: node.stop() raised {type(exc).__name__}: {exc}")
         node.dispose()
         asyncio.run(_close_run(settings.postgres_dsn, run_id))
+
+    if interrupted:
+        print("Interrupted by user, shutdown complete.")
 
 
 async def _register_run(

@@ -99,6 +99,10 @@ class EMACross(Strategy):
         )
         self.subscribe_bars(self.config.bar_type)
 
+        # Sandbox's SimulatedExchange needs quote ticks to maintain a market
+        # for order fills. Without this, orders are rejected with "no market".
+        self.subscribe_quote_ticks(self.config.instrument_id)
+
     def on_bar(self, bar: Bar) -> None:
         """Evaluate EMA crossover on each bar."""
         if not self.indicators_initialized():

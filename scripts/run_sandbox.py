@@ -24,10 +24,12 @@ from nautilus_trader.adapters.hyperliquid.factories import HyperliquidLiveDataCl
 from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
 from nautilus_trader.adapters.sandbox.factory import SandboxLiveExecClientFactory
 from nautilus_trader.cache.config import CacheConfig
-from nautilus_trader.common.config import DatabaseConfig, LoggingConfig
+from nautilus_trader.common.config import DatabaseConfig, InstrumentProviderConfig, LoggingConfig
 from nautilus_trader.config import TradingNodeConfig
+from nautilus_trader.live.config import LiveExecEngineConfig
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.data import BarType
+from nautilus_trader.model.identifiers import InstrumentId
 
 from src.actors.alert import AlertActor, AlertActorConfig
 from src.actors.persistence import PersistenceActor, PersistenceActorConfig
@@ -36,7 +38,12 @@ from src.config.settings import get_settings
 RUN_MODE = "sandbox"
 
 
-def _build_strategy(strategy_name: str, instrument_id: str, bar_type: BarType, trade_size: str):
+def _build_strategy(
+    strategy_name: str,
+    instrument_id: InstrumentId,
+    bar_type: BarType,
+    trade_size: str,
+):
     """Build the selected strategy with default parameters.
 
     To customize strategy-specific parameters, edit the defaults below.
@@ -105,8 +112,8 @@ def _build_strategy(strategy_name: str, instrument_id: str, bar_type: BarType, t
 def main() -> None:
     settings = get_settings()
     run_id = str(uuid.uuid4())
-
-    instrument_id = settings.instrument_id
+    instrument_id_str = settings.instrument_id
+    instrument_id = InstrumentId.from_str(instrument_id_str)
     bar_interval = settings.bar_interval
     bar_type = BarType.from_str(f"{instrument_id}-{bar_interval}")
 
@@ -122,7 +129,7 @@ def main() -> None:
         run_id,
         settings.trader_id,
         strategy_id,
-        instrument_id,
+        instrument_id_str,
         RUN_MODE,
         config_dict,
     ))
@@ -130,6 +137,9 @@ def main() -> None:
     node = TradingNode(config=TradingNodeConfig(
         trader_id=settings.trader_id,
         logging=LoggingConfig(log_level="INFO"),
+        exec_engine=LiveExecEngineConfig(
+            reconciliation=False,
+        ),
         cache=CacheConfig(
             database=DatabaseConfig(
                 host=settings.redis_host,
@@ -138,6 +148,9 @@ def main() -> None:
         ),
         data_clients={
             "HYPERLIQUID": HyperliquidDataClientConfig(
+                instrument_provider=InstrumentProviderConfig(
+                    load_ids=(instrument_id,),
+                ),
                 testnet=False,  # Real market data; simulated execution via Sandbox
             ),
         },
@@ -170,11 +183,23 @@ def main() -> None:
     node.trader.add_strategy(strategy)
 
     node.build()
+    interrupted = False
     try:
         node.run()
+    except KeyboardInterrupt:
+        interrupted = True
+    except Exception as exc:
+        print(f"run_sandbox: node.run() raised {type(exc).__name__}: {exc}")
+        raise
     finally:
+        try:
+            node.stop()
+        except Exception as exc:
+            print(f"run_sandbox: node.stop() raised {type(exc).__name__}: {exc}")
         node.dispose()
         asyncio.run(_close_run(settings.postgres_dsn, run_id))
+    if interrupted:
+        print("Interrupted by user, shutdown complete.")
 
 
 async def _register_run(
