@@ -13,10 +13,17 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Import your metadata here when you have models defined:
-# from src.persistence.models import metadata
-# target_metadata = metadata
-target_metadata = None
+from src.config.settings import get_settings
+from src.persistence.schema import metadata
+
+target_metadata = metadata
+
+# Build URL from Settings (.env) instead of hardcoding in alembic.ini
+_settings = get_settings()
+config.set_main_option(
+    "sqlalchemy.url",
+    _settings.postgres_dsn.replace("postgresql://", "postgresql+asyncpg://"),
+)
 
 
 def run_migrations_offline() -> None:
