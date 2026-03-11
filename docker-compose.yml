@@ -1,16 +1,16 @@
 services:
-  db:
+  postgres:
     image: timescale/timescaledb:latest-pg16
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5434}:5432"
     environment:
-      POSTGRES_DB: nautilus_platform
-      POSTGRES_USER: nautilus
-      POSTGRES_PASSWORD: nautilus_dev  # Override in production
+      POSTGRES_DB: ${POSTGRES_DB:-nautilus_platform}
+      POSTGRES_USER: ${POSTGRES_USER:-nautilus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nautilus_dev}
     volumes:
       - pgdata:/home/postgres/pgdata/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nautilus -d nautilus_platform"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nautilus} -d ${POSTGRES_DB:-nautilus_platform}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -18,7 +18,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "${REDIS_PORT:-6379}:6379"
     volumes:
       - redisdata:/data
     healthcheck:
@@ -27,6 +27,22 @@ services:
       timeout: 5s
       retries: 5
 
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-changeme}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+      - ./grafana/dashboards:/var/lib/grafana/dashboards
+    ports:
+      - "3000:3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
 volumes:
   pgdata:
   redisdata:
+  grafana_data:
