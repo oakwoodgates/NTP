@@ -145,6 +145,13 @@ Telegram ←HTTP→ AlertActor (inside TradingNode)        ← Phase 2 alerting
 - **Every table includes `run_id`** (UUID) for grouping rows by TradingNode run.
 - **ISO 8601 timestamps with timezone** everywhere. NT uses nanosecond-resolution Unix timestamps internally — convert with `datetime.fromtimestamp(ts_ns / 1e9, tz=timezone.utc)`.
 
+### Static analysis and typing
+
+- **Authoritative tools:** `ruff` (lint, imports, style), `mypy` (type checking), `pytest` (tests). CI runs `ruff check src tests scripts alembic` and `mypy src tests scripts`; both must pass before merge.
+- **Untyped dependencies:** NautilusTrader, pandas, plotly, and asyncpg have no stubs. They are handled via `[[tool.mypy.overrides]]` in `pyproject.toml` with `ignore_missing_imports = true`, so mypy does not complain about missing stubs. Strict mode remains enabled for first-party code in `src/`, `tests/`, and `scripts/`.
+- **New code expectations:** Full type hints on public APIs and callbacks; no `Any` in signatures except where required by NT (e.g. `on_event(event: Any)`). No floats for prices, quantities, or money. Run `ruff check` and `mypy` locally and fix any new violations before opening a PR. On NT version bumps, re-run both; if new NT modules trigger `import-not-found`, add them to the mypy overrides.
+- **Notebooks:** Excluded from ruff/mypy in config; not part of CI static checks.
+
 ## Project Structure
 
 ```
