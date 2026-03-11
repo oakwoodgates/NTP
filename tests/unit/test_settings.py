@@ -6,7 +6,7 @@ from src.config.settings import Settings, get_settings
 class TestSettings:
     def test_defaults(self) -> None:
         # Use _env_file=None so defaults are not overridden by .env values.
-        s = Settings(postgres_password="test", _env_file=None)
+        s = Settings(postgres_password="test", _env_file=None)  # type: ignore[call-arg]
         assert s.postgres_host == "localhost"
         assert s.postgres_port == 5434
         assert s.postgres_db == "nautilus_platform"
@@ -49,7 +49,7 @@ class TestSettings:
 
     def test_extra_env_vars_ignored(self) -> None:
         """Settings should not fail when .env has vars not in the model."""
-        s = Settings(postgres_password="test", _env_file=None)
+        s = Settings(postgres_password="test", _env_file=None)  # type: ignore[call-arg]
         assert s.postgres_password == "test"
 
     def test_get_settings_cached(self) -> None:

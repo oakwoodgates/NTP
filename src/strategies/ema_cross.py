@@ -1,7 +1,10 @@
 """EMA crossover strategy for pipeline validation."""
 
+from __future__ import annotations
+
 from datetime import timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING, Any
 
 from nautilus_trader.config import PositiveInt
 from nautilus_trader.core.correctness import PyCondition
@@ -9,9 +12,11 @@ from nautilus_trader.indicators import ExponentialMovingAverage
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.trading.config import StrategyConfig
 from nautilus_trader.trading.strategy import Strategy
+
+if TYPE_CHECKING:
+    from nautilus_trader.model.instruments import Instrument
 
 
 class EMACrossConfig(StrategyConfig, frozen=True):
@@ -139,7 +144,7 @@ class EMACross(Strategy):
         )
         self.submit_order(order)
 
-    def on_order_filled(self, event) -> None:  # noqa: ANN001
+    def on_order_filled(self, event: Any) -> None:
         """Log fills for debugging."""
         self.log.info(f"Filled: {event}")
 

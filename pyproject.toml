@@ -60,10 +60,15 @@ packages = ["src"]
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+exclude = ["notebooks", "*.ipynb"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM", "TCH"]
 ignore = ["E501"]  # Line length handled by formatter
+
+[tool.ruff.lint.per-file-ignores]
+# Strategies use Decimal, Bar, BarType, InstrumentId, PositiveInt at runtime (config, on_bar).
+"src/strategies/*.py" = ["TC002", "TC003"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]
@@ -73,6 +78,18 @@ python_version = "3.12"
 strict = true
 warn_return_any = true
 warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["nautilus_trader", "nautilus_trader.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["pandas", "pandas.*", "plotly", "plotly.*", "asyncpg"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["src.strategies.*", "src.actors.*"]
+disable_error_code = ["misc"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

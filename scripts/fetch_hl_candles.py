@@ -1,5 +1,3 @@
-"""Fetch OHLCV candles from Hyperliquid API and write to ParquetDataCatalog."""
-
 from __future__ import annotations
 
 import argparse
@@ -8,6 +6,7 @@ import sys
 import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pandas as pd
@@ -38,14 +37,15 @@ CATALOG_PATH = Path("data/catalog")
 # ── Hyperliquid API ──────────────────────────────────────────────────
 
 
-def fetch_meta(client: httpx.Client) -> dict:
+def fetch_meta(client: httpx.Client) -> dict[str, Any]:
     """Fetch asset metadata from Hyperliquid meta endpoint."""
     resp = client.post(HYPERLIQUID_API_URL, json={"type": "meta"})
     resp.raise_for_status()
-    return resp.json()
+    data: dict[str, Any] = resp.json()
+    return data
 
 
-def validate_coin_metadata(meta: dict, coins: list[str]) -> None:
+def validate_coin_metadata(meta: dict[str, Any], coins: list[str]) -> None:
     """Warn if fetched metadata differs from COIN_DEFAULTS."""
     universe = meta.get("universe", [])
     by_name = {item["name"]: item for item in universe}
@@ -77,9 +77,9 @@ def fetch_candles(
     interval: str,
     start_ms: int,
     end_ms: int,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Fetch all candles for a coin/interval range, paginating as needed."""
-    all_candles: list[dict] = []
+    all_candles: list[dict[str, Any]] = []
     cursor_ms = start_ms
 
     while cursor_ms < end_ms:
@@ -94,7 +94,7 @@ def fetch_candles(
         }
         resp = client.post(HYPERLIQUID_API_URL, json=payload)
         resp.raise_for_status()
-        batch = resp.json()
+        batch: list[dict[str, Any]] = resp.json()
 
         if not batch:
             break
@@ -118,7 +118,7 @@ def fetch_candles(
 # ── Data transformation ──────────────────────────────────────────────
 
 
-def candles_to_dataframe(candles: list[dict]) -> pd.DataFrame:
+def candles_to_dataframe(candles: list[dict[str, Any]]) -> pd.DataFrame:
     """Convert HL candle response to the DataFrame format BarDataWrangler expects.
 
     Required: columns ['open', 'high', 'low', 'close', 'volume']
@@ -191,7 +191,7 @@ def clean_catalog_data(bar_type_str: str) -> None:
 
 def wrangle_and_write(
     df: pd.DataFrame,
-    instrument,  # CryptoPerpetual — avoid importing the type in a script
+    instrument: Any,  # CryptoPerpetual — avoid importing the type in a script
     interval: str,
     bar_type: BarType,
     catalog: ParquetDataCatalog,

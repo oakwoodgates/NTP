@@ -20,6 +20,7 @@ import json
 import sys
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import asyncpg
 from nautilus_trader.adapters.hyperliquid.config import (
@@ -36,6 +37,7 @@ from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.config import LiveRiskEngineConfig
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.data import BarType
+from nautilus_trader.model.identifiers import InstrumentId
 
 from src.actors.alert import AlertActor, AlertActorConfig
 from src.actors.persistence import PersistenceActor, PersistenceActorConfig
@@ -44,7 +46,12 @@ from src.config.settings import get_settings
 RUN_MODE = "live"
 
 
-def _build_strategy(strategy_name: str, instrument_id: str, bar_type: BarType, trade_size: str):
+def _build_strategy(
+    strategy_name: str,
+    instrument_id: InstrumentId,
+    bar_type: BarType,
+    trade_size: Decimal,
+) -> tuple[object, str, dict[str, object]]:
     """Build the selected strategy with default parameters.
 
     To customize strategy-specific parameters, edit the defaults below.
@@ -127,12 +134,12 @@ def main() -> None:
 
     run_id = str(uuid.uuid4())
 
-    instrument_id = settings.instrument_id
+    instrument_id = InstrumentId.from_str(settings.instrument_id)
     bar_interval = settings.bar_interval
     bar_type = BarType.from_str(f"{instrument_id}-{bar_interval}")
 
     strategy, strategy_id, config_dict = _build_strategy(
-        settings.strategy, instrument_id, bar_type, settings.trade_size,
+        settings.strategy, instrument_id, bar_type, Decimal(settings.trade_size),
     )
 
     print(f"Starting {RUN_MODE} run: {strategy_id} on {instrument_id} ({bar_interval})")
@@ -142,7 +149,7 @@ def main() -> None:
         run_id,
         settings.trader_id,
         strategy_id,
-        instrument_id,
+        str(instrument_id),
         RUN_MODE,
         config_dict,
     ))
@@ -218,7 +225,7 @@ async def _register_run(
     strategy_id: str,
     instrument_id: str,
     mode: str,
-    config_dict: dict,
+    config_dict: dict[str, object],
 ) -> None:
     conn = await asyncpg.connect(dsn)
     try:

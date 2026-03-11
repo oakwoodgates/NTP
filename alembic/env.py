@@ -3,9 +3,10 @@
 import asyncio
 from logging.config import fileConfig
 
-from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.ext.asyncio import async_engine_from_config
+
+from alembic import context
 
 # Alembic Config object
 config = context.config
@@ -13,8 +14,8 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-from src.config.settings import get_settings
-from src.persistence.schema import metadata
+from src.config.settings import get_settings  # noqa: E402
+from src.persistence.schema import metadata  # noqa: E402
 
 target_metadata = metadata
 

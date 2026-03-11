@@ -24,8 +24,11 @@ NOTE — Hyperliquid live trading:
   on_order_filled() + cancel_order() on the opposing leg.
 """
 
+from __future__ import annotations
+
 from datetime import timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING, Any
 
 from nautilus_trader.config import PositiveInt
 from nautilus_trader.core.correctness import PyCondition
@@ -33,9 +36,11 @@ from nautilus_trader.indicators import AverageTrueRange, ExponentialMovingAverag
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import OrderSide, OrderType
 from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.trading.config import StrategyConfig
 from nautilus_trader.trading.strategy import Strategy
+
+if TYPE_CHECKING:
+    from nautilus_trader.model.instruments import Instrument
 
 
 class EMACrossATRConfig(StrategyConfig, frozen=True):
@@ -253,7 +258,7 @@ class EMACrossATR(Strategy):
             f"SL={sl_price} | TP={tp_price} | ATR={atr:.2f}"
         )
 
-    def on_order_filled(self, event) -> None:  # noqa: ANN001
+    def on_order_filled(self, event: Any) -> None:
         """Log fills for debugging."""
         self.log.info(f"Filled: {event}")
 

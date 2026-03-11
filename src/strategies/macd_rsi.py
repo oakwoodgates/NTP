@@ -9,8 +9,11 @@ signal line is computed manually via a separate EMA fed with MACD values.
 NT's RSI uses a 0.0-1.0 scale (not 0-100).
 """
 
+from __future__ import annotations
+
 from datetime import timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING, Any
 
 from nautilus_trader.config import PositiveInt
 from nautilus_trader.core.correctness import PyCondition
@@ -22,9 +25,11 @@ from nautilus_trader.indicators import (
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.trading.config import StrategyConfig
 from nautilus_trader.trading.strategy import Strategy
+
+if TYPE_CHECKING:
+    from nautilus_trader.model.instruments import Instrument
 
 
 class MACDRSIConfig(StrategyConfig, frozen=True):
@@ -187,17 +192,18 @@ class MACDRSI(Strategy):
                     self._enter(OrderSide.SELL)
                 return
 
-        elif self.portfolio.is_net_short(self.config.instrument_id):
-            if macd_crossed_above or rsi_val < self.config.rsi_oversold:
-                self.close_all_positions(self.config.instrument_id)
-                # On MACD reversal, enter long immediately if RSI allows
-                if (
-                    macd_crossed_above
-                    and rsi_val > self.config.rsi_entry_threshold
-                    and rsi_val < self.config.rsi_overbought
-                ):
-                    self._enter(OrderSide.BUY)
-                return
+        elif self.portfolio.is_net_short(self.config.instrument_id) and (
+            macd_crossed_above or rsi_val < self.config.rsi_oversold
+        ):
+            self.close_all_positions(self.config.instrument_id)
+            # On MACD reversal, enter long immediately if RSI allows
+            if (
+                macd_crossed_above
+                and rsi_val > self.config.rsi_entry_threshold
+                and rsi_val < self.config.rsi_overbought
+            ):
+                self._enter(OrderSide.BUY)
+            return
 
         # Step 8: Entry logic (only when flat)
         if self.portfolio.is_flat(self.config.instrument_id):
@@ -226,7 +232,7 @@ class MACDRSI(Strategy):
         )
         self.submit_order(order)
 
-    def on_order_filled(self, event) -> None:  # noqa: ANN001
+    def on_order_filled(self, event: Any) -> None:
         """Log fills for debugging."""
         self.log.info(f"Filled: {event}")
 

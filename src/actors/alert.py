@@ -1,6 +1,9 @@
 """AlertActor — sends Telegram notifications on fills, position closes, and drawdown."""
 
+from __future__ import annotations
+
 from decimal import Decimal
+from typing import Any
 
 import httpx
 import pandas as pd
@@ -10,6 +13,21 @@ from nautilus_trader.model.currencies import USDC
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.events import OrderFilled, PositionClosed
 from nautilus_trader.model.identifiers import Venue
+
+
+def _valid_instrument_id(s: str) -> bool:
+    """Expect instrument ids like 'BTC-USDT.HYPERLIQUID' (symbol-quote.venue)."""
+    s = str(s).strip()
+    return len(s) >= 2 and "." in s and "-" in s
+
+
+def _valid_decimal_str(s: str) -> bool:
+    """Check that a string parses as a non-negative decimal (for qty/price)."""
+    try:
+        d = Decimal(str(s).strip())
+        return d >= 0
+    except Exception:
+        return False
 
 
 class AlertActorConfig(ActorConfig, frozen=True):
@@ -44,6 +62,30 @@ class AlertActor(Actor):
     def on_order_filled(self, event: OrderFilled) -> None:
         if not self.config.notify_fills:
             return
+        instrument_id_str = str(event.instrument_id)
+        last_qty_str = str(event.last_qty)
+        last_px_str = str(event.last_px)
+        if not _valid_instrument_id(instrument_id_str):
+            self.log.warning(
+                "AlertActor: skipping fill alert — unexpected instrument_id shape (OrderFilled)",
+                extra={
+                    "event": "OrderFilled",
+                    "instrument_id": instrument_id_str,
+                    "strategy_id": str(event.strategy_id),
+                },
+            )
+            return
+        if not _valid_decimal_str(last_qty_str) or not _valid_decimal_str(last_px_str):
+            self.log.warning(
+                "AlertActor: skipping fill alert — invalid qty/price",
+                extra={
+                    "event": "OrderFilled",
+                    "instrument_id": instrument_id_str,
+                    "last_qty": last_qty_str,
+                    "last_px": last_px_str,
+                },
+            )
+            return
         side_emoji = "+" if event.order_side == OrderSide.BUY else "-"
         msg = (
             f"<b>Fill</b>: {side_emoji}{event.order_side.name}\n"
@@ -52,8 +94,19 @@ class AlertActor(Actor):
         )
         self.run_in_executor(self._send, (msg,))
 
-    def on_event(self, event) -> None:  # noqa: ANN001
+    def on_event(self, event: Any) -> None:
         if isinstance(event, PositionClosed) and self.config.notify_position_closed:
+            instrument_id_str = str(event.instrument_id)
+            if not _valid_instrument_id(instrument_id_str):
+                self.log.warning(
+                    "AlertActor: skipping position alert — unexpected instrument_id shape (PositionClosed)",
+                    extra={
+                        "event": "PositionClosed",
+                        "instrument_id": instrument_id_str,
+                        "strategy_id": str(event.strategy_id),
+                    },
+                )
+                return
             pnl = event.realized_pnl
             pnl_str = str(pnl) if pnl else "N/A"
             try:
@@ -68,7 +121,7 @@ class AlertActor(Actor):
             )
             self.run_in_executor(self._send, (msg,))
 
-    def _on_drawdown_check(self, event) -> None:  # noqa: ANN001
+    def _on_drawdown_check(self, event: Any) -> None:
         self.run_in_executor(self._check_drawdown)
 
     def _check_drawdown(self) -> None:

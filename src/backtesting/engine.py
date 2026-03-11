@@ -6,20 +6,22 @@ notebooks only need to provide strategy-specific configuration.
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
-
 from nautilus_trader.backtest.config import BacktestEngineConfig
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.model.currencies import USDC
-from nautilus_trader.model.data import Bar
 from nautilus_trader.model.enums import AccountType, OmsType
-from nautilus_trader.model.identifiers import Venue
-from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.objects import Money
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from nautilus_trader.model.data import Bar
+    from nautilus_trader.model.identifiers import Venue
+    from nautilus_trader.model.instruments import Instrument
 
 
 def make_engine(

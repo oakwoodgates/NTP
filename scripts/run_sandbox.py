@@ -17,6 +17,7 @@ import asyncio
 import json
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
 
 import asyncpg
 from nautilus_trader.adapters.hyperliquid.config import HyperliquidDataClientConfig
@@ -42,8 +43,8 @@ def _build_strategy(
     strategy_name: str,
     instrument_id: InstrumentId,
     bar_type: BarType,
-    trade_size: str,
-):
+    trade_size: Decimal,
+) -> tuple[object, str, dict[str, object]]:
     """Build the selected strategy with default parameters.
 
     To customize strategy-specific parameters, edit the defaults below.
@@ -118,7 +119,7 @@ def main() -> None:
     bar_type = BarType.from_str(f"{instrument_id}-{bar_interval}")
 
     strategy, strategy_id, config_dict = _build_strategy(
-        settings.strategy, instrument_id, bar_type, settings.trade_size,
+        settings.strategy, instrument_id, bar_type, Decimal(settings.trade_size),
     )
 
     print(f"Starting {RUN_MODE} run: {strategy_id} on {instrument_id} ({bar_interval})")
@@ -149,7 +150,7 @@ def main() -> None:
         data_clients={
             "HYPERLIQUID": HyperliquidDataClientConfig(
                 instrument_provider=InstrumentProviderConfig(
-                    load_ids=(instrument_id,),
+                    load_ids=frozenset((instrument_id,)),
                 ),
                 testnet=False,  # Real market data; simulated execution via Sandbox
             ),
@@ -209,7 +210,7 @@ async def _register_run(
     strategy_id: str,
     instrument_id: str,
     mode: str,
-    config_dict: dict,
+    config_dict: dict[str, object],
 ) -> None:
     conn = await asyncpg.connect(dsn)
     try:

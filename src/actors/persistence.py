@@ -4,9 +4,13 @@ Subscribes to NT MessageBus events inside the TradingNode and persists them
 via asyncpg. All I/O runs in the executor to avoid blocking the event loop.
 """
 
+from __future__ import annotations
+
 import asyncio
 import uuid
 from datetime import UTC, datetime
+from decimal import Decimal
+from typing import Any
 
 import asyncpg
 import pandas as pd
@@ -15,6 +19,21 @@ from nautilus_trader.config import ActorConfig
 from nautilus_trader.model.currencies import USDC
 from nautilus_trader.model.events import OrderFilled, PositionClosed
 from nautilus_trader.model.identifiers import Venue
+
+
+def _valid_decimal_str(s: str) -> bool:
+    """Check that a string parses as a non-negative decimal (for qty/price)."""
+    try:
+        d = Decimal(str(s).strip())
+        return d >= 0
+    except Exception:
+        return False
+
+
+def _valid_instrument_id(s: str) -> bool:
+    """Expect instrument ids like 'BTC-USDT.HYPERLIQUID' (symbol-quote.venue)."""
+    s = str(s).strip()
+    return len(s) >= 2 and "." in s and "-" in s
 
 
 class PersistenceActorConfig(ActorConfig, frozen=True):
@@ -41,11 +60,11 @@ class PersistenceActor(Actor):
     def on_order_filled(self, event: OrderFilled) -> None:
         self.run_in_executor(self._persist_fill, (event,))
 
-    def on_event(self, event) -> None:  # noqa: ANN001
+    def on_event(self, event: Any) -> None:
         if isinstance(event, PositionClosed):
             self.run_in_executor(self._persist_position, (event,))
 
-    def _on_snapshot_timer(self, event) -> None:  # noqa: ANN001
+    def _on_snapshot_timer(self, event: Any) -> None:
         self.run_in_executor(self._persist_account_snapshot)
 
     # -- Executor callables (run in ThreadPoolExecutor) -----------------------
@@ -53,18 +72,42 @@ class PersistenceActor(Actor):
     def _persist_fill(self, event: OrderFilled) -> None:
         ts = datetime.fromtimestamp(event.ts_event / 1e9, tz=UTC)
         commission = event.commission
+        instrument_id_str = str(event.instrument_id)
+        last_qty_str = str(event.last_qty)
+        last_px_str = str(event.last_px)
+        if not _valid_instrument_id(instrument_id_str):
+            self.log.warning(
+                "PersistenceActor: skipping fill — unexpected instrument_id shape",
+                extra={
+                    "event": "OrderFilled",
+                    "instrument_id": instrument_id_str,
+                    "strategy_id": str(event.strategy_id),
+                },
+            )
+            return
+        if not _valid_decimal_str(last_qty_str) or not _valid_decimal_str(last_px_str):
+            self.log.warning(
+                "PersistenceActor: skipping fill — invalid qty/price",
+                extra={
+                    "event": "OrderFilled",
+                    "instrument_id": instrument_id_str,
+                    "last_qty": last_qty_str,
+                    "last_px": last_px_str,
+                },
+            )
+            return
         try:
             asyncio.run(self._async_insert_fill(
                 ts,
                 uuid.UUID(self.config.run_id),
                 str(event.strategy_id),
-                str(event.instrument_id),
+                instrument_id_str,
                 str(event.client_order_id),
                 str(event.venue_order_id) if event.venue_order_id else None,
                 str(event.trade_id) if event.trade_id else None,
                 event.order_side.name,
-                str(event.last_qty),
-                str(event.last_px),
+                last_qty_str,
+                last_px_str,
                 str(commission.as_decimal()) if commission else None,
                 str(commission.currency) if commission else None,
                 event.liquidity_side.name,
@@ -75,20 +118,44 @@ class PersistenceActor(Actor):
     def _persist_position(self, event: PositionClosed) -> None:
         ts_opened = datetime.fromtimestamp(event.ts_opened / 1e9, tz=UTC)
         ts_closed = datetime.fromtimestamp(event.ts_closed / 1e9, tz=UTC)
-        # avg_px_open/avg_px_close are doubles — convert via str to preserve
-        # precision for NUMERIC column (avoid float→Decimal precision artifacts)
+        instrument_id_str = str(event.instrument_id)
+        peak_qty_str = str(event.peak_qty)
+        avg_px_open_str = str(event.avg_px_open)
+        avg_px_close_str = str(event.avg_px_close)
+        if not _valid_instrument_id(instrument_id_str):
+            self.log.warning(
+                "PersistenceActor: skipping position — unexpected instrument_id shape (PositionClosed)",
+                extra={
+                    "event": "PositionClosed",
+                    "instrument_id": instrument_id_str,
+                    "strategy_id": str(event.strategy_id),
+                },
+            )
+            return
+        if not _valid_decimal_str(peak_qty_str) or not _valid_decimal_str(avg_px_open_str) or not _valid_decimal_str(avg_px_close_str):
+            self.log.warning(
+                "PersistenceActor: skipping position — invalid qty/price",
+                extra={
+                    "event": "PositionClosed",
+                    "instrument_id": instrument_id_str,
+                    "peak_qty": peak_qty_str,
+                    "avg_px_open": avg_px_open_str,
+                    "avg_px_close": avg_px_close_str,
+                },
+            )
+            return
         try:
             asyncio.run(self._async_insert_position(
                 ts_opened,
                 ts_closed,
                 uuid.UUID(self.config.run_id),
                 str(event.strategy_id),
-                str(event.instrument_id),
+                instrument_id_str,
                 str(event.position_id),
                 event.entry.name,
-                str(event.peak_qty),
-                str(event.avg_px_open),
-                str(event.avg_px_close),
+                peak_qty_str,
+                avg_px_open_str,
+                avg_px_close_str,
                 str(event.realized_pnl.as_decimal()) if event.realized_pnl else None,
                 str(event.realized_return),
                 str(event.currency),
