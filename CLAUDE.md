@@ -129,7 +129,7 @@ Telegram ←HTTP→ AlertActor (inside TradingNode)        ← Phase 2 alerting
 | API | FastAPI + asyncpg | Phase 3 |
 | Frontend | React + TradingView Lightweight Charts | Phase 3 |
 | Indicators | NT built-in + TA-Lib or pandas-ta | C core / Numba accelerated |
-| Process mgmt | Docker Compose (infra) + venv (TradingNode, dev) | |
+| Process mgmt | Docker Compose (infra + trader container) + venv (dev/debug) | Trader runs as `trader` service; native venv for quick iteration |
 | Config | Pydantic Settings | Single settings.py, env var overrides, .env file |
 
 ## Code Conventions
@@ -207,13 +207,18 @@ tests/                # unit/ and integration/
 8. Set `log_level` to `"ERROR"` in `LoggingConfig` to avoid stdout flooding.
 
 ### Phase 2 workflow (paper trading)
-1. Start infrastructure: `docker compose up -d`
-2. Run migrations: `alembic upgrade head`
-3. Start paper trading: `python scripts/run_sandbox.py`
-4. Verify Telegram alert fires on first fill.
-5. Verify `order_fills` table has rows after first fill: `SELECT COUNT(*) FROM order_fills;`
-6. Open Grafana at `http://localhost:3000` — check balance and fill panels.
-7. Let it run. Check daily. After 2+ weeks with stable behavior, proceed to live.
+1. Build trader image: `docker compose build trader`
+2. Run migrations: `docker compose run --rm trader alembic upgrade head`
+3. Start everything: `docker compose up -d` (infra + trader container; auto-restarts on crash)
+4. Tail logs: `docker compose logs -f trader --tail 200`
+5. Verify Telegram alert fires on first fill.
+6. Verify `order_fills` table has rows after first fill: `SELECT COUNT(*) FROM order_fills;`
+7. Open Grafana at `http://localhost:3000` — check balance and fill panels.
+8. Let it run. Check daily. After 2+ weeks with stable behavior, proceed to live.
+
+**Graceful shutdown:** `docker compose stop trader` sends SIGTERM → Python SIGTERM handler raises `KeyboardInterrupt` → `finally` block calls `node.stop()`, `node.dispose()`, `_close_run()`. Verify `strategy_runs.stopped_at` is not NULL after stop.
+
+**For quick iteration/debugging:** `docker compose up -d postgres redis grafana` then `python scripts/run_sandbox.py` natively.
 
 ### Adding a new strategy
 1. Create a new file in `src/strategies/`.

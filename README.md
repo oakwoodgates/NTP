@@ -100,7 +100,10 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 ├── alembic/                 # DB migrations
 ├── frontend/                # React application (Phase 3)
 ├── pyproject.toml
-├── docker-compose.yml       # PostgreSQL + TimescaleDB + Redis + Grafana
+├── Dockerfile               # Trader container (run_sandbox.py / run_live.py)
+├── docker-entrypoint.sh     # Entrypoint — passthrough for ad-hoc cmds, exec Python as PID 1
+├── .dockerignore
+├── docker-compose.yml       # PostgreSQL + TimescaleDB + Redis + Grafana + trader
 ├── .env.example             # Secrets template (committed)
 ├── CLAUDE.md
 └── README.md
@@ -145,19 +148,31 @@ jupyter notebook notebooks/
 ### Phase 2 (current) — Paper + live trading
 
 ```bash
-# Infrastructure
 cp .env.example .env
 # Edit .env — fill in POSTGRES_PASSWORD, TELEGRAM_TOKEN, HL credentials
+
+# Build trader image
+docker compose build trader
+
+# Run migrations (first time only)
+docker compose run --rm trader alembic upgrade head
+
+# Start everything — infra + trader container
 docker compose up -d
 
-# Migrations
-alembic upgrade head
-
-# Paper trading
-python scripts/run_sandbox.py
+# Tail trader logs
+docker compose logs -f trader --tail 200
 
 # Monitoring
 open http://localhost:3000   # Grafana (admin / your GRAFANA_PASSWORD)
+```
+
+To run the trader natively instead (quick iteration / debugging):
+
+```bash
+docker compose up -d postgres redis grafana
+alembic upgrade head
+python scripts/run_sandbox.py
 ```
 
 ### Phase 3+ — Full stack
@@ -180,10 +195,21 @@ Open a notebook in `notebooks/`, load data into NT's ParquetDataCatalog, configu
 
 ### Run paper trading (Phase 2)
 
-Requires infrastructure running first (`docker compose up -d` + `alembic upgrade head`).
+Requires infrastructure running first (`docker compose up -d` + migrations).
+
+**Docker (recommended for multi-day runs):**
 
 ```bash
-python scripts/run_sandbox.py
+docker compose up -d          # starts infra + trader container; auto-restarts on crash
+docker compose logs -f trader  # tail logs
+docker compose stop trader     # graceful shutdown (SIGTERM → node.stop() → DB updated)
+```
+
+**Native (quick iteration):**
+
+```bash
+docker compose up -d postgres redis grafana
+python scripts/run_sandbox.py  # Ctrl+C for graceful shutdown
 ```
 
 Uses NT's `SandboxExecutionClient` against live Hyperliquid market data. Every fill and closed position persists to PostgreSQL via `PersistenceActor`. Telegram alerts fire on fills and position changes (if `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` are set in `.env`). Monitor at `http://localhost:3000`.
@@ -191,8 +217,13 @@ Uses NT's `SandboxExecutionClient` against live Hyperliquid market data. Every f
 ### Run live trading (Phase 2 — after paper validation)
 
 ```bash
-# Requires HL_TESTNET=false in .env — set explicitly
+# Native — interactive confirmation prompt
+# Requires HL_TESTNET=false + HL_PRIVATE_KEY in .env
 python scripts/run_live.py
+
+# Docker — set in .env: TRADING_SCRIPT=scripts/run_live.py, HL_TESTNET=false,
+#           LIVE_CONFIRM=yes, HL_PRIVATE_KEY=<key>
+docker compose restart trader
 ```
 
 ### Start the API server (Phase 3)
