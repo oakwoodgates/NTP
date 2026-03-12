@@ -60,3 +60,6 @@ secrets/
 
 # Test reports
 reports/
+
+# Temporary documentation
+docs/temp/
