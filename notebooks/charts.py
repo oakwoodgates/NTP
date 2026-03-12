@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 import json
 import math
 import textwrap
+import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -961,6 +962,7 @@ def generate_backtest_html(
     bar_label: str = "1h",
     starting_capital: float = 10_000.0,
     output_path: str | Path | None = None,
+    open_browser: bool = False,
 ) -> Path:
     """
     Generate a self-contained HTML backtest report using TradingView Lightweight Charts.
@@ -1056,6 +1058,8 @@ def generate_backtest_html(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
     print(f"✓ Backtest HTML written → {output_path}")
+    if open_browser:
+        webbrowser.open(output_path.as_uri())
     return output_path
 
 
