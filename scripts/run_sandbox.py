@@ -10,11 +10,13 @@ Configure via .env or environment variables:
     TRADE_SIZE=0.001
     STARTING_BALANCE=10000
 
-Ctrl+C for graceful shutdown.
+Ctrl+C (local) or `docker stop` (container) for graceful shutdown.
 """
 
 import asyncio
 import json
+import signal
+import types
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -111,6 +113,15 @@ def _build_strategy(
 
 
 def main() -> None:
+    # Map SIGTERM → KeyboardInterrupt so `docker stop` triggers the same
+    # graceful shutdown path as Ctrl+C. Without this, SIGTERM's default
+    # behavior (sys.exit → SystemExit) may not propagate reliably through
+    # NT's Rust/C extensions in node.run().
+    def _sigterm_handler(sig: int, frame: types.FrameType | None) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+
     settings = get_settings()
     run_id = str(uuid.uuid4())
     instrument_id_str = settings.instrument_id

@@ -1,7 +1,8 @@
 """Live trading runner — real Hyperliquid execution.
 
 Usage:
-    python scripts/run_live.py
+    python scripts/run_live.py           # interactive (prompts for confirmation)
+    docker compose up -d trader          # containerized (set LIVE_CONFIRM=yes in .env)
 
 Requires HL_TESTNET=false in .env for mainnet. Defaults to true (testnet).
 Do NOT run this until paper trading (run_sandbox.py) has been stable for 2+ weeks.
@@ -13,11 +14,16 @@ Configure via .env or environment variables:
     TRADE_SIZE=0.001
     HL_TESTNET=false
     HL_PRIVATE_KEY=<your-key>
+    LIVE_CONFIRM=yes          # required for containerized live trading (bypasses input())
+
+Ctrl+C (local) or `docker stop` (container) for graceful shutdown.
 """
 
 import asyncio
 import json
+import signal
 import sys
+import types
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -118,15 +124,31 @@ def _build_strategy(
 
 
 def main() -> None:
+    # Map SIGTERM → KeyboardInterrupt so `docker stop` triggers the same
+    # graceful shutdown path as Ctrl+C. Without this, SIGTERM's default
+    # behavior (sys.exit → SystemExit) may not propagate reliably through
+    # NT's Rust/C extensions in node.run().
+    def _sigterm_handler(sig: int, frame: types.FrameType | None) -> None:
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _sigterm_handler)
+
     settings = get_settings()
 
     # Safety check — require explicit mainnet opt-in
     if not settings.hl_testnet:
-        print("WARNING: HL_TESTNET=false — this will trade on MAINNET with real funds.")
-        confirm = input("Type 'yes' to proceed: ")
-        if confirm.strip().lower() != "yes":
-            print("Aborted.")
-            sys.exit(0)
+        if settings.live_confirm:
+            print("WARNING: HL_TESTNET=false — MAINNET trading active (LIVE_CONFIRM=yes).")
+        else:
+            print("WARNING: HL_TESTNET=false — this will trade on MAINNET with real funds.")
+            try:
+                confirm = input("Type 'yes' to proceed: ")
+                if confirm.strip().lower() != "yes":
+                    print("Aborted.")
+                    sys.exit(0)
+            except EOFError:
+                print("ERROR: Non-interactive environment detected. Set LIVE_CONFIRM=yes in .env to confirm mainnet trading.")
+                sys.exit(1)
 
     if not settings.hl_private_key:
         print("ERROR: HL_PRIVATE_KEY not set in .env")
@@ -189,6 +211,7 @@ def main() -> None:
         postgres_dsn=settings.postgres_dsn,
         run_id=run_id,
         venue="HYPERLIQUID",
+        instrument_id=settings.instrument_id,
     )))
     node.trader.add_actor(AlertActor(AlertActorConfig(
         telegram_token=settings.telegram_token,

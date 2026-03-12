@@ -1,0 +1,15 @@
+.venv/
+.env
+data/
+reports/
+notebooks/
+*.ipynb
+.git/
+__pycache__/
+*.pyc
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+grafana/
+tests/
+*.egg-info/

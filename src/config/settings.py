@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     hl_wallet_address: str = ""
     hl_private_key: str = ""
     hl_testnet: bool = True  # Safety default — must explicitly set False for mainnet
+    live_confirm: bool = False  # Set LIVE_CONFIRM=yes in .env for containerized live trading
 
     # Trading
     trader_id: str = "TRADER-001"
