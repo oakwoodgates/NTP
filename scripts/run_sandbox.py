@@ -58,7 +58,7 @@ def _build_strategy(
             trade_size=trade_size,
             fast_ema_period=fast,
             slow_ema_period=slow,
-        )), f"EMACross-{fast}-{slow}", {"fast": fast, "slow": slow, "size": trade_size}
+        )), f"EMACross-{fast}-{slow}", {"fast": fast, "slow": slow, "size": str(trade_size)}
 
     if strategy_name == "SMACross":
         from src.strategies.sma_cross import SMACross, SMACrossConfig
@@ -69,7 +69,7 @@ def _build_strategy(
             trade_size=trade_size,
             fast_sma_period=fast,
             slow_sma_period=slow,
-        )), f"SMACross-{fast}-{slow}", {"fast": fast, "slow": slow, "size": trade_size}
+        )), f"SMACross-{fast}-{slow}", {"fast": fast, "slow": slow, "size": str(trade_size)}
 
     if strategy_name == "EMACrossATR":
         from src.strategies.ema_cross_atr import EMACrossATR, EMACrossATRConfig
@@ -86,7 +86,7 @@ def _build_strategy(
             atr_tp_multiplier=tp_mult,
         )), f"EMACrossATR-{fast}-{slow}-{atr}", {
             "fast": fast, "slow": slow, "atr": atr,
-            "sl_mult": sl_mult, "tp_mult": tp_mult, "size": trade_size,
+            "sl_mult": sl_mult, "tp_mult": tp_mult, "size": str(trade_size),
         }
 
     if strategy_name == "MACDRSI":
@@ -102,7 +102,7 @@ def _build_strategy(
             rsi_period=rsi,
         )), f"MACDRSI-{macd_fast}-{macd_slow}-{signal}-{rsi}", {
             "macd_fast": macd_fast, "macd_slow": macd_slow,
-            "signal": signal, "rsi": rsi, "size": trade_size,
+            "signal": signal, "rsi": rsi, "size": str(trade_size),
         }
 
     valid = ["EMACross", "SMACross", "EMACrossATR", "MACDRSI"]

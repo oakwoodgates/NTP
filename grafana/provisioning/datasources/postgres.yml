@@ -3,6 +3,7 @@ datasources:
   - name: PostgreSQL
     type: postgres
     uid: PostgreSQL
+    access: proxy
     url: postgres:5432
     database: ${POSTGRES_DB:-nautilus_platform}
     user: ${POSTGRES_USER:-nautilus}
