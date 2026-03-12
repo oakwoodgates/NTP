@@ -2,7 +2,7 @@
 
 ## What This Project Is
 
-A crypto algorithmic trading platform. NautilusTrader (NT) is the core engine, installed as a pip dependency. We build everything around it: custom Actors for persistence and alerting, a FastAPI gateway (Phase 3), React frontend (Phase 3), PostgreSQL persistence, Redis event bridging (Phase 3).
+A crypto algorithmic trading platform. NautilusTrader (NT) is the core engine, installed as a pip dependency. We build everything around it: custom Actors for persistence and alerting, research tooling for strategy validation, PostgreSQL persistence, and (future) a FastAPI gateway + React frontend.
 
 This is a solo-developer hobby project with production-grade ambitions. The developer is a senior software engineer who is technically strong, opinionated about architecture, and hates fighting frameworks.
 
@@ -20,7 +20,7 @@ NT uses 128-bit fixed-point integers internally (`Price`, `Quantity`, `Money` ty
 NT is event-driven (Actor model, MessageBus pub/sub). All custom code must follow this pattern:
 - Custom Actors subscribe to events on the MessageBus.
 - No `while True: sleep(1)` loops for checking state.
-- WebSocket push to frontend, not REST polling (Phase 3).
+- WebSocket push to frontend, not REST polling (future web layer).
 
 ### Don't Fight NautilusTrader
 NT is the framework. Work with its patterns:
@@ -75,10 +75,15 @@ Rules:
 ## Architecture Context
 
 ```
-React Frontend ←WebSocket/REST→ FastAPI Gateway        ← Phase 3
-                                      ↕
+Jupyter Notebooks (research + validation)          ← Phase 1 + 3a
+  └── backtesting/engine.py
+        ├── run_sweep()        → data/sweeps/*.parquet
+        ├── run_walk_forward() → in-memory DataFrame
+        └── load_sweeps()      ← reads from data/sweeps/
+  └── notebooks/charts.py     → reports/*.html (TVLC interactive)
+
                               PostgreSQL+TimescaleDB (persistence)
-                              Redis (cache + pub/sub)
+                              Redis (cache)
                                       ↕
                               NautilusTrader Engine
                               (Strategies, Actors, RiskEngine,
@@ -90,6 +95,9 @@ React Frontend ←WebSocket/REST→ FastAPI Gateway        ← Phase 3
 
 Grafana ←SQL→ PostgreSQL                               ← Phase 2 monitoring
 Telegram ←HTTP→ AlertActor (inside TradingNode)        ← Phase 2 alerting
+
+React Frontend ←WebSocket/REST→ FastAPI Gateway        ← Phase 3b (future)
+  └── StreamingActor → Redis Streams → WebSocket
 ```
 
 ### What NT Provides (don't rebuild)
@@ -106,28 +114,35 @@ Telegram ←HTTP→ AlertActor (inside TradingNode)        ← Phase 2 alerting
 - HTML tearsheet generation
 
 ### What We Build (NT doesn't provide)
+- **Sweep orchestration:** `run_sweep()` runs a parameter grid across any strategy, persists full analyzer stats to Parquet. `load_sweeps()` reads them back for comparison.
+- **Walk-forward analysis:** `run_walk_forward()` trains on sliding windows, tests best params out-of-sample. Catches overfitting before paper trading.
+- **Validation notebook:** plateau detection (are best params robust or fragile?), bootstrap confidence intervals (how much depends on a few lucky trades?), go/no-go assessment.
+- **Comparison notebook:** cross-instrument, cross-timeframe sweep comparison. Parameter stability analysis across sweeps.
+- **Interactive HTML reports:** TradingView Lightweight Charts with buy/sell markers, hover tooltips, trade table with click-to-zoom, stats bar. Self-contained HTML files in `reports/`.
 - **PersistenceActor:** custom Actor inside TradingNode that subscribes to NT MessageBus events and writes fills, positions, and account snapshots to PostgreSQL.
 - **AlertActor:** custom Actor inside TradingNode that sends Telegram notifications on fills, position changes, and drawdown threshold breaches.
 - **Grafana dashboards:** ambient monitoring reading from PostgreSQL. Not locked in — data is in PostgreSQL and accessible to any tool.
-- **FastAPI gateway (Phase 3):** REST endpoints for querying results, managing strategies. WebSocket endpoints for live trade streaming.
-- **StreamingActor (Phase 3):** bridges NT MessageBus to Redis Streams for external consumers (FastAPI WebSocket handler). Deferred until Phase 3 because there is no external consumer until then.
-- **React frontend (Phase 3):** TradingView Lightweight Charts with buy/sell overlays, strategy comparison tables, equity curves, P&L dashboards.
 - **Data pipeline:** converts existing OHLCV data into NT's ParquetDataCatalog format.
+- **FastAPI gateway (Phase 3b, future):** REST endpoints for querying results, managing strategies. WebSocket endpoints for live trade streaming.
+- **StreamingActor (Phase 3b, future):** bridges NT MessageBus to Redis Streams for external consumers.
+- **React frontend (Phase 3b, future):** TradingView Lightweight Charts with buy/sell overlays, strategy comparison tables, equity curves, P&L dashboards.
 
 ## Tech Stack
 
 | Component | Technology | Notes |
 |-----------|-----------|-------|
-| Trading engine | NautilusTrader | Pinned version, pip dependency |
+| Trading engine | NautilusTrader 1.224.0 | Pinned version, pip dependency |
 | Persistence | asyncpg → PostgreSQL 16 + TimescaleDB | Actors write via asyncpg in executor threads |
 | Migrations | Alembic | |
 | Cache | Redis | NT native cache (positions, orders, account state) |
-| Pub/sub bridge | Redis Streams via StreamingActor | Phase 3 — deferred |
+| Sweep results | Parquet files in `data/sweeps/` | One file per strategy × instrument × interval |
 | Alerting | Telegram Bot API via AlertActor | httpx (sync, in executor thread) |
 | Monitoring | Grafana | Reads PostgreSQL; not locked in |
 | Backtest data | NT ParquetDataCatalog | Parquet files on disk |
-| API | FastAPI + asyncpg | Phase 3 |
-| Frontend | React + TradingView Lightweight Charts | Phase 3 |
+| Charting | Plotly (notebooks) + TradingView Lightweight Charts (HTML reports) | charts.py in notebooks/ |
+| API | FastAPI + asyncpg | Phase 3b — deferred |
+| Frontend | React + TradingView Lightweight Charts | Phase 3b — deferred |
+| Pub/sub bridge | Redis Streams via StreamingActor | Phase 3b — deferred |
 | Indicators | NT built-in + TA-Lib or pandas-ta | C core / Numba accelerated |
 | Process mgmt | Docker Compose (infra + trader container) + venv (dev/debug) | Trader runs as `trader` service; native venv for quick iteration |
 | Config | Pydantic Settings | Single settings.py, env var overrides, .env file |
@@ -152,6 +167,12 @@ Telegram ←HTTP→ AlertActor (inside TradingNode)        ← Phase 2 alerting
 - **New code expectations:** Full type hints on public APIs and callbacks; no `Any` in signatures except where required by NT (e.g. `on_event(event: Any)`). No floats for prices, quantities, or money. Run `ruff check` and `mypy` locally and fix any new violations before opening a PR. On NT version bumps, re-run both; if new NT modules trigger `import-not-found`, add them to the mypy overrides.
 - **Notebooks:** Excluded from ruff/mypy in config; not part of CI static checks.
 
+### Notebook conventions
+
+- **Category-prefix naming, not sequential numbers.** `backtest_ema_cross.ipynb`, not `02_backtest_ema_cross.ipynb`. Prefixes group by purpose: `backtest_*`, `compare_*`, `validate_*`, `verify_*`.
+- **Sweep results auto-persist to Parquet.** Use `run_sweep()` instead of manual `run_single_backtest` loops. Results land in `data/sweeps/` with deterministic filenames.
+- **Strategy factory pattern.** Each backtest notebook defines a `strategy_factory(engine, params)` callable that `run_sweep` and `run_walk_forward` use. This keeps sweep/validation code strategy-agnostic.
+
 ## Project Structure
 
 ```
@@ -160,9 +181,11 @@ src/
 ├── actors/           # NT Actor subclasses (persistence, alerting)
 │   ├── persistence.py    # PersistenceActor — writes to PostgreSQL
 │   └── alert.py          # AlertActor — Telegram notifications
-├── api/              # FastAPI app, routes, WebSocket handlers (Phase 3)
+├── api/              # FastAPI app, routes, WebSocket handlers (Phase 3b)
 ├── persistence/      # DB schemas (SQLAlchemy Core), no migrations
 ├── backtesting/      # Backtest orchestration (wraps NT's BacktestEngine/Node)
+│   └── engine.py         # make_engine, run_single_backtest, run_sweep,
+│                         # load_sweeps, run_walk_forward
 ├── config/           # Pydantic Settings model
 │   └── settings.py       # get_settings() — single source of truth
 └── core/             # TIGHT SCOPE: type aliases, constants, interface protocols, pure utils
@@ -171,13 +194,20 @@ alembic.ini           # Alembic config
 grafana/
 ├── provisioning/     # Declarative datasource + dashboard provisioning (committed)
 └── dashboards/       # Dashboard JSON files (committed)
-frontend/             # React application (Phase 3)
+frontend/             # React application (Phase 3b)
 scripts/
 ├── fetch_hl_candles.py   # Hyperliquid OHLCV data fetcher
 ├── run_sandbox.py        # Paper trading runner (SandboxExecutionClient)
 └── run_live.py           # Live trading runner (HyperliquidExecClient)
-notebooks/            # Jupyter prototyping + charts.py plotting helpers
-data/                 # ParquetDataCatalog root (gitignored)
+notebooks/            # Jupyter research + charts.py plotting helpers
+├── backtest_*.ipynb      # Per-strategy backtest + sweep notebooks
+├── compare_sweeps.ipynb  # Cross-instrument, cross-timeframe comparison
+├── validate_strategy.ipynb # Walk-forward, plateau, bootstrap validation
+├── verify_pipeline.ipynb # Data pipeline verification
+└── charts.py             # Plotly, matplotlib, TVLC HTML report generation
+data/
+├── catalog/          # ParquetDataCatalog root (gitignored)
+└── sweeps/           # Sweep result Parquet files (gitignored)
 reports/              # Generated HTML backtest reports (gitignored)
 tests/                # unit/ and integration/
 ```
@@ -186,11 +216,31 @@ tests/                # unit/ and integration/
 
 **Phase 1 (complete):** Strategy development + backtesting using NT's native workflow. Jupyter notebooks, BacktestEngine, in-memory results, matplotlib/plotly charts, HTML tearsheets. No custom infrastructure — learn NT's patterns first.
 
-**Phase 2 (current):** Deploy TradingNode, write PersistenceActor and AlertActor, paper trade via NT's Sandbox adapter, validate all fills and positions write to PostgreSQL, monitor via Grafana and Telegram. No FastAPI, no frontend. Backend before UI. Build the UI against real live data in Phase 3.
+**Phase 2 (complete):** Deploy TradingNode, write PersistenceActor and AlertActor, paper trade via NT's Sandbox adapter, validate all fills and positions write to PostgreSQL, monitor via Grafana and Telegram. Containerized trader on Digital Ocean with auto-restart and graceful shutdown.
 
-**Phase 3:** StreamingActor (Redis Streams bridge) + FastAPI gateway + React frontend. Build the web product against real data from Phase 2 paper trading runs. WebSocket streaming from live TradingNode to browser.
+**Phase 3a (current) — Research tooling + strategy validation:**
+- `run_sweep()` — parameter grid search with automatic Parquet persistence to `data/sweeps/`.
+- `run_walk_forward()` — sliding-window walk-forward analysis (train on N%, test on M%, slide).
+- `compare_sweeps.ipynb` — load saved sweeps, side-by-side heatmaps, best-params table, parameter stability across instruments/timeframes.
+- `validate_strategy.ipynb` — plateau detection, walk-forward, bootstrap confidence intervals, go/no-go assessment.
+- Focus: validate strategies before committing them to paper/live trading. Build more strategies, test on more instruments.
 
-**Phase 4:** ML integration — feature engineering, model training, inference in strategy callbacks.
+**Phase 3a — future research tools (build when pain emerges):**
+- Rolling performance windows — is the edge consistent across time or one burst?
+- Equity curve overlay — do strategies draw down together or diversify?
+- Slippage/fee sensitivity sweeps — does the edge survive realistic execution costs?
+- Randomized entry baseline — does the strategy beat random?
+- Regime tagging — does the strategy work in trending vs ranging markets?
+- Strategy return correlation matrix — portfolio-level diversification analysis.
+
+**Phase 3b (future) — Web layer (build when multiple validated strategies are running live and Grafana/SQL isn't enough):**
+- FastAPI read-only API — query runs, fills, positions, equity curves from PostgreSQL.
+- `bars` hypertable + PersistenceActor bar writing — candle data in PostgreSQL for chart overlay.
+- React dashboard — TradingView Lightweight Charts with trade markers (the one view Grafana can't do).
+- StreamingActor + Redis Streams + WebSocket — real-time trade streaming to browser.
+- Write endpoints + auth — remote control (halt/resume trading), JWT auth.
+
+**Phase 4:** ML integration — feature engineering from sweep results and bar data, model training, inference in strategy callbacks.
 
 **Phase 5:** Experimental — LSTM, LLM sentiment, RL agents.
 
@@ -220,23 +270,29 @@ tests/                # unit/ and integration/
 
 **For quick iteration/debugging:** `docker compose up -d postgres redis grafana` then `python scripts/run_sandbox.py` natively.
 
+### Phase 3a workflow (research + validation)
+1. Create or open a `backtest_*.ipynb` notebook for the strategy.
+2. Define a `strategy_factory(engine, params)` function and a list of `param_combos`.
+3. Call `run_sweep()` — results auto-save to `data/sweeps/{strategy}_{instrument}_{interval}.parquet`.
+4. Inspect heatmaps in the backtest notebook. For multi-stage sweeps (e.g. MACD periods → RSI thresholds), use a different `strategy_name` for the sensitivity sweep.
+5. Compare across instruments/timeframes: open `compare_sweeps.ipynb`, call `load_sweeps()` (optionally filtered by strategy/instrument/interval). Review the best-params table and parameter stability analysis.
+6. Validate before paper trading: open `validate_strategy.ipynb`, point it at the sweep file and strategy factory. Run plateau detection, walk-forward, and bootstrap. Check the go/no-go assessment.
+7. Only proceed to paper trading (Phase 2 workflow) if validation passes.
+
 ### Adding a new strategy
 1. Create a new file in `src/strategies/`.
 2. Subclass `nautilus_trader.trading.strategy.Strategy`.
 3. Implement `on_start()`, `on_bar()` (or `on_quote_tick()`), and order management callbacks.
-4. Add it to the runner script config (`run_sandbox.py` or `run_live.py`).
+4. Create a `backtest_*.ipynb` notebook. Define a `strategy_factory` and `param_combos`.
+5. Run sweep → validate → paper trade → live.
 
-### Running a backtest
-**Phase 1/2:** Directly in Jupyter notebooks using `BacktestEngine`. Results are in-memory DataFrames and stats dicts.
-**Phase 3+:** FastAPI endpoint. Results persisted to PostgreSQL.
-
-### Adding a new API endpoint (Phase 3+)
+### Adding a new API endpoint (Phase 3b+)
 1. Create or modify a router in `src/api/routes/`.
 2. Use asyncpg for database queries.
 3. Return Pydantic models with string-encoded decimals for financial values.
 
-### Bridging NT events to the frontend (Phase 3)
-The `StreamingActor` (in `src/actors/streaming.py`) subscribes to NT MessageBus events and publishes to Redis Streams. The FastAPI WebSocket handler reads from Redis Streams and pushes to connected clients. This is deliberately deferred to Phase 3.
+### Bridging NT events to the frontend (Phase 3b)
+The `StreamingActor` (in `src/actors/streaming.py`) subscribes to NT MessageBus events and publishes to Redis Streams. The FastAPI WebSocket handler reads from Redis Streams and pushes to connected clients. Deferred until Phase 3b — there is no external consumer until then.
 
 ## Gotchas and Warnings
 
@@ -244,20 +300,22 @@ The `StreamingActor` (in `src/actors/streaming.py`) subscribes to NT MessageBus 
 - **TradingNode is not Jupyter-compatible.** Running a `TradingNode` inside a notebook causes asyncio event loop conflicts. The TradingNode is a long-running blocking process — run it from `scripts/run_sandbox.py` or `scripts/run_live.py` in a terminal, not a notebook.
 - **NT community is small (~5K Discord).** The "NT + web dashboard" pattern is unprecedented. When stuck, read NT source code directly — don't expect blog posts or SO answers.
 - **NT doesn't use CCXT.** It has its own exchange adapters. If a target exchange isn't supported, you'd need to write a custom adapter.
-- **Backtest results are in-memory only.** NT's `engine.trader.generate_orders_report()` etc. return pandas DataFrames. The persistence layer captures these for Phase 3 API queries.
+- **Backtest results are in-memory only** unless persisted. NT's `engine.trader.generate_orders_report()` etc. return pandas DataFrames. Use `run_sweep()` to persist sweep results to Parquet. Live/paper results persist to PostgreSQL via PersistenceActor.
 - **Expect 30-40% performance haircut** from backtest to live, and paper to live. If paper lags backtest by >30-40%, investigate before going live.
 - **Slippage modeling matters.** Configure NT's `FillModel`: 0.05-0.1% for top-10 coins, 0.5-2% outside top 100, 5-10% for microcaps.
 - **NETTING mode position stats:** `cache.positions()` returns only the current Position object per instrument-strategy pair — NOT all historical positions. Closed positions are stored as snapshots. For correct analyzer stats, use `cache.position_snapshots() + cache.positions()`.
 - **`analyzer.returns()` requires `calculate_statistics()` first.** Call `calculate_statistics()` immediately after `engine.run()`, before any plotting or stats access.
 - **Actor callbacks must never block.** Use `self.run_in_executor(callable, args)` for all I/O. Blocking directly in `on_order_filled` or similar callbacks stalls the TradingNode.
 - **asyncpg in Actor executors:** Use `asyncio.run(asyncpg.connect(...))` inside `run_in_executor` callables. A fresh connection per write is acceptable at hourly-bar frequency. No connection pool needed in Phase 2.
-- **Actor has no `create_task`.** NT 1.223.0 Actor uses `run_in_executor` (ThreadPoolExecutor) for I/O, not `create_task`. Strategy has different APIs than Actor.
+- **Actor has no `create_task`.** NT 1.224.0 Actor uses `run_in_executor` (ThreadPoolExecutor) for I/O, not `create_task`. Strategy has different APIs than Actor.
 - **Position events in Actors:** Override `on_event(self, event)` and check `isinstance(event, PositionClosed)`. Actor has `on_order_filled` but no `on_position_closed` callback.
 - **NT financial types to PostgreSQL NUMERIC:** Always `str(event.last_px)`, never `float(event.last_px)`. asyncpg accepts strings for NUMERIC columns and preserves precision.
 - **HL_TESTNET defaults to True.** `run_live.py` requires explicitly setting `HL_TESTNET=false` in `.env` to trade on mainnet. Intentional friction.
 - **HyperliquidDataClientConfig needs NO credentials.** Just `testnet=False` for real market data. Credentials are only needed on the exec client.
-- **HyperliquidExecClientConfig uses `private_key` + `vault_address`** (NOT `wallet_address`). Verified in NT 1.223.0.
+- **HyperliquidExecClientConfig uses `private_key` + `vault_address`** (NOT `wallet_address`). Verified in NT 1.224.0.
 - **Adapter factories must be registered.** Call `node.add_data_client_factory("HYPERLIQUID", HyperliquidLiveDataClientFactory)` and `node.add_exec_client_factory(...)` before `node.build()`.
+- **Sweep filename is deterministic.** `run_sweep()` saves to `{strategy}_{instrument}_{interval}.parquet`. Re-running the same combo overwrites the previous file. The `_swept_at` metadata column inside the file records when it was generated.
+- **Walk-forward is expensive.** `run_walk_forward()` runs the full param grid per fold. With 60 combos × 4 folds = 240 backtests. Budget 3-5 min for hourly bars, 15-20 min for 5m bars over a year.
 
 ## Communicating with This Developer
 
