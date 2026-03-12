@@ -18,7 +18,7 @@ from nautilus_trader.common.actor import Actor
 from nautilus_trader.config import ActorConfig
 from nautilus_trader.model.currencies import USDC
 from nautilus_trader.model.events import OrderFilled, PositionClosed
-from nautilus_trader.model.identifiers import Venue
+from nautilus_trader.model.identifiers import InstrumentId, Venue
 
 
 def _valid_decimal_str(s: str) -> bool:
@@ -39,6 +39,7 @@ def _valid_instrument_id(s: str) -> bool:
 class PersistenceActorConfig(ActorConfig, frozen=True):
     postgres_dsn: str
     run_id: str  # UUID string — ties rows to this TradingNode run
+    instrument_id: str  # required — used for subscribe_order_fills
     venue: str = "HYPERLIQUID"
     snapshot_interval_secs: int = 60
 
@@ -50,6 +51,8 @@ class PersistenceActor(Actor):
         self._venue = Venue(config.venue)
 
     def on_start(self) -> None:
+        self.subscribe_order_fills(InstrumentId.from_str(self.config.instrument_id))
+        self.msgbus.subscribe(topic="events.position.*", handler=self.on_event)
         self.clock.set_timer(
             name="account_snapshot",
             interval=pd.Timedelta(seconds=self.config.snapshot_interval_secs),

@@ -12,7 +12,7 @@ from nautilus_trader.config import ActorConfig
 from nautilus_trader.model.currencies import USDC
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.events import OrderFilled, PositionClosed
-from nautilus_trader.model.identifiers import Venue
+from nautilus_trader.model.identifiers import InstrumentId, Venue
 
 
 def _valid_instrument_id(s: str) -> bool:
@@ -35,6 +35,7 @@ class AlertActorConfig(ActorConfig, frozen=True):
     telegram_chat_id: str = ""
     enabled: bool = False
     venue: str = "HYPERLIQUID"
+    instrument_id: str = ""  # if set, subscribes to fill alerts for this instrument
     notify_fills: bool = True
     notify_position_closed: bool = True
     drawdown_alert_pct: str = "10"  # str to avoid float — Decimal in actor
@@ -51,6 +52,9 @@ class AlertActor(Actor):
         self._venue = Venue(config.venue)
 
     def on_start(self) -> None:
+        if self.config.instrument_id:
+            self.subscribe_order_fills(InstrumentId.from_str(self.config.instrument_id))
+        self.msgbus.subscribe(topic="events.position.*", handler=self.on_event)
         if self.config.drawdown_check_interval_secs > 0:
             self.clock.set_timer(
                 name="drawdown_check",

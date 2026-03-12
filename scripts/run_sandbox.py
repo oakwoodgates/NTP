@@ -172,12 +172,14 @@ def main() -> None:
         postgres_dsn=settings.postgres_dsn,
         run_id=run_id,
         venue="HYPERLIQUID",
+        instrument_id=instrument_id_str,
     )))
     node.trader.add_actor(AlertActor(AlertActorConfig(
         telegram_token=settings.telegram_token,
         telegram_chat_id=settings.telegram_chat_id,
         enabled=settings.telegram_enabled,
         venue="HYPERLIQUID",
+        instrument_id=instrument_id_str,
     )))
 
     # Add strategy

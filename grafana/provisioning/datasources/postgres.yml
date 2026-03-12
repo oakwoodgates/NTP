@@ -5,10 +5,10 @@ datasources:
     uid: PostgreSQL
     access: proxy
     url: postgres:5432
-    database: ${POSTGRES_DB:-nautilus_platform}
-    user: ${POSTGRES_USER:-nautilus}
+    database: ${POSTGRES_DB}
+    user: ${POSTGRES_USER}
     secureJsonData:
-      password: ${POSTGRES_PASSWORD:-nautilus_dev}
+      password: ${POSTGRES_PASSWORD}
     jsonData:
       sslmode: disable
       postgresVersion: 1600
