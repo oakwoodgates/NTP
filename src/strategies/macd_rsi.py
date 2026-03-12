@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from nautilus_trader.config import PositiveInt
 from nautilus_trader.core.correctness import PyCondition
@@ -231,10 +231,6 @@ class MACDRSI(Strategy):
             quantity=self.instrument.make_qty(self.config.trade_size),
         )
         self.submit_order(order)
-
-    def on_order_filled(self, event: Any) -> None:
-        """Log fills for debugging."""
-        self.log.info(f"Filled: {event}")
 
     def on_stop(self) -> None:
         """Cancel all orders, optionally close positions, unsubscribe."""

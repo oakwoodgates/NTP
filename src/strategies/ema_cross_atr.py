@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from nautilus_trader.config import PositiveInt
 from nautilus_trader.core.correctness import PyCondition
@@ -257,10 +257,6 @@ class EMACrossATR(Strategy):
             f"entry≈{entry_price:.2f} | "
             f"SL={sl_price} | TP={tp_price} | ATR={atr:.2f}"
         )
-
-    def on_order_filled(self, event: Any) -> None:
-        """Log fills for debugging."""
-        self.log.info(f"Filled: {event}")
 
     def on_stop(self) -> None:
         """Cancel all orders, optionally close positions, unsubscribe."""
