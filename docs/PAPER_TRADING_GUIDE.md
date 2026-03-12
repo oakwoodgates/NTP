@@ -49,6 +49,43 @@ Default config: EMACross(10,20) on BTC-USD-PERP, 1-hour bars, 0.001 BTC per trad
 
 **First trade timing:** EMACross needs 20 bars (slow EMA period) before generating signals. With 1-hour bars and historical bar request on start, the first signal may come within a few hours.
 
+## 3b. Start Paper Trading (Docker)
+
+Instead of running natively, you can run the trading node as a Docker container.
+This is recommended for multi-day/week runs — the container restarts automatically
+on crashes and survives terminal disconnects.
+
+```bash
+# Build the trader image (first time, or after code changes)
+docker compose build trader
+
+# Run migrations (first time only — before starting the trader)
+docker compose run --rm trader alembic upgrade head
+
+# Start everything (infra + trader)
+docker compose up -d
+
+# Tail logs (replaces the terminal session)
+docker compose logs -f trader --tail 200
+```
+
+**Managing the container:**
+
+| Action | Command |
+|--------|---------|
+| Stop trading (graceful) | `docker compose stop trader` |
+| Start trading | `docker compose start trader` |
+| Restart after `.env` change | `docker compose restart trader` |
+| Restart after code change | `docker compose build trader && docker compose up -d trader` |
+| Run migrations (trader running) | `docker compose exec trader alembic upgrade head` |
+| Run migrations (trader stopped) | `docker compose run --rm trader alembic upgrade head` |
+| Check status | `docker compose ps` |
+
+The container uses `restart: unless-stopped` — it restarts automatically on
+crashes and host reboots, but stays stopped after `docker compose stop`.
+
+Each restart creates a new `run_id` in `strategy_runs`. Filter by run in Grafana.
+
 ## 4. Verify the Pipeline
 
 ### Check PostgreSQL
@@ -157,7 +194,9 @@ upgrading NautilusTrader in future:
 3. Confirm no missed fills in persistence pipeline
 4. Verify drawdown stays within acceptable bounds
 5. Compare paper vs backtest results (expect 30-40% haircut)
-6. Then: set `HL_TESTNET=false`, add `HL_PRIVATE_KEY` in `.env`, run `python scripts/run_live.py`
+6. Then: set `HL_TESTNET=false` and add `HL_PRIVATE_KEY` in `.env`.
+   - **Native:** `python scripts/run_live.py` (interactive confirmation prompt)
+   - **Docker:** Also set `TRADING_SCRIPT=scripts/run_live.py` and `LIVE_CONFIRM=yes` in `.env`, then `docker compose restart trader`
 
 ## Troubleshooting
 
@@ -170,6 +209,9 @@ upgrading NautilusTrader in future:
 | `ModuleNotFoundError` | `pip install -e ".[dev]"` in activated venv |
 | Redis connection error | `docker compose ps` — check Redis is running on port 6379 |
 | Grafana panels empty | Data needs time to accumulate. Check datasource in Grafana → Settings → Data sources. |
+| Trader container restart loop | Check `docker compose logs trader --tail 50`. Common cause: migrations not run — run `docker compose run --rm trader alembic upgrade head`. |
+| `docker compose stop` but `stopped_at` is NULL | SIGTERM handler issue — verify `scripts/run_sandbox.py` has the `signal.signal(signal.SIGTERM, ...)` handler at the top of `main()`. |
+| Live trading restart loop in Docker | `input()` requires a TTY. Set `LIVE_CONFIRM=yes` in `.env` for containerized live trading. |
 
 ## Files Reference
 
