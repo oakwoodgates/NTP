@@ -28,8 +28,10 @@ class EMACrossConfig(StrategyConfig, frozen=True):
         The instrument ID for the strategy.
     bar_type : BarType
         The bar type for the strategy.
-    trade_size : Decimal
-        The position size per trade.
+    trade_notional : Decimal
+        The USD notional size per trade.  Quantity is computed at entry
+        time as ``trade_notional / current_price``, so each trade risks
+        approximately the same dollar amount regardless of asset price.
     fast_ema_period : int, default 10
         The fast EMA period.
     slow_ema_period : int, default 20
@@ -43,7 +45,7 @@ class EMACrossConfig(StrategyConfig, frozen=True):
 
     instrument_id: InstrumentId
     bar_type: BarType
-    trade_size: Decimal
+    trade_notional: Decimal
     fast_ema_period: PositiveInt = 10
     slow_ema_period: PositiveInt = 20
     close_positions_on_stop: bool = True
@@ -116,31 +118,45 @@ class EMACross(Strategy):
         if bar.is_single_price():
             return
 
+        price = Decimal(str(bar.close))
+
         # BUY signal: fast EMA >= slow EMA
         if self.fast_ema.value >= self.slow_ema.value:
             if self.portfolio.is_flat(self.config.instrument_id):
-                self._enter(OrderSide.BUY)
+                self._enter(OrderSide.BUY, price)
             elif self.portfolio.is_net_short(self.config.instrument_id):
                 self.close_all_positions(self.config.instrument_id)
-                self._enter(OrderSide.BUY)
+                self._enter(OrderSide.BUY, price)
 
         # SELL signal: fast EMA < slow EMA
         elif self.fast_ema.value < self.slow_ema.value:
             if self.portfolio.is_flat(self.config.instrument_id):
-                self._enter(OrderSide.SELL)
+                self._enter(OrderSide.SELL, price)
             elif self.portfolio.is_net_long(self.config.instrument_id):
                 self.close_all_positions(self.config.instrument_id)
-                self._enter(OrderSide.SELL)
+                self._enter(OrderSide.SELL, price)
 
-    def _enter(self, side: OrderSide) -> None:
-        """Submit a market order for the given side."""
+    def _enter(self, side: OrderSide, price: Decimal) -> None:
+        """Submit a market order sized by notional USD amount."""
         if self.instrument is None:
             self.log.error("Instrument not loaded — cannot enter position")
             return
+        if price <= 0:
+            self.log.warning("Invalid price — cannot compute quantity")
+            return
+
+        qty = self.instrument.make_qty(self.config.trade_notional / price)
+        if qty <= 0:
+            self.log.warning(
+                f"Computed qty=0 for notional={self.config.trade_notional} "
+                f"at price={price}"
+            )
+            return
+
         order = self.order_factory.market(
             instrument_id=self.config.instrument_id,
             order_side=side,
-            quantity=self.instrument.make_qty(self.config.trade_size),
+            quantity=qty,
         )
         self.submit_order(order)
 
