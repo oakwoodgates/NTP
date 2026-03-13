@@ -1031,7 +1031,8 @@ def generate_backtest_html(
     # ── Resolve output path ──────────────────────────────────────────────────
     if output_path is None:
         ts_str = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
-        output_path = Path(f"backtest_{ts_str}.html")
+        asset = instrument_label.split("-")[0] if instrument_label else "unknown"
+        output_path = Path(f"backtest_{asset}_{ts_str}.html")
     output_path = Path(output_path).resolve()
 
     # ── Render template ──────────────────────────────────────────────────────
