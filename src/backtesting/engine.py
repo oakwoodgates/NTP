@@ -515,7 +515,11 @@ def run_walk_forward(
 
         if valid.empty:
             if verbose:
+                errors = train_df["error"].dropna()
+                errors = errors[errors != ""]
+                first_err = errors.iloc[0] if not errors.empty else "unknown"
                 print("  ⚠ No valid results in training — skipping fold")
+                print(f"    First error: {first_err}")
             start += step_size
             continue
 
@@ -547,6 +551,8 @@ def run_walk_forward(
                 f"  Out-of-sample: PnL={oos_pnl:,.2f}  "
                 f"PnL%={oos_pnl_pct:.2f}%  positions={oos_npos}"
             )
+            if oos_row.get("error"):
+                print(f"    ⚠ OOS error: {oos_row['error']}")
 
         fold_result: dict[str, Any] = {
             "fold": fold_num,
