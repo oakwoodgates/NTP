@@ -12,7 +12,12 @@ If something doesn't fit the above list, it belongs in a more specific module.
 """
 
 from src.core.constants import (
-    CANDLE_LIMIT,
+    BINANCE_CANDLE_LIMIT,
+    BINANCE_FUTURES_API_URL,
+    BINANCE_MAKER_FEE,
+    BINANCE_TAKER_FEE,
+    BINANCE_TESTNET_API_URL,
+    HL_CANDLE_LIMIT,
     HYPERLIQUID_API_URL,
     HYPERLIQUID_VENUE,
     INTERVAL_TO_BAR_SPEC,
@@ -21,11 +26,16 @@ from src.core.constants import (
     TAKER_FEE,
     TS_INIT_DELTAS,
 )
-from src.core.instruments import make_hyperliquid_perp
+from src.core.instruments import make_binance_perp, make_hyperliquid_perp
 from src.core.utils import bar_type_str
 
 __all__ = [
-    "CANDLE_LIMIT",
+    "BINANCE_CANDLE_LIMIT",
+    "BINANCE_FUTURES_API_URL",
+    "BINANCE_MAKER_FEE",
+    "BINANCE_TAKER_FEE",
+    "BINANCE_TESTNET_API_URL",
+    "HL_CANDLE_LIMIT",
     "HYPERLIQUID_API_URL",
     "HYPERLIQUID_VENUE",
     "INTERVAL_TO_BAR_SPEC",
@@ -34,5 +44,6 @@ __all__ = [
     "TAKER_FEE",
     "TS_INIT_DELTAS",
     "bar_type_str",
+    "make_binance_perp",
     "make_hyperliquid_perp",
 ]
