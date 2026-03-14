@@ -7,7 +7,7 @@ from nautilus_trader.model.identifiers import Venue
 from nautilus_trader.model.instruments import CryptoPerpetual
 
 from src.core.constants import (
-    CANDLE_LIMIT,
+    HL_CANDLE_LIMIT,
     HYPERLIQUID_API_URL,
     HYPERLIQUID_VENUE,
     INTERVAL_TO_BAR_SPEC,
@@ -43,8 +43,8 @@ class TestConstants:
     def test_settlement_currency_is_usdc(self) -> None:
         assert SETTLEMENT_CURRENCY == USDC
 
-    def test_candle_limit(self) -> None:
-        assert CANDLE_LIMIT == 5000
+    def test_hl_candle_limit(self) -> None:
+        assert HL_CANDLE_LIMIT == 5000
 
     def test_interval_to_bar_spec_keys(self) -> None:
         assert "1h" in INTERVAL_TO_BAR_SPEC
