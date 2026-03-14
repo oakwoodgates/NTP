@@ -1,14 +1,13 @@
-"""Hyperliquid venue constants for NautilusTrader backtesting."""
+"""Exchange venue constants for NautilusTrader backtesting."""
 
 from decimal import Decimal
 
 from nautilus_trader.model.currencies import USDC
 from nautilus_trader.model.identifiers import Venue
 
-# Venue
-HYPERLIQUID_VENUE = Venue("HYPERLIQUID")
+# ── Hyperliquid ─────────────────────────────────────────────────────
 
-# Hyperliquid public REST API
+HYPERLIQUID_VENUE = Venue("HYPERLIQUID")
 HYPERLIQUID_API_URL = "https://api.hyperliquid.xyz/info"
 
 # Fees — Hyperliquid base tier (VIP 0).
@@ -22,7 +21,19 @@ TAKER_FEE = Decimal("0.00035")
 SETTLEMENT_CURRENCY = USDC
 
 # HL candleSnapshot API max candles per request
-CANDLE_LIMIT = 5000
+HL_CANDLE_LIMIT = 5000
+
+# ── Binance ─────────────────────────────────────────────────────────
+
+BINANCE_FUTURES_API_URL = "https://fapi.binance.com"
+BINANCE_TESTNET_API_URL = "https://testnet.binancefuture.com"
+
+# Fees — Binance Futures base tier (VIP 0).
+BINANCE_MAKER_FEE = Decimal("0.000200")  # 0.02%
+BINANCE_TAKER_FEE = Decimal("0.000500")  # 0.05%
+
+# Binance klines API max candles per request
+BINANCE_CANDLE_LIMIT = 1500
 
 # Map HL interval strings to NT BarSpec components: (step, aggregation_string)
 # Used to build BarType strings like "{instrument_id}-{step}-{agg}-LAST-EXTERNAL"
