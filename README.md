@@ -98,9 +98,11 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │   ├── verify_pipeline.ipynb    # Data pipeline verification
 │   └── charts.py                # Plotting helpers (plotly, matplotlib, TVLC reports)
 ├── scripts/
-│   ├── fetch_hl_candles.py  # Hyperliquid OHLCV data fetcher
-│   ├── run_sandbox.py       # Paper trading runner (SandboxExecutionClient)
-│   └── run_live.py          # Live trading runner (HyperliquidExecClient)
+│   ├── _catalog.py            # Shared utilities for data fetch scripts
+│   ├── fetch_hl_candles.py    # Hyperliquid OHLCV data fetcher
+│   ├── fetch_binance_candles.py # Binance Futures OHLCV data fetcher
+│   ├── run_sandbox.py         # Paper trading runner (SandboxExecutionClient)
+│   └── run_live.py            # Live trading runner (HyperliquidExecClient)
 ├── data/
 │   ├── catalog/             # ParquetDataCatalog root (gitignored)
 │   └── sweeps/              # Sweep result Parquet files (gitignored)
@@ -153,6 +155,11 @@ cd NTP
 python -m venv .venv
 source .venv/bin/activate
 pip install -e ".[dev]"
+
+# Fetch historical data for backtesting (run from project root)
+python scripts/fetch_hl_candles.py               # Hyperliquid candles
+python scripts/fetch_binance_candles.py           # Binance candles (may need VPN)
+
 jupyter notebook notebooks/
 ```
 

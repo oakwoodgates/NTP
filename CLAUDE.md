@@ -122,7 +122,7 @@ React Frontend ←WebSocket/REST→ FastAPI Gateway        ← Phase 3b (future)
 - **PersistenceActor:** custom Actor inside TradingNode that subscribes to NT MessageBus events and writes fills, positions, and account snapshots to PostgreSQL.
 - **AlertActor:** custom Actor inside TradingNode that sends Telegram notifications on fills, position changes, and drawdown threshold breaches.
 - **Grafana dashboards:** ambient monitoring reading from PostgreSQL. Not locked in — data is in PostgreSQL and accessible to any tool.
-- **Data pipeline:** converts existing OHLCV data into NT's ParquetDataCatalog format.
+- **Data pipeline:** fetches OHLCV candles from Hyperliquid and Binance, converts to NT's ParquetDataCatalog format. Shared utilities in `scripts/_catalog.py`.
 - **FastAPI gateway (Phase 3b, future):** REST endpoints for querying results, managing strategies. WebSocket endpoints for live trade streaming.
 - **StreamingActor (Phase 3b, future):** bridges NT MessageBus to Redis Streams for external consumers.
 - **React frontend (Phase 3b, future):** TradingView Lightweight Charts with buy/sell overlays, strategy comparison tables, equity curves, P&L dashboards.
@@ -196,7 +196,9 @@ grafana/
 └── dashboards/       # Dashboard JSON files (committed)
 frontend/             # React application (Phase 3b)
 scripts/
+├── _catalog.py           # Shared data-fetch utilities (retry, validation, catalog write)
 ├── fetch_hl_candles.py   # Hyperliquid OHLCV data fetcher
+├── fetch_binance_candles.py # Binance Futures OHLCV data fetcher
 ├── run_sandbox.py        # Paper trading runner (SandboxExecutionClient)
 └── run_live.py           # Live trading runner (HyperliquidExecClient)
 notebooks/            # Jupyter research + charts.py plotting helpers
@@ -247,7 +249,7 @@ tests/                # unit/ and integration/
 ## Common Tasks
 
 ### Phase 1 workflow (backtesting)
-1. Load OHLCV data into NT's `ParquetDataCatalog` (one-time conversion script).
+1. Fetch OHLCV data with `scripts/fetch_hl_candles.py` or `scripts/fetch_binance_candles.py`. Data writes to NT's `ParquetDataCatalog` at `data/catalog/`.
 2. In a Jupyter notebook: configure `BacktestEngine` (venue, instrument, fees, fill model). Use `backtesting/engine.py` helpers (`make_engine()`, `run_single_backtest()`) to avoid boilerplate.
 3. Write or tweak a `Strategy` subclass.
 4. Run the backtest, inspect DataFrames (`generate_orders_report()`, `generate_positions_report()`).
@@ -316,6 +318,7 @@ The `StreamingActor` (in `src/actors/streaming.py`) subscribes to NT MessageBus 
 - **Adapter factories must be registered.** Call `node.add_data_client_factory("HYPERLIQUID", HyperliquidLiveDataClientFactory)` and `node.add_exec_client_factory(...)` before `node.build()`.
 - **Sweep filename is deterministic.** `run_sweep()` saves to `{strategy}_{instrument}_{interval}.parquet`. Re-running the same combo overwrites the previous file. The `_swept_at` metadata column inside the file records when it was generated.
 - **Walk-forward is expensive.** `run_walk_forward()` runs the full param grid per fold. With 60 combos × 4 folds = 240 backtests. Budget 3-5 min for hourly bars, 15-20 min for 5m bars over a year.
+- **Binance API geo-blocked in some regions.** Connect NordVPN (`nordvpn connect`) before running `fetch_binance_candles.py`, or use `--testnet` for development (no geo-block). The script detects connection failures and prints VPN instructions.
 
 ## Communicating with This Developer
 
