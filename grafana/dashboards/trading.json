@@ -141,6 +141,7 @@
       },
       "options": {
         "orientation": "vertical",
+        "colorByField": "PnL",
         "xTickLabelRotation": -45,
         "showValue": "auto"
       },
@@ -317,7 +318,7 @@
       "title": "Recent Fills",
       "type": "table",
       "id": 11,
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 24 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
       "fieldConfig": { "defaults": {}, "overrides": [] },
       "targets": [
@@ -332,7 +333,7 @@
       "title": "Recent Positions",
       "type": "table",
       "id": 12,
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 24 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 32 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
       "fieldConfig": {
         "defaults": {},
@@ -367,7 +368,7 @@
       "title": "Active Runs",
       "type": "table",
       "id": 13,
-      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 32 },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 40 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
       "fieldConfig": { "defaults": {}, "overrides": [] },
       "targets": [
