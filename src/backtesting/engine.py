@@ -246,7 +246,7 @@ def run_sweep(
 
     """
     import time
-    from datetime import datetime, timezone
+    from datetime import UTC, datetime
     from pathlib import Path
 
     total = len(param_combos)
@@ -260,7 +260,7 @@ def run_sweep(
             bars=bars,
             starting_capital=starting_capital,
             params=params,
-            add_strategy=lambda eng, p=params: strategy_factory(eng, p),
+            add_strategy=lambda eng, p=params: strategy_factory(eng, p),  # type: ignore[misc]
             log_level=log_level,
         )
         results.append(row)
@@ -285,7 +285,7 @@ def run_sweep(
     # Data date range from the bars themselves
     data_start = pd.Timestamp(bars[0].ts_event, unit="ns", tz="UTC")
     data_end = pd.Timestamp(bars[-1].ts_event, unit="ns", tz="UTC")
-    swept_at = datetime.now(tz=timezone.utc)
+    swept_at = datetime.now(tz=UTC)
 
     df.insert(0, "_strategy", strategy_name)
     df.insert(1, "_instrument_id", instrument_id)
@@ -503,7 +503,7 @@ def run_walk_forward(
                 bars=train_slice,
                 starting_capital=starting_capital,
                 params=params,
-                add_strategy=lambda eng, p=params: strategy_factory(eng, p),
+                add_strategy=lambda eng, p=params: strategy_factory(eng, p),  # type: ignore[misc]
                 log_level=log_level,
             )
             train_results.append(row)
@@ -539,7 +539,7 @@ def run_walk_forward(
             bars=test_slice,
             starting_capital=starting_capital,
             params=best_params,
-            add_strategy=lambda eng, p=best_params: strategy_factory(eng, p),
+            add_strategy=lambda eng, p=best_params: strategy_factory(eng, p),  # type: ignore[misc]
             log_level=log_level,
         )
 
