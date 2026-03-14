@@ -1,24 +1,26 @@
 from __future__ import annotations
 
 import argparse
-import shutil
 import sys
 import time
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Any
 
 import httpx
-import pandas as pd
 from nautilus_trader.model.data import BarType
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
-from nautilus_trader.persistence.wranglers import BarDataWrangler
 
+from scripts._catalog import (
+    CATALOG_PATH,
+    candles_to_dataframe,
+    retry_request,
+    validate_dataframe,
+    wrangle_and_write,
+)
 from src.core.constants import (
-    CANDLE_LIMIT,
+    HL_CANDLE_LIMIT,
     HYPERLIQUID_API_URL,
     INTERVAL_TO_BAR_SPEC,
-    TS_INIT_DELTAS,
 )
 from src.core.instruments import make_hyperliquid_perp
 
@@ -31,7 +33,8 @@ COIN_DEFAULTS: dict[str, tuple[int, int, int]] = {
     "SOL": (3, 2, 20),
 }
 
-CATALOG_PATH = Path("data/catalog")
+# Column mapping: HL candleSnapshot keys → standard OHLCV names
+_HL_COL_MAP = {"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"}
 
 
 # ── Hyperliquid API ──────────────────────────────────────────────────
@@ -39,8 +42,7 @@ CATALOG_PATH = Path("data/catalog")
 
 def fetch_meta(client: httpx.Client) -> dict[str, Any]:
     """Fetch asset metadata from Hyperliquid meta endpoint."""
-    resp = client.post(HYPERLIQUID_API_URL, json={"type": "meta"})
-    resp.raise_for_status()
+    resp = retry_request(client, "POST", HYPERLIQUID_API_URL, json={"type": "meta"})
     data: dict[str, Any] = resp.json()
     return data
 
@@ -92,8 +94,7 @@ def fetch_candles(
                 "endTime": end_ms,
             },
         }
-        resp = client.post(HYPERLIQUID_API_URL, json=payload)
-        resp.raise_for_status()
+        resp = retry_request(client, "POST", HYPERLIQUID_API_URL, json=payload)
         batch: list[dict[str, Any]] = resp.json()
 
         if not batch:
@@ -107,113 +108,12 @@ def fetch_candles(
             break  # Safety: avoid infinite loop
         cursor_ms = last_close_ms + 1
 
-        if len(batch) < CANDLE_LIMIT:
+        if len(batch) < HL_CANDLE_LIMIT:
             break  # No more data available
 
         time.sleep(0.5)
 
     return all_candles
-
-
-# ── Data transformation ──────────────────────────────────────────────
-
-
-def candles_to_dataframe(candles: list[dict[str, Any]]) -> pd.DataFrame:
-    """Convert HL candle response to the DataFrame format BarDataWrangler expects.
-
-    Required: columns ['open', 'high', 'low', 'close', 'volume']
-              with UTC DatetimeIndex named 'timestamp'.
-    """
-    df = pd.DataFrame(candles)
-    df["timestamp"] = pd.to_datetime(df["t"], unit="ms", utc=True)
-    df = df.set_index("timestamp")
-    df = df.rename(columns={"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"})
-    df = df[["open", "high", "low", "close", "volume"]]
-    df = df.astype(float)
-    return df
-
-
-def validate_dataframe(df: pd.DataFrame, coin: str, interval: str) -> None:
-    """Validate the DataFrame, warn on issues."""
-    if not df.index.is_monotonic_increasing:
-        print(f"WARNING: {coin} {interval} timestamps not monotonic!", file=sys.stderr)
-
-    zero_vol = (df["volume"] == 0).sum()
-    if zero_vol > 0:
-        print(
-            f"WARNING: {coin} {interval} has {zero_vol} zero-volume bars",
-            file=sys.stderr,
-        )
-
-    # Check for gaps > 2x interval
-    step, agg = INTERVAL_TO_BAR_SPEC[interval]
-    if agg == "HOUR":
-        expected_delta = pd.Timedelta(hours=step)
-    elif agg == "MINUTE":
-        expected_delta = pd.Timedelta(minutes=step)
-    elif agg == "DAY":
-        expected_delta = pd.Timedelta(days=step)
-    else:
-        return
-
-    diffs = df.index.to_series().diff().dropna()
-    gaps = diffs[diffs > expected_delta * 2]
-    if len(gaps) > 0:
-        print(
-            f"WARNING: {coin} {interval} has {len(gaps)} gaps > 2x interval:",
-            file=sys.stderr,
-        )
-        for ts, gap in gaps.items():
-            print(f"  {ts}: gap = {gap}", file=sys.stderr)
-
-
-# ── Catalog write ────────────────────────────────────────────────────
-
-
-def clean_catalog_data(bar_type_str: str) -> None:
-    """Delete existing catalog data for this bar type to allow clean rewrite.
-
-    ParquetDataCatalog.write_data() with overlapping time ranges produces
-    duplicate bars. Wipe the relevant parquet directory before writing.
-
-    NT's catalog directory naming has changed across versions, so we glob
-    for any directory containing the bar type string to be safe.
-    """
-    bar_dir = CATALOG_PATH / "data" / "bar"
-    if not bar_dir.exists():
-        return
-
-    for path in bar_dir.iterdir():
-        if path.is_dir() and bar_type_str in path.name:
-            shutil.rmtree(path)
-            print(f"  Cleaned: {path.name}")
-
-
-def wrangle_and_write(
-    df: pd.DataFrame,
-    instrument: Any,  # CryptoPerpetual — avoid importing the type in a script
-    interval: str,
-    bar_type: BarType,
-    catalog: ParquetDataCatalog,
-) -> int:
-    """Wrangle DataFrame to NT Bars and write to catalog. Returns bar count."""
-    wrangler = BarDataWrangler(bar_type=bar_type, instrument=instrument)
-
-    ts_init_delta = TS_INIT_DELTAS[interval]
-    bars = wrangler.process(df, ts_init_delta=ts_init_delta)
-
-    # Spot check ts_event vs ts_init on first bar
-    if bars:
-        b = bars[0]
-        ts_event = pd.Timestamp(b.ts_event, unit="ns", tz="UTC")
-        ts_init = pd.Timestamp(b.ts_init, unit="ns", tz="UTC")
-        print(f"  Spot check: ts_event={ts_event}, ts_init={ts_init}, delta={ts_init - ts_event}")
-
-    # Wipe existing data to avoid duplicate bars, then write fresh
-    clean_catalog_data(str(bar_type))
-    catalog.write_data(bars)
-
-    return len(bars)
 
 
 # ── Main ─────────────────────────────────────────────────────────────
@@ -248,8 +148,6 @@ def main() -> None:
         validate_coin_metadata(meta, args.coins)
 
         # Build instruments once per coin, write to catalog before bar data.
-        # The old version wrote the instrument inside wrangle_and_write(),
-        # causing it to be written N times (once per interval per coin).
         instruments = {}
         for coin in args.coins:
             price_prec, size_prec, max_lev = COIN_DEFAULTS[coin]
@@ -268,7 +166,7 @@ def main() -> None:
                     print(f"  No data returned for {coin} {interval}", file=sys.stderr)
                     continue
 
-                df = candles_to_dataframe(candles)
+                df = candles_to_dataframe(candles, ts_col="t", col_map=_HL_COL_MAP)
                 validate_dataframe(df, coin, interval)
 
                 step, aggregation = INTERVAL_TO_BAR_SPEC[interval]
