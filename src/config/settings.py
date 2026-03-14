@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     instrument_id: str = "BTC-USD-PERP.HYPERLIQUID"
     bar_interval: str = "1-HOUR-LAST-EXTERNAL"
     trade_size: str = "0.001"
+    trade_notional: str = "100"  # USD notional per trade (EMACross, SMACross)
     starting_balance: int = 10_000
 
     @property

@@ -11,7 +11,8 @@ Configure via .env or environment variables:
     STRATEGY=EMACross         # EMACross | SMACross | EMACrossATR | MACDRSI
     INSTRUMENT_ID=BTC-USD-PERP.HYPERLIQUID
     BAR_INTERVAL=1-HOUR-LAST-EXTERNAL
-    TRADE_SIZE=0.001
+    TRADE_SIZE=0.001          # quantity per trade (EMACrossATR, MACDRSI)
+    TRADE_NOTIONAL=100        # USD notional per trade (EMACross, SMACross)
     HL_TESTNET=false
     HL_PRIVATE_KEY=<your-key>
     LIVE_CONFIRM=yes          # required for containerized live trading (bypasses input())
@@ -57,6 +58,7 @@ def _build_strategy(
     instrument_id: InstrumentId,
     bar_type: BarType,
     trade_size: Decimal,
+    trade_notional: Decimal,
 ) -> tuple[object, str, dict[str, object]]:
     """Build the selected strategy with default parameters.
 
@@ -68,10 +70,10 @@ def _build_strategy(
         return EMACross(EMACrossConfig(
             instrument_id=instrument_id,
             bar_type=bar_type,
-            trade_size=trade_size,
+            trade_notional=trade_notional,
             fast_ema_period=fast,
             slow_ema_period=slow,
-        )), f"EMACross-{fast}-{slow}", {"fast": fast, "slow": slow, "size": str(trade_size)}
+        )), f"EMACross-{fast}-{slow}", {"fast": fast, "slow": slow, "notional": str(trade_notional)}
 
     if strategy_name == "SMACross":
         from src.strategies.sma_cross import SMACross, SMACrossConfig
@@ -79,10 +81,10 @@ def _build_strategy(
         return SMACross(SMACrossConfig(
             instrument_id=instrument_id,
             bar_type=bar_type,
-            trade_size=trade_size,
+            trade_notional=trade_notional,
             fast_sma_period=fast,
             slow_sma_period=slow,
-        )), f"SMACross-{fast}-{slow}", {"fast": fast, "slow": slow, "size": str(trade_size)}
+        )), f"SMACross-{fast}-{slow}", {"fast": fast, "slow": slow, "notional": str(trade_notional)}
 
     if strategy_name == "EMACrossATR":
         from src.strategies.ema_cross_atr import EMACrossATR, EMACrossATRConfig
@@ -161,7 +163,8 @@ def main() -> None:
     bar_type = BarType.from_str(f"{instrument_id}-{bar_interval}")
 
     strategy, strategy_id, config_dict = _build_strategy(
-        settings.strategy, instrument_id, bar_type, Decimal(settings.trade_size),
+        settings.strategy, instrument_id, bar_type,
+        Decimal(settings.trade_size), Decimal(settings.trade_notional),
     )
 
     print(f"Starting {RUN_MODE} run: {strategy_id} on {instrument_id} ({bar_interval})")
