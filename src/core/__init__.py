@@ -26,7 +26,7 @@ from src.core.constants import (
     TAKER_FEE,
     TS_INIT_DELTAS,
 )
-from src.core.instruments import make_binance_perp, make_hyperliquid_perp
+from src.core.instruments import make_binance_perp, make_hyperliquid_perp, with_leverage
 from src.core.utils import bar_type_str
 
 __all__ = [
@@ -46,4 +46,5 @@ __all__ = [
     "bar_type_str",
     "make_binance_perp",
     "make_hyperliquid_perp",
+    "with_leverage",
 ]

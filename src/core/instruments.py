@@ -139,6 +139,39 @@ def make_binance_perp(
     )
 
 
+def with_leverage(instrument: CryptoPerpetual, max_leverage: int) -> CryptoPerpetual:
+    """Clone a CryptoPerpetual with margin values derived from leverage.
+
+    Catalog instruments store raw margins (e.g., Binance uses 1.0/1.0 matching
+    the live adapter). For backtesting, NT's risk engine enforces these values,
+    so realistic margins are needed. This function clones the instrument with
+    margin_init = 1/max_leverage and margin_maint = margin_init/2.
+
+    Works for any exchange — no factory-specific logic.
+    """
+    margin_init = Decimal(1) / Decimal(max_leverage)
+    margin_maint = margin_init / 2
+
+    return CryptoPerpetual(
+        instrument_id=instrument.id,
+        raw_symbol=instrument.raw_symbol,
+        base_currency=instrument.base_currency,
+        quote_currency=instrument.quote_currency,
+        settlement_currency=instrument.settlement_currency,
+        is_inverse=instrument.is_inverse,
+        price_precision=instrument.price_precision,
+        size_precision=instrument.size_precision,
+        price_increment=instrument.price_increment,
+        size_increment=instrument.size_increment,
+        ts_event=instrument.ts_event,
+        ts_init=instrument.ts_init,
+        margin_init=margin_init,
+        margin_maint=margin_maint,
+        maker_fee=instrument.maker_fee,
+        taker_fee=instrument.taker_fee,
+    )
+
+
 def _precision_to_increments(price_precision: int, size_precision: int) -> tuple[str, str]:
     """Convert precision integers to increment strings.
 
