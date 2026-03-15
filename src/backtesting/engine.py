@@ -13,7 +13,6 @@ import pandas as pd
 from nautilus_trader.backtest.config import BacktestEngineConfig
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.config import LoggingConfig
-from nautilus_trader.model.currencies import USDC
 from nautilus_trader.model.enums import AccountType, OmsType
 from nautilus_trader.model.objects import Money
 
@@ -48,7 +47,7 @@ def make_engine(
     bars
         Bar data to feed.
     starting_capital
-        Starting balance in USDC.
+        Starting balance in the instrument's settlement currency.
     log_level
         NT log level. Default ``"ERROR"`` to avoid stdout flooding.
 
@@ -61,7 +60,7 @@ def make_engine(
         oms_type=OmsType.NETTING,
         account_type=AccountType.MARGIN,
         base_currency=None,
-        starting_balances=[Money(starting_capital, USDC)],
+        starting_balances=[Money(starting_capital, instrument.settlement_currency)],
     )
     engine.add_instrument(instrument)
     engine.add_data(bars)
@@ -91,7 +90,7 @@ def run_single_backtest(
     bars
         Bar data to feed.
     starting_capital
-        Starting balance in USDC.
+        Starting balance in the instrument's settlement currency.
     params
         Sweep parameters (e.g. ``{"fast": 10, "slow": 50}``).
         Passed through to the returned dict as-is.
@@ -130,10 +129,11 @@ def run_single_backtest(
             )
         else:
             a.calculate_statistics(acct, pos)
-            balance = float(acct.balance_total(USDC))
+            currency = instrument.settlement_currency
+            balance = float(acct.balance_total(currency))
             row.update(
-                total_pnl=float(a.total_pnl(USDC)),
-                total_pnl_pct=float(a.total_pnl_percentage(USDC)),
+                total_pnl=float(a.total_pnl(currency)),
+                total_pnl_pct=float(a.total_pnl_percentage(currency)),
                 num_positions=len(pos),
                 final_balance=balance,
                 error="",
@@ -151,7 +151,7 @@ def run_single_backtest(
 
             for stats_name, stats_fn in [
                 ("general", a.get_performance_stats_general),
-                ("PnL", lambda: a.get_performance_stats_pnls(USDC)),
+                ("PnL", lambda: a.get_performance_stats_pnls(currency)),
                 ("returns", a.get_performance_stats_returns),
             ]:
                 try:
@@ -207,7 +207,7 @@ def run_sweep(
     bars
         Bar data to feed to each engine.
     starting_capital
-        Starting balance in USDC.
+        Starting balance in the instrument's settlement currency.
     param_combos
         List of parameter dicts, e.g.
         ``[{"fast": 10, "slow": 50}, {"fast": 10, "slow": 75}, ...]``.
@@ -409,7 +409,7 @@ def run_walk_forward(
     bars
         Full bar dataset — sliced internally per fold.
     starting_capital
-        Starting balance in USDC.
+        Starting balance in the instrument's settlement currency.
     param_combos
         Parameter grid to sweep each fold (same as ``run_sweep``).
     strategy_factory
