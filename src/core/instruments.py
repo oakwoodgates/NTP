@@ -84,21 +84,24 @@ def make_hyperliquid_perp(
 
 def make_binance_perp(
     coin: str,
-    price_precision: int,
-    size_precision: int,
+    tick_size: str,
+    step_size: str,
     maker_fee: Decimal = BINANCE_MAKER_FEE,
     taker_fee: Decimal = BINANCE_TAKER_FEE,
 ) -> CryptoPerpetual:
     """Create a CryptoPerpetual instrument for Binance USDM Futures.
 
+    Precision and increment are derived from tick_size/step_size strings,
+    matching how NT's own BinanceFuturesInstrumentProvider parses exchangeInfo.
+
     Parameters
     ----------
     coin : str
         The coin ticker (e.g., "BTC", "ETH", "SOL").
-    price_precision : int
-        Decimal places for price (e.g., 2 for BTC → tick size 0.01).
-    size_precision : int
-        Decimal places for size (e.g., 3 for BTC → 0.001).
+    tick_size : str
+        Price tick size from PRICE_FILTER (e.g., "0.10" for BTC).
+    step_size : str
+        Order size step from LOT_SIZE (e.g., "0.001" for BTC).
     maker_fee : Decimal
         Maker fee rate. Default: Binance VIP 0 base tier.
     taker_fee : Decimal
@@ -112,9 +115,9 @@ def make_binance_perp(
     symbol = f"{coin}USDT"
     quote = Currency.from_str("USDT")
 
-    price_increment_str, size_increment_str = _precision_to_increments(
-        price_precision, size_precision,
-    )
+    # Derive precision from tick/step strings — matches NT adapter (providers.py:384-387)
+    price_precision = abs(int(Decimal(tick_size).as_tuple().exponent))
+    size_precision = abs(int(Decimal(step_size).as_tuple().exponent))
 
     return CryptoPerpetual(
         instrument_id=InstrumentId(Symbol(f"{symbol}-PERP"), BINANCE_VENUE),
@@ -125,8 +128,8 @@ def make_binance_perp(
         is_inverse=False,
         price_precision=price_precision,
         size_precision=size_precision,
-        price_increment=Price.from_str(price_increment_str),
-        size_increment=Quantity.from_str(size_increment_str),
+        price_increment=Price.from_str(tick_size),
+        size_increment=Quantity.from_str(step_size),
         ts_event=0,
         ts_init=0,
         margin_init=Decimal(1),    # Per NT Binance adapter convention

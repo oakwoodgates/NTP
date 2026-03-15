@@ -27,14 +27,6 @@ from src.core.constants import (
 )
 from src.core.instruments import make_binance_perp
 
-# Default instrument metadata: (price_precision, size_precision)
-# Fetched from Binance exchangeInfo /fapi/v1/exchangeInfo (2026-03-14).
-COIN_DEFAULTS: dict[str, tuple[int, int]] = {
-    "BTC": (2, 3),
-    "ETH": (2, 3),
-    "SOL": (3, 0),
-}
-
 # Rate limit threshold — back off when used weight approaches the 1200/min limit.
 _WEIGHT_BACKOFF_THRESHOLD = 1000
 
@@ -47,12 +39,16 @@ def get_base_url(testnet: bool) -> str:
     return BINANCE_TESTNET_API_URL if testnet else BINANCE_FUTURES_API_URL
 
 
-def fetch_exchange_info(
+def fetch_instrument_metadata(
     client: httpx.Client,
     base_url: str,
     coins: list[str],
-) -> None:
-    """Fetch exchangeInfo and warn if metadata differs from COIN_DEFAULTS."""
+) -> dict[str, dict[str, str]]:
+    """Fetch tick_size and step_size for each coin from Binance exchangeInfo.
+
+    Returns a dict mapping coin → {"tick_size": str, "step_size": str}.
+    Errors if a requested coin is not found.
+    """
     resp = retry_request(client, "GET", f"{base_url}/fapi/v1/exchangeInfo")
     data: dict[str, Any] = resp.json()
 
@@ -61,37 +57,33 @@ def fetch_exchange_info(
         if s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT":
             symbols_by_base[s["baseAsset"]] = s
 
+    result: dict[str, dict[str, str]] = {}
     for coin in coins:
         if coin not in symbols_by_base:
-            print(f"WARNING: {coin}USDT perpetual not found on Binance", file=sys.stderr)
-            continue
+            print(f"ERROR: {coin}USDT perpetual not found on Binance", file=sys.stderr)
+            sys.exit(1)
+
         info = symbols_by_base[coin]
-        defaults = COIN_DEFAULTS.get(coin)
-        if not defaults:
-            continue
+        tick_size: str | None = None
+        step_size: str | None = None
 
-        expected_price_prec, expected_size_prec = defaults
-
-        # Extract precisions from filters
         for f in info.get("filters", []):
             if f["filterType"] == "PRICE_FILTER":
-                tick_size = f["tickSize"].rstrip("0")
-                actual_price_prec = len(tick_size.split(".")[-1]) if "." in tick_size else 0
-                if actual_price_prec != expected_price_prec:
-                    print(
-                        f"WARNING: {coin} price_precision mismatch: "
-                        f"expected {expected_price_prec}, got {actual_price_prec}",
-                        file=sys.stderr,
-                    )
+                tick_size = f["tickSize"]
             elif f["filterType"] == "LOT_SIZE":
-                step_size = f["stepSize"].rstrip("0")
-                actual_size_prec = len(step_size.split(".")[-1]) if "." in step_size else 0
-                if actual_size_prec != expected_size_prec:
-                    print(
-                        f"WARNING: {coin} size_precision mismatch: "
-                        f"expected {expected_size_prec}, got {actual_size_prec}",
-                        file=sys.stderr,
-                    )
+                step_size = f["stepSize"]
+
+        if not tick_size or not step_size:
+            print(
+                f"ERROR: Missing PRICE_FILTER or LOT_SIZE for {coin}USDT",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        result[coin] = {"tick_size": tick_size, "step_size": step_size}
+        print(f"  {coin}: tick_size={tick_size}, step_size={step_size}")
+
+    return result
 
 
 def fetch_candles(
@@ -184,11 +176,6 @@ def main() -> None:
             print(f"ERROR: Unknown interval '{interval}'", file=sys.stderr)
             sys.exit(1)
 
-    for coin in args.coins:
-        if coin not in COIN_DEFAULTS:
-            print(f"ERROR: No defaults for '{coin}'. Add to COIN_DEFAULTS.", file=sys.stderr)
-            sys.exit(1)
-
     base_url = get_base_url(args.testnet)
     if args.testnet:
         print(f"Using Binance TESTNET: {base_url}")
@@ -203,9 +190,10 @@ def main() -> None:
     col_map = {"open": "open", "high": "high", "low": "low", "close": "close", "volume": "volume"}
 
     with httpx.Client(timeout=30.0) as client:
-        # Test connectivity and validate metadata
+        # Fetch instrument metadata from exchange
+        print("Fetching instrument metadata from Binance exchangeInfo...")
         try:
-            fetch_exchange_info(client, base_url, args.coins)
+            metadata = fetch_instrument_metadata(client, base_url, args.coins)
         except (httpx.ConnectError, httpx.TimeoutException):
             print(
                 "ERROR: Cannot reach Binance API.\n"
@@ -216,11 +204,11 @@ def main() -> None:
             )
             sys.exit(1)
 
-        # Build instruments once per coin, write to catalog before bar data.
+        # Build instruments from live metadata, write to catalog before bar data.
         instruments = {}
         for coin in args.coins:
-            price_prec, size_prec = COIN_DEFAULTS[coin]
-            inst = make_binance_perp(coin, price_prec, size_prec)
+            meta = metadata[coin]
+            inst = make_binance_perp(coin, meta["tick_size"], meta["step_size"])
             instruments[coin] = inst
             catalog.write_data([inst])
             print(f"Wrote instrument: {inst.id}")
