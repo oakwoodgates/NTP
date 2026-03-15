@@ -52,8 +52,9 @@ class EMACrossATRConfig(StrategyConfig, frozen=True):
         The instrument ID for the strategy.
     bar_type : BarType
         The bar type for the strategy.
-    trade_size : Decimal
-        The position size per trade.
+    trade_notional : Decimal
+        The USD notional amount per trade. Quantity is computed dynamically
+        from trade_notional / entry_price at each entry.
     fast_ema_period : int, default 20
         The fast EMA period.
     slow_ema_period : int, default 50
@@ -72,7 +73,7 @@ class EMACrossATRConfig(StrategyConfig, frozen=True):
 
     instrument_id: InstrumentId
     bar_type: BarType
-    trade_size: Decimal
+    trade_notional: Decimal
     fast_ema_period: PositiveInt = 20
     slow_ema_period: PositiveInt = 50
     atr_period: PositiveInt = 14
@@ -237,7 +238,18 @@ class EMACrossATR(Strategy):
             sl_price = self.instrument.make_price(entry_price + sl_distance)
             tp_price = self.instrument.make_price(entry_price - tp_distance)
 
-        qty = self.instrument.make_qty(self.config.trade_size)
+        price_dec = Decimal(str(entry_price))
+        if price_dec <= 0:
+            self.log.warning("Invalid price — cannot compute quantity")
+            return
+
+        qty = self.instrument.make_qty(self.config.trade_notional / price_dec)
+        if qty <= 0:
+            self.log.warning(
+                f"Computed qty=0 for notional={self.config.trade_notional} "
+                f"at price={price_dec}"
+            )
+            return
 
         # Bracket: market entry + contingent TP limit + contingent SL stop-market.
         # NT cancels the remaining leg automatically when either fills.

@@ -7,8 +7,7 @@ Configure via .env or environment variables:
     STRATEGY=EMACross         # EMACross | SMACross | EMACrossATR | MACDRSI
     INSTRUMENT_ID=BTC-USD-PERP.HYPERLIQUID
     BAR_INTERVAL=1-HOUR-LAST-EXTERNAL
-    TRADE_SIZE=0.001          # quantity per trade (EMACrossATR, MACDRSI)
-    TRADE_NOTIONAL=100        # USD notional per trade (EMACross, SMACross)
+    TRADE_NOTIONAL=100        # USD notional per trade (all strategies)
     STARTING_BALANCE=10000
 
 Ctrl+C (local) or `docker stop` (container) for graceful shutdown.
@@ -46,7 +45,6 @@ def _build_strategy(
     strategy_name: str,
     instrument_id: InstrumentId,
     bar_type: BarType,
-    trade_size: Decimal,
     trade_notional: Decimal,
 ) -> tuple[object, str, dict[str, object]]:
     """Build the selected strategy with default parameters.
@@ -82,7 +80,7 @@ def _build_strategy(
         return EMACrossATR(EMACrossATRConfig(
             instrument_id=instrument_id,
             bar_type=bar_type,
-            trade_size=trade_size,
+            trade_notional=trade_notional,
             fast_ema_period=fast,
             slow_ema_period=slow,
             atr_period=atr,
@@ -90,7 +88,7 @@ def _build_strategy(
             atr_tp_multiplier=tp_mult,
         )), f"EMACrossATR-{fast}-{slow}-{atr}", {
             "fast": fast, "slow": slow, "atr": atr,
-            "sl_mult": sl_mult, "tp_mult": tp_mult, "size": str(trade_size),
+            "sl_mult": sl_mult, "tp_mult": tp_mult, "notional": str(trade_notional),
         }
 
     if strategy_name == "MACDRSI":
@@ -99,14 +97,14 @@ def _build_strategy(
         return MACDRSI(MACDRSIConfig(
             instrument_id=instrument_id,
             bar_type=bar_type,
-            trade_size=trade_size,
+            trade_notional=trade_notional,
             macd_fast_period=macd_fast,
             macd_slow_period=macd_slow,
             macd_signal_period=signal,
             rsi_period=rsi,
         )), f"MACDRSI-{macd_fast}-{macd_slow}-{signal}-{rsi}", {
             "macd_fast": macd_fast, "macd_slow": macd_slow,
-            "signal": signal, "rsi": rsi, "size": str(trade_size),
+            "signal": signal, "rsi": rsi, "notional": str(trade_notional),
         }
 
     valid = ["EMACross", "SMACross", "EMACrossATR", "MACDRSI"]
@@ -133,7 +131,7 @@ def main() -> None:
 
     strategy, strategy_id, config_dict = _build_strategy(
         settings.strategy, instrument_id, bar_type,
-        Decimal(settings.trade_size), Decimal(settings.trade_notional),
+        Decimal(settings.trade_notional),
     )
 
     print(f"Starting {RUN_MODE} run: {strategy_id} on {instrument_id} ({bar_interval})")

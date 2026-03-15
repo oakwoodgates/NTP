@@ -134,8 +134,8 @@ STRATEGY=EMACross
 # Instrument: BTC | ETH | SOL
 INSTRUMENT_ID=BTC-USD-PERP.HYPERLIQUID
 
-# Adjust trade size to keep ~$50-100 notional
-TRADE_SIZE=0.01
+# USD notional per trade (all strategies use notional sizing)
+TRADE_NOTIONAL=100
 
 # Timeframe
 BAR_INTERVAL=15-MINUTE-LAST-EXTERNAL
@@ -154,11 +154,11 @@ Then restart: Ctrl+C the running node, `python scripts/run_sandbox.py`.
 
 ### Available instruments
 
-| Instrument | TRADE_SIZE for ~$50-100 |
-|------------|------------------------|
-| `BTC-USD-PERP.HYPERLIQUID` | `0.001` |
-| `ETH-USD-PERP.HYPERLIQUID` | `0.01` |
-| `SOL-USD-PERP.HYPERLIQUID` | `0.1` |
+| Instrument | Example |
+|------------|---------|
+| `BTC-USD-PERP.HYPERLIQUID` | TRADE_NOTIONAL=100 → ~$100 per trade |
+| `ETH-USD-PERP.HYPERLIQUID` | TRADE_NOTIONAL=100 → ~$100 per trade |
+| `SOL-USD-PERP.HYPERLIQUID` | TRADE_NOTIONAL=100 → ~$100 per trade |
 
 ### Available timeframes
 

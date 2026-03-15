@@ -219,7 +219,7 @@ def run_sweep(
                 cfg = EMACrossConfig(
                     instrument_id=instrument.id,
                     bar_type=BarType.from_str(BAR_TYPE_STR),
-                    trade_size=TRADE_SIZE,
+                    trade_notional=TRADE_NOTIONAL,
                     fast_ema_period=params["fast"],
                     slow_ema_period=params["slow"],
                 )

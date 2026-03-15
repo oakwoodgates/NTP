@@ -18,7 +18,7 @@ class TestSettings:
         assert s.strategy == "EMACross"
         assert s.instrument_id == "BTC-USD-PERP.HYPERLIQUID"
         assert s.bar_interval == "1-HOUR-LAST-EXTERNAL"
-        assert s.trade_size == "0.001"
+        assert s.trade_notional == "100"
         assert s.starting_balance == 10_000
 
     def test_postgres_dsn(self) -> None:
