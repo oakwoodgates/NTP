@@ -64,23 +64,12 @@ Or use `--testnet` for development — the testnet has no geo-restrictions.
 
 ## Supported Coins
 
-### Hyperliquid
+Both scripts fetch instrument metadata at runtime — no hardcoded precision values.
 
-| Coin | price_precision | size_precision (szDecimals) | maxLeverage |
-|------|-----------------|----------------------------|-------------|
-| BTC | 1 | 5 | 40 |
-| ETH | 2 | 4 | 25 |
-| SOL | 3 | 2 | 20 |
+- **Hyperliquid:** `szDecimals` and `maxLeverage` from the meta endpoint. Price precision inferred from recent candle price strings (HL uses a 5-significant-figure rule that's price-magnitude-dependent).
+- **Binance:** `tickSize` and `stepSize` from `exchangeInfo` PRICE_FILTER and LOT_SIZE filters.
 
-### Binance Futures
-
-| Coin | price_precision | size_precision |
-|------|-----------------|----------------|
-| BTC | 2 | 3 |
-| ETH | 2 | 3 |
-| SOL | 3 | 0 |
-
-Both scripts validate coin metadata against the live exchange API on each run and warn on mismatches.
+Any perpetual available on either exchange can be fetched by passing its ticker via `--coins`.
 
 ## Supported Intervals
 
@@ -112,9 +101,7 @@ data/catalog/
 
 ## Adding a New Coin
 
-1. Look up the coin's precision on the exchange (price tick size, order size step).
-2. Add to `COIN_DEFAULTS` in the relevant fetch script.
-3. Run the script — the instrument factory (`make_hyperliquid_perp` or `make_binance_perp` in `src/core/instruments.py`) handles the rest.
+**Both exchanges:** Just pass the coin ticker via `--coins`. All instrument metadata is fetched at runtime — no hardcoded defaults to maintain.
 
 ## Adding a New Exchange
 
