@@ -119,20 +119,22 @@ class EMACross(Strategy):
             return
 
         price = Decimal(str(bar.close))
-
+        is_flat = self.portfolio.is_flat(self.config.instrument_id)
+        is_net_long = self.portfolio.is_net_long(self.config.instrument_id)
+        is_net_short = self.portfolio.is_net_short(self.config.instrument_id)
         # BUY signal: fast EMA >= slow EMA
         if self.fast_ema.value >= self.slow_ema.value:
-            if self.portfolio.is_flat(self.config.instrument_id):
+            if is_flat:
                 self._enter(OrderSide.BUY, price)
-            elif self.portfolio.is_net_short(self.config.instrument_id):
+            elif is_net_short:
                 self.close_all_positions(self.config.instrument_id)
                 self._enter(OrderSide.BUY, price)
 
         # SELL signal: fast EMA < slow EMA
         elif self.fast_ema.value < self.slow_ema.value:
-            if self.portfolio.is_flat(self.config.instrument_id):
+            if is_flat:
                 self._enter(OrderSide.SELL, price)
-            elif self.portfolio.is_net_long(self.config.instrument_id):
+            elif is_net_long:
                 self.close_all_positions(self.config.instrument_id)
                 self._enter(OrderSide.SELL, price)
 
@@ -158,6 +160,7 @@ class EMACross(Strategy):
             order_side=side,
             quantity=qty,
         )
+
         self.submit_order(order)
 
     def on_stop(self) -> None:
