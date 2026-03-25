@@ -121,6 +121,87 @@ nano .env
 docker compose restart trader  # No rebuild needed
 ```
 
+## Wipe Database + Update `.env` + Restart Trading
+
+Use this when you want a clean slate (all historical DB rows removed), then start
+trading with updated variables.
+
+```bash
+ssh root@<droplet-ip>
+cd ~/NTP
+
+# 1) Stop trader gracefully first
+docker compose stop trader
+
+# 2) Wipe PostgreSQL app schema (DESTRUCTIVE: deletes all persisted trading data)
+docker compose exec postgres psql -U nautilus -d nautilus_platform \
+    -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public;"
+
+# 3) Recreate tables via Alembic migrations
+docker compose run --rm trader alembic upgrade head
+
+# 4) Update variables
+nano .env
+
+# 5) Restart trading
+docker compose up -d trader
+```
+
+Optional sanity checks:
+
+```bash
+# Verify schema/tables exist after migration
+docker compose exec postgres psql -U nautilus -d nautilus_platform -c "\dt"
+
+# Verify a new run is being registered
+docker compose exec postgres psql -U nautilus -d nautilus_platform \
+    -c "SELECT id, strategy_id, started_at, stopped_at FROM strategy_runs ORDER BY started_at DESC LIMIT 3;"
+```
+
+## Reset Trading Data (Keep Schema) + Update `.env` + Restart Trading
+
+Use this when you want to clear runtime history but keep migrations/schema intact.
+This truncates all `public` tables except `alembic_version`.
+
+```bash
+ssh root@<droplet-ip>
+cd ~/NTP
+
+# 1) Stop trader gracefully first
+docker compose stop trader
+
+# 2) Truncate all app tables, keep alembic_version (schema preserved)
+docker compose exec postgres psql -U nautilus -d nautilus_platform -c "
+DO \$\$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN
+    SELECT tablename
+    FROM pg_tables
+    WHERE schemaname = 'public' AND tablename <> 'alembic_version'
+  LOOP
+    EXECUTE format('TRUNCATE TABLE public.%I RESTART IDENTITY CASCADE;', r.tablename);
+  END LOOP;
+END
+\$\$;"
+
+# 3) Update variables
+nano .env
+
+# 4) Restart trading
+docker compose up -d trader
+```
+
+Optional sanity checks:
+
+```bash
+# Expect near-zero rows right after reset/start (except new writes after trader starts)
+docker compose exec postgres psql -U nautilus -d nautilus_platform \
+    -c "SELECT COUNT(*) AS fills FROM order_fills;"
+docker compose exec postgres psql -U nautilus -d nautilus_platform \
+    -c "SELECT COUNT(*) AS runs FROM strategy_runs;"
+```
+
 ## Managing the Container
 
 | Action | Command |
