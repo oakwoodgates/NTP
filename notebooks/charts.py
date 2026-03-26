@@ -27,6 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 import matplotlib.pyplot as plt
+from matplotlib.patches import Rectangle
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
@@ -53,6 +54,9 @@ _RED         = "#ef5350"
 _AMBER       = "#f5c518"
 _BLUE        = "#2196f3"
 
+# ── Flag constants ────────────────────────────────────────────────────────
+_FLAG_BG   = "#eeeeee"
+_FLAG_TEXT = "#777777"
 
 # ── MA class dispatch ────────────────────────────────────────────────────────
 
@@ -730,20 +734,34 @@ def plot_pnl_heatmap(
             val = pivot.values[i, j]
             if np.isnan(val):
                 continue
-            color = "white" if abs(val) > vmax * 0.6 else "black"
-            ax.text(j, i, f"{val:{fmt}}", ha="center", va="center",
-                    fontsize=10, color=color)
 
-            # Draw underline for flagged cells
             is_flagged = (
                 flag_pivot is not None
                 and not np.isnan(flag_pivot.values[i, j])
                 and flag_pivot.values[i, j] > 0.5
             )
+
+            if is_flagged:
+                # Grey out the cell so it's visually distinct from the heatmap
+                ax.add_patch(Rectangle(
+                    (j - 0.5, i - 0.5), 1, 1,
+                    facecolor=_FLAG_BG, edgecolor="none", zorder=2,
+                ))
+                text_color = _FLAG_TEXT
+            else:
+                text_color = "white" if abs(val) > vmax * 0.6 else "black"
+
+            ax.text(j, i, f"{val:{fmt}}", ha="center", va="center",
+                    fontsize=10, color=text_color, zorder=3)
+
             if is_flagged:
                 ax.plot(
-                    [j - 0.22, j + 0.22], [i + 0.18, i + 0.18],
-                    color=color, linewidth=1, solid_capstyle="round",
+                    [j - 0.22, j + 0.22], 
+                    [i + 0.18, i + 0.18],
+                    color=_FLAG_TEXT, # prev: color=color
+                    linewidth=1, 
+                    solid_capstyle="round",
+                    zorder=3,
                 )
                 underline_drawn = True
 
@@ -754,7 +772,7 @@ def plot_pnl_heatmap(
     # Add footnote below everything (after tight_layout so we know final bounds)
     if underline_drawn:
         fig.text(
-            0.5, 0.01, f"underlined = {flag_label}",
+            0.5, 0.01, f"grey or underlined cells = {flag_label}",
             ha="center", fontsize=9, color="#666666", style="italic",
         )
         fig.subplots_adjust(bottom=fig.subplotpars.bottom + 0.04)
