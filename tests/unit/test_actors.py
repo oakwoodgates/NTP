@@ -9,6 +9,7 @@ class TestPersistenceActorConfig:
         config = PersistenceActorConfig(
             postgres_dsn="postgresql://localhost/test",
             run_id="00000000-0000-0000-0000-000000000000",
+            instrument_id="BTC-USDT.HYPERLIQUID",
         )
         assert config.postgres_dsn == "postgresql://localhost/test"
         assert config.run_id == "00000000-0000-0000-0000-000000000000"
@@ -17,6 +18,7 @@ class TestPersistenceActorConfig:
         config = PersistenceActorConfig(
             postgres_dsn="postgresql://localhost/test",
             run_id="00000000-0000-0000-0000-000000000000",
+            instrument_id="BTC-USDT.HYPERLIQUID",
         )
         assert config.venue == "HYPERLIQUID"
         assert config.snapshot_interval_secs == 60
@@ -25,6 +27,7 @@ class TestPersistenceActorConfig:
         config = PersistenceActorConfig(
             postgres_dsn="postgresql://localhost/test",
             run_id="00000000-0000-0000-0000-000000000000",
+            instrument_id="BTC-USDT.HYPERLIQUID",
             venue="BINANCE",
         )
         assert config.venue == "BINANCE"
