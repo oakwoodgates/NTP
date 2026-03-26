@@ -658,6 +658,9 @@ def plot_pnl_heatmap(
     col_label: str | None = None,
     title: str = "Total PnL (USDC)",
     fmt: str = ",.0f",
+    flag_col: str | None = "error",
+    flag_value: str = "liquidated",
+    flag_label: str = "hit zero equity",
 ) -> None:
     """Diverging RdYlGn heatmap from sweep results DataFrame.
 
@@ -681,9 +684,26 @@ def plot_pnl_heatmap(
         Chart title.
     fmt
         Format string for cell annotations.
+    flag_col
+        Column containing error/flag strings. Cells matching *flag_value*
+        are underlined to indicate unreliable results. Set to ``None``
+        to disable flagging. Default ``"error"``.
+    flag_value
+        The string value in *flag_col* that triggers the underline.
+        Default ``"liquidated"``.
+    flag_label
+        Legend label for the underline marker. Default ``"hit zero equity"``.
 
     """
     pivot = results_df.pivot(index=row_col, columns=col_col, values=value_col)
+
+    # Build a matching boolean pivot for flagged cells
+    flag_pivot = None
+    if flag_col and flag_col in results_df.columns:
+        flagged = (results_df[flag_col].fillna("") == flag_value).astype(float)
+        flag_pivot = results_df.assign(_flag=flagged).pivot(
+            index=row_col, columns=col_col, values="_flag",
+        )
 
     fig, ax = plt.subplots(figsize=(8, 6))
 
@@ -704,6 +724,7 @@ def plot_pnl_heatmap(
     ax.set_ylabel(row_label or row_col)
     ax.set_title(title)
 
+    underline_drawn = False
     for i in range(len(pivot.index)):
         for j in range(len(pivot.columns)):
             val = pivot.values[i, j]
@@ -713,8 +734,31 @@ def plot_pnl_heatmap(
             ax.text(j, i, f"{val:{fmt}}", ha="center", va="center",
                     fontsize=10, color=color)
 
+            # Draw underline for flagged cells
+            is_flagged = (
+                flag_pivot is not None
+                and not np.isnan(flag_pivot.values[i, j])
+                and flag_pivot.values[i, j] > 0.5
+            )
+            if is_flagged:
+                ax.plot(
+                    [j - 0.22, j + 0.22], [i + 0.18, i + 0.18],
+                    color=color, linewidth=1, solid_capstyle="round",
+                )
+                underline_drawn = True
+
     fig.colorbar(im, ax=ax, label=f"{value_col} (USDC)")
+
     plt.tight_layout()
+
+    # Add footnote below everything (after tight_layout so we know final bounds)
+    if underline_drawn:
+        fig.text(
+            0.5, 0.01, f"underlined = {flag_label}",
+            ha="center", fontsize=9, color="#666666", style="italic",
+        )
+        fig.subplots_adjust(bottom=fig.subplotpars.bottom + 0.04)
+
     plt.show()
 
 
