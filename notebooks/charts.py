@@ -26,6 +26,8 @@ import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+_REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports" / "backtest"
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 import numpy as np
@@ -1023,7 +1025,7 @@ def generate_backtest_html(
     instrument_label: str = "",
     bar_label: str = "1h",
     starting_capital: float = 10_000.0,
-    output_path: str | Path | None = None,
+    result_filename: str | None = None,
     open_browser: bool = False,
 ) -> Path:
     """
@@ -1042,8 +1044,9 @@ def generate_backtest_html(
     instrument_label  Display label (e.g. "BTC-USD-PERP.HYPERLIQUID").
     bar_label         Timeframe string (e.g. "1h").
     starting_capital  Used for total-return % calculation.
-    output_path       Where to write the HTML file. If None, writes to
-                      backtest_<timestamp>.html in the current directory.
+    result_filename   Descriptive name without path or extension
+                      (e.g. "sma_cross_BTC_15_25_4h"). If None, auto-generates
+                      from instrument_label + timestamp.
 
     Returns
     -------
@@ -1091,11 +1094,12 @@ def generate_backtest_html(
     stats                  = _compute_stats(position_rows, starting_capital)
 
     # ── Resolve output path ──────────────────────────────────────────────────
-    if output_path is None:
-        ts_str = datetime.now(tz=timezone.utc).strftime("%Y%m%d_%H%M%S")
+    if result_filename is None:
         asset = instrument_label.split("-")[0] if instrument_label else "unknown"
-        output_path = Path(f"backtest_{asset}_{ts_str}.html")
-    output_path = Path(output_path).resolve()
+        result_filename = f"backtest_{asset}"
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+    _REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    output_path = (_REPORTS_DIR / f"{result_filename}_{timestamp}.html").resolve()
 
     # ── Render template ──────────────────────────────────────────────────────
     title    = f"Backtest — {instrument_label} {bar_label}  {ma_type} {fast_period}/{slow_period}"
