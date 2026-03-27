@@ -9,11 +9,12 @@ from pathlib import Path
 import nbformat
 from nbconvert import HTMLExporter
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 def save_notebook(
     notebook_filename: str,
     result_filename: str,
-    results_dir: str | Path = "results",
+    results_dir: str | Path | None = None,
 ) -> Path:
     """Copy a notebook (with outputs) to the results directory.
 
@@ -36,6 +37,8 @@ def save_notebook(
         The destination file path.
 
     """
+    if results_dir is None:
+        results_dir = _PROJECT_ROOT / "reports" / "notebooks"
     results_path = Path(results_dir)
     results_path.mkdir(exist_ok=True)
 
@@ -50,7 +53,7 @@ def save_notebook(
 def save_notebook_html(
     notebook_filename: str,
     result_filename: str,
-    results_dir: str | Path = "results",
+    results_dir: str | Path | None = None,
 ) -> Path:
     """Export a notebook to a self-contained HTML file in the results directory.
 
@@ -73,6 +76,8 @@ def save_notebook_html(
         The destination file path.
 
     """
+    if results_dir is None:
+        results_dir = _PROJECT_ROOT / "reports" / "html"
     results_path = Path(results_dir)
     results_path.mkdir(exist_ok=True)
 
