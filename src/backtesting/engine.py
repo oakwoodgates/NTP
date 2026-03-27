@@ -16,6 +16,9 @@ from nautilus_trader.config import LoggingConfig
 from nautilus_trader.model.enums import AccountType, OmsType
 from nautilus_trader.model.objects import Money
 
+from pathlib import Path
+
+
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
@@ -26,7 +29,8 @@ if TYPE_CHECKING:
 
 
 # ── Default sweep output directory ───────────────────────────────────────────
-_DEFAULT_SWEEP_DIR = "data/sweeps"
+#_DEFAULT_SWEEP_DIR = "data/sweeps"
+_DEFAULT_SWEEP_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "sweeps"
 
 
 def make_engine(
