@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import sys
 import time
@@ -10,13 +11,13 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import pandas as pd
+from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from nautilus_trader.persistence.wranglers import BarDataWrangler
 
 from src.core.constants import INTERVAL_TO_BAR_SPEC, TS_INIT_DELTAS
 
 if TYPE_CHECKING:
     from nautilus_trader.model.data import BarType
-    from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 CATALOG_PATH = Path("data/catalog")
 
@@ -148,21 +149,84 @@ def validate_dataframe(df: pd.DataFrame, symbol: str, interval: str) -> None:
 # ── Catalog write ───────────────────────────────────────────────────
 
 
-def clean_catalog_data(bar_type_str: str, catalog_path: Path = CATALOG_PATH) -> None:
-    """Delete existing catalog data for this bar type to allow clean rewrite.
+_STAGING_DIR_NAME = "_staging"
 
-    ParquetDataCatalog.write_data() raises ValueError on overlapping time
-    ranges.  Wipe the relevant parquet directory before writing to allow a
-    full rewrite of the merged dataset.
+
+def _recover_catalog_dir(bar_type_str: str, catalog_path: Path) -> None:
+    """Clean up artifacts from a previous interrupted write.
+
+    Must run before any destructive operation to ensure a consistent state.
     """
     bar_dir = catalog_path / "data" / "bar"
-    if not bar_dir.exists():
+    staging_root = catalog_path / _STAGING_DIR_NAME
+    real_dir = bar_dir / bar_type_str
+    backup_dir = bar_dir / (bar_type_str + ".backup")
+
+    # Clean incomplete staging from previous crash
+    if staging_root.exists():
+        shutil.rmtree(staging_root)
+        print("  Recovered: cleaned up incomplete staging dir", file=sys.stderr)
+
+    if not backup_dir.exists():
         return
 
-    for path in bar_dir.iterdir():
-        if path.is_dir() and bar_type_str in path.name:
-            shutil.rmtree(path)
-            print(f"  Cleaned: {path.name}")
+    if real_dir.exists():
+        # Both exist: previous write completed but cleanup didn't. Delete backup.
+        shutil.rmtree(backup_dir)
+        print(f"  Recovered: cleaned up orphaned backup for {bar_type_str}", file=sys.stderr)
+    else:
+        # Backup exists but real doesn't: crash during swap. Restore old data.
+        # New data is lost — re-run the fetch to retry.
+        os.rename(str(backup_dir), str(real_dir))
+        print(
+            f"  Recovered: restored {bar_type_str} from backup "
+            f"(write was interrupted — re-run fetch to retry)",
+            file=sys.stderr,
+        )
+
+
+def _safe_catalog_swap(
+    bars: list[Any],
+    bar_type_str: str,
+    catalog_path: Path,
+) -> None:
+    """Write bars to a staging catalog, then swap into the real location.
+
+    At every crash point, existing data is either intact or recoverable
+    via ``_recover_catalog_dir`` on the next run.
+    """
+    bar_dir = catalog_path / "data" / "bar"
+    real_dir = bar_dir / bar_type_str
+    backup_dir = bar_dir / (bar_type_str + ".backup")
+    staging_root = catalog_path / _STAGING_DIR_NAME
+
+    # Defensive: clean leftover staging (should already be handled by recovery)
+    if staging_root.exists():
+        shutil.rmtree(staging_root)
+
+    # 1. Write new data to a staging catalog
+    staging_catalog = ParquetDataCatalog(str(staging_root))
+    staging_catalog.write_data(bars)
+
+    # 2. Verify staging produced a parquet file
+    staged_bar_dir = staging_root / "data" / "bar" / bar_type_str
+    staged_files = list(staged_bar_dir.glob("*.parquet")) if staged_bar_dir.exists() else []
+    if not staged_files:
+        shutil.rmtree(staging_root, ignore_errors=True)
+        msg = f"Staging write produced no parquet files for {bar_type_str}"
+        raise RuntimeError(msg)
+
+    # 3. Backup existing data (if any)
+    if real_dir.exists():
+        os.rename(str(real_dir), str(backup_dir))
+
+    # 4. Move staged data to real location
+    os.rename(str(staged_bar_dir), str(real_dir))
+
+    # 5. Cleanup
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir)
+    shutil.rmtree(staging_root, ignore_errors=True)
 
 
 def wrangle_and_write(
@@ -170,10 +234,15 @@ def wrangle_and_write(
     instrument: Any,
     interval: str,
     bar_type: BarType,
-    catalog: ParquetDataCatalog,
+    catalog: ParquetDataCatalog,  # noqa: ARG001 — kept for backward compat
     catalog_path: Path = CATALOG_PATH,
 ) -> int:
-    """Wrangle DataFrame to NT Bars and write to catalog. Returns bar count."""
+    """Wrangle DataFrame to NT Bars and write to catalog (crash-safe).
+
+    Writes to a staging directory first, then swaps into the real location.
+    If the process crashes at any point, existing data remains intact or is
+    recoverable on the next run.
+    """
     wrangler = BarDataWrangler(bar_type=bar_type, instrument=instrument)
 
     ts_init_delta = TS_INIT_DELTAS[interval]
@@ -186,9 +255,9 @@ def wrangle_and_write(
         ts_init = pd.Timestamp(b.ts_init, unit="ns", tz="UTC")
         print(f"  Spot check: ts_event={ts_event}, ts_init={ts_init}, delta={ts_init - ts_event}")
 
-    # Wipe existing data to avoid duplicate bars, then write fresh
-    clean_catalog_data(str(bar_type), catalog_path)
-    catalog.write_data(bars)
+    bar_type_str = str(bar_type)
+    _recover_catalog_dir(bar_type_str, catalog_path)
+    _safe_catalog_swap(bars, bar_type_str, catalog_path)
 
     return len(bars)
 
