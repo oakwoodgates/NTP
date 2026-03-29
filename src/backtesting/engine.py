@@ -78,6 +78,7 @@ def run_single_backtest(
     starting_capital: int | float,
     params: dict[str, Any],
     add_strategy: Callable[[BacktestEngine], None],
+    score_from_ns: int | None = None,
     log_level: str = "ERROR",
 ) -> dict[str, Any]:
     """Run one backtest and return a flat dict of results.
@@ -124,6 +125,10 @@ def run_single_backtest(
         acct = eng.cache.account_for_venue(venue)
         pos = eng.cache.position_snapshots() + eng.cache.positions()
 
+        # Filter to only positions opened in the scoring window
+        if score_from_ns is not None:
+            pos = [p for p in pos if p.ts_opened >= score_from_ns]
+
         if acct is None:
             row["error"] = "no account"
             row.update(
@@ -135,13 +140,28 @@ def run_single_backtest(
             a.calculate_statistics(acct, pos)
             currency = instrument.settlement_currency
             balance = float(acct.balance_total(currency))
-            row.update(
-                total_pnl=float(a.total_pnl(currency)),
-                total_pnl_pct=float(a.total_pnl_percentage(currency)),
-                num_positions=len(pos),
-                final_balance=balance,
-                error="",
-            )
+
+            # When scoring a subset of positions, derive PnL from
+            # those positions — not the account (which includes warmup).
+            if score_from_ns is not None and pos:
+                scored_pnl = sum(
+                    float(str(p.realized_pnl).split()[0]) for p in pos
+                )
+                row.update(
+                    total_pnl=scored_pnl,
+                    total_pnl_pct=scored_pnl / starting_capital * 100,
+                    num_positions=len(pos),
+                    final_balance=balance,
+                    error="",
+                )
+            else:
+                row.update(
+                    total_pnl=float(a.total_pnl(currency)),
+                    total_pnl_pct=float(a.total_pnl_percentage(currency)),
+                    num_positions=len(pos),
+                    final_balance=balance,
+                    error="",
+                )
 
             # Detect if equity ever hit zero during the run
             acct_report = eng.trader.generate_account_report(venue)
@@ -405,6 +425,12 @@ def run_walk_forward(
     window, selects the best combo by *select_by*, then runs that combo
     on the out-of-sample test window.
 
+    Both training and test slices are prepended with up to *warmup_bars*
+    extra bars so that indicators are fully initialized before the scored
+    region begins.  For the test slice, any trades that fire during the
+    warmup period are excluded from OOS results via *score_from_ns*,
+    preventing data leakage from the training window.
+
     Parameters
     ----------
     venue
@@ -429,10 +455,11 @@ def run_walk_forward(
         Column name to maximize when selecting best in-sample params.
         Default ``"total_pnl"``.
     warmup_bars
-        Number of extra bars prepended to each training window so that
-        indicators are fully initialized before the scored region begins.
-        Default 200 — covers most MA/oscillator periods.  Override in the
-        notebook when your slowest indicator needs more (or fewer).
+        Number of extra bars prepended to each training and test window
+        so that indicators are fully initialized before the scored region
+        begins.  Default 200 — covers most MA/oscillator periods.
+        Override in the notebook when your slowest indicator needs more
+        (or fewer).
     log_level
         NT log level.
     verbose
@@ -487,13 +514,23 @@ def run_walk_forward(
 
     while start + train_size + test_size <= total_bars:
         fold_num += 1
-        slice_start = max(0, start - warmup_bars)
-        train_slice = bars[slice_start : start + train_size]
-        test_slice = bars[start + train_size : start + train_size + test_size]
+
+        # ── Training slice with warmup padding ──────────────────────
+        train_warmup_start = max(0, start - warmup_bars)
+        train_slice = bars[train_warmup_start : start + train_size]
+
+        # ── Test slice with warmup padding ──────────────────────────
+        # Prepend bars from the end of the training window so indicators
+        # are initialized when the real test region begins.  Trades
+        # during warmup are excluded via score_from_ns below.
+        test_start_idx = start + train_size
+        test_warmup_start = max(0, test_start_idx - warmup_bars)
+        test_slice = bars[test_warmup_start : test_start_idx + test_size]
+        test_score_from_ns = bars[test_start_idx].ts_event
 
         train_start_ts = pd.Timestamp(train_slice[0].ts_event, unit="ns", tz="UTC")
         train_end_ts = pd.Timestamp(train_slice[-1].ts_event, unit="ns", tz="UTC")
-        test_start_ts = pd.Timestamp(test_slice[0].ts_event, unit="ns", tz="UTC")
+        test_start_ts = pd.Timestamp(test_score_from_ns, unit="ns", tz="UTC")
         test_end_ts = pd.Timestamp(test_slice[-1].ts_event, unit="ns", tz="UTC")
 
         if verbose:
@@ -551,6 +588,7 @@ def run_walk_forward(
             starting_capital=starting_capital,
             params=best_params,
             add_strategy=lambda eng, p=best_params: strategy_factory(eng, p),  # type: ignore[misc]
+            score_from_ns=test_score_from_ns,
             log_level=log_level,
         )
 
