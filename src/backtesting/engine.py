@@ -146,20 +146,39 @@ def run_single_backtest(
             currency = instrument.settlement_currency
             balance = float(acct.balance_total(currency))
 
+            # Pull account report once — used for both score_capital
+            # lookup and liquidation detection below.
+            acct_report = eng.trader.generate_account_report(venue)
+
             # When scoring a subset of positions, derive PnL from
             # those positions — not the account (which includes warmup).
-            # Note: total_pnl_pct uses starting_capital as the base,
-            # which is an approximation — the actual capital at
-            # score_from_ns may differ due to warmup trades.
+            # Use the account balance at the scoring boundary as the
+            # capital base for pct calculation, not starting_capital.
             if score_from_ns is not None and pos:
                 scored_pnl = sum(
                     float(p.realized_pnl.as_decimal())
                     for p in pos
                     if p.realized_pnl is not None
                 )
+
+                # Look up account balance at the scoring start so
+                # total_pnl_pct reflects actual capital, not the
+                # original starting_capital (which doesn't account
+                # for warmup trades).
+                score_capital = float(starting_capital)
+                if not acct_report.empty:
+                    score_ts = pd.Timestamp(score_from_ns, unit="ns", tz="UTC")
+                    prior = acct_report.loc[acct_report.index <= score_ts]
+                    if not prior.empty:
+                        score_capital = float(prior["total"].iloc[-1])
+
                 row.update(
                     total_pnl=scored_pnl,
-                    total_pnl_pct=scored_pnl / starting_capital * 100,
+                    total_pnl_pct=(
+                        scored_pnl / score_capital * 100
+                        if score_capital > 0
+                        else 0.0
+                    ),
                     num_positions=len(pos),
                     final_balance=balance,
                     error="",
@@ -174,7 +193,6 @@ def run_single_backtest(
                 )
 
             # Detect if equity ever hit zero during the run
-            acct_report = eng.trader.generate_account_report(venue)
             if not acct_report.empty:
                 min_bal = acct_report["total"].astype(float).min()
                 row["min_balance"] = min_bal
