@@ -6,7 +6,11 @@ notebooks only need to provide strategy-specific configuration.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+import time
+from datetime import UTC, datetime
 
 import numpy as np
 import pandas as pd
@@ -16,12 +20,8 @@ from nautilus_trader.config import LoggingConfig
 from nautilus_trader.model.enums import AccountType, OmsType
 from nautilus_trader.model.objects import Money
 
-from pathlib import Path
-
-
 if TYPE_CHECKING:
     from collections.abc import Callable
-    from pathlib import Path
 
     from nautilus_trader.model.data import Bar
     from nautilus_trader.model.identifiers import Venue
@@ -29,7 +29,6 @@ if TYPE_CHECKING:
 
 
 # ── Default sweep output directory ───────────────────────────────────────────
-#_DEFAULT_SWEEP_DIR = "data/sweeps"
 _DEFAULT_SWEEP_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "sweeps"
 
 
@@ -102,6 +101,12 @@ def run_single_backtest(
     add_strategy
         Callback that receives the engine and must call
         ``engine.add_strategy(...)`` with the desired strategy.
+    score_from_ns
+        If provided, only positions opened at or after this nanosecond
+        timestamp are included in PnL scoring.  Used by walk-forward
+        analysis to exclude trades that fire during the warmup period
+        (bars prepended for indicator initialization).  When ``None``
+        (the default), all positions are scored.
     log_level
         NT log level.
 
@@ -143,9 +148,14 @@ def run_single_backtest(
 
             # When scoring a subset of positions, derive PnL from
             # those positions — not the account (which includes warmup).
+            # Note: total_pnl_pct uses starting_capital as the base,
+            # which is an approximation — the actual capital at
+            # score_from_ns may differ due to warmup trades.
             if score_from_ns is not None and pos:
                 scored_pnl = sum(
-                    float(str(p.realized_pnl).split()[0]) for p in pos
+                    float(p.realized_pnl.as_decimal())
+                    for p in pos
+                    if p.realized_pnl is not None
                 )
                 row.update(
                     total_pnl=scored_pnl,
@@ -269,9 +279,6 @@ def run_sweep(
         prefixed with ``_`` (``_strategy``, ``_instrument_id``, etc.).
 
     """
-    import time
-    from datetime import UTC, datetime
-    from pathlib import Path
 
     total = len(param_combos)
     results: list[dict[str, Any]] = []
@@ -365,8 +372,6 @@ def load_sweeps(
         e.g. ``"EMACross · BTC-USD-PERP.HYPERLIQUID · 5m"``.
 
     """
-    from pathlib import Path
-
     sweep_path = Path(sweep_dir)
     if not sweep_path.exists():
         print(f"No sweep directory found at {sweep_path}")
@@ -427,9 +432,10 @@ def run_walk_forward(
 
     Both training and test slices are prepended with up to *warmup_bars*
     extra bars so that indicators are fully initialized before the scored
-    region begins.  For the test slice, any trades that fire during the
-    warmup period are excluded from OOS results via *score_from_ns*,
-    preventing data leakage from the training window.
+    region begins.  For both slices, any trades that fire during the
+    warmup period are excluded from results via *score_from_ns*,
+    preventing warmup trades from influencing parameter selection or
+    OOS scoring.
 
     Parameters
     ----------
@@ -518,6 +524,7 @@ def run_walk_forward(
         # ── Training slice with warmup padding ──────────────────────
         train_warmup_start = max(0, start - warmup_bars)
         train_slice = bars[train_warmup_start : start + train_size]
+        train_score_from_ns = bars[start].ts_event
 
         # ── Test slice with warmup padding ──────────────────────────
         # Prepend bars from the end of the training window so indicators
@@ -528,7 +535,7 @@ def run_walk_forward(
         test_slice = bars[test_warmup_start : test_start_idx + test_size]
         test_score_from_ns = bars[test_start_idx].ts_event
 
-        train_start_ts = pd.Timestamp(train_slice[0].ts_event, unit="ns", tz="UTC")
+        train_start_ts = pd.Timestamp(train_score_from_ns, unit="ns", tz="UTC")
         train_end_ts = pd.Timestamp(train_slice[-1].ts_event, unit="ns", tz="UTC")
         test_start_ts = pd.Timestamp(test_score_from_ns, unit="ns", tz="UTC")
         test_end_ts = pd.Timestamp(test_slice[-1].ts_event, unit="ns", tz="UTC")
@@ -537,9 +544,9 @@ def run_walk_forward(
             print(
                 f"\n── Fold {fold_num} ──\n"
                 f"  Train: {train_start_ts:%Y-%m-%d} → {train_end_ts:%Y-%m-%d}"
-                f"  ({len(train_slice):,} bars)\n"
+                f"  ({len(train_slice):,} bars, {warmup_bars} warmup)\n"
                 f"  Test:  {test_start_ts:%Y-%m-%d} → {test_end_ts:%Y-%m-%d}"
-                f"  ({len(test_slice):,} bars)"
+                f"  ({len(test_slice):,} bars, {warmup_bars} warmup)"
             )
 
         # ── Sweep on training data (no per-combo output) ────────────
@@ -552,6 +559,7 @@ def run_walk_forward(
                 starting_capital=starting_capital,
                 params=params,
                 add_strategy=lambda eng, p=params: strategy_factory(eng, p),  # type: ignore[misc]
+                score_from_ns=train_score_from_ns,
                 log_level=log_level,
             )
             train_results.append(row)
