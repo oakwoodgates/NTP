@@ -394,6 +394,7 @@ def run_walk_forward(
     train_pct: float = 0.50,
     test_pct: float = 0.125,
     select_by: str = "total_pnl",
+    warmup_bars: int = 200,
     log_level: str = "ERROR",
     verbose: bool = True,
 ) -> pd.DataFrame:
@@ -427,6 +428,11 @@ def run_walk_forward(
     select_by
         Column name to maximize when selecting best in-sample params.
         Default ``"total_pnl"``.
+    warmup_bars
+        Number of extra bars prepended to each training window so that
+        indicators are fully initialized before the scored region begins.
+        Default 200 — covers most MA/oscillator periods.  Override in the
+        notebook when your slowest indicator needs more (or fewer).
     log_level
         NT log level.
     verbose
@@ -481,7 +487,8 @@ def run_walk_forward(
 
     while start + train_size + test_size <= total_bars:
         fold_num += 1
-        train_slice = bars[start : start + train_size]
+        slice_start = max(0, start - warmup_bars)
+        train_slice = bars[slice_start : start + train_size]
         test_slice = bars[start + train_size : start + train_size + test_size]
 
         train_start_ts = pd.Timestamp(train_slice[0].ts_event, unit="ns", tz="UTC")
