@@ -16,13 +16,27 @@ python scripts/fetch_hl_candles.py
 
 # Custom
 python scripts/fetch_hl_candles.py --coins BTC ETH --intervals 1h --days 90
+
+# Backfill — extend history to exchange's earliest available
+python scripts/fetch_hl_candles.py --backfill --coins BTC --intervals 1h 4h 1d
+
+# Update — extend data from last bar to now
+python scripts/fetch_hl_candles.py --update
+
+# Explicit start date
+python scripts/fetch_hl_candles.py --start 2021-01-01 --coins BTC --intervals 1h
 ```
 
 | Arg | Default | Description |
 |-----|---------|-------------|
 | `--coins` | `BTC ETH SOL` | Coin tickers |
 | `--intervals` | `1h 4h 1d` | Candle intervals |
-| `--days` | `180` | Lookback period |
+| `--days` | `180` | Lookback period (default if no mode specified) |
+| `--backfill` | off | Extend data backwards to exchange's earliest available |
+| `--update` | off | Extend data forwards from last bar to now |
+| `--start` | — | Explicit start date (`YYYY-MM-DD`) to now |
+
+`--days`, `--backfill`, `--update`, and `--start` are mutually exclusive. If none specified, defaults to `--days 180`.
 
 **API:** POST `https://api.hyperliquid.xyz/info` — no auth required, max 5000 candles/request.
 
@@ -37,14 +51,28 @@ python scripts/fetch_binance_candles.py --testnet
 
 # Custom
 python scripts/fetch_binance_candles.py --coins BTC --intervals 1h 4h --days 90
+
+# Backfill — extend history to exchange's earliest available (Binance has ~9 years for BTC)
+python scripts/fetch_binance_candles.py --backfill --coins BTC --intervals 1h 4h 1d
+
+# Update — extend data from last bar to now
+python scripts/fetch_binance_candles.py --update
+
+# Explicit start date
+python scripts/fetch_binance_candles.py --start 2019-09-01 --coins BTC --intervals 1h
 ```
 
 | Arg | Default | Description |
 |-----|---------|-------------|
 | `--coins` | `BTC ETH SOL` | Coin tickers |
 | `--intervals` | `1h 4h 1d` | Candle intervals |
-| `--days` | `180` | Lookback period |
+| `--days` | `180` | Lookback period (default if no mode specified) |
+| `--backfill` | off | Extend data backwards to exchange's earliest available |
+| `--update` | off | Extend data forwards from last bar to now |
+| `--start` | — | Explicit start date (`YYYY-MM-DD`) to now |
 | `--testnet` | off | Use Binance testnet API (no geo-restrictions) |
+
+`--days`, `--backfill`, `--update`, and `--start` are mutually exclusive. If none specified, defaults to `--days 180`.
 
 **API:** GET `https://fapi.binance.com/fapi/v1/klines` — no auth required, max 1500 candles/request, weight-based rate limiting (1200/min).
 
@@ -93,7 +121,7 @@ data/catalog/
 │       └── BINANCE/
 ```
 
-**Re-running overwrites.** Each script cleans existing data for the bar type before writing to avoid duplicate bars. Safe to re-run at any time.
+**Merge-on-write.** All modes merge new data with existing catalog data. Fresh exchange data wins on timestamp collisions (deduplication keeps the latest value). The underlying write still cleans + rewrites the full bar type directory, but data is never silently lost. Safe to re-run at any time.
 
 **Instrument IDs:**
 - Hyperliquid: `BTC-USD-PERP.HYPERLIQUID`
@@ -125,6 +153,9 @@ Follow the existing pattern:
 | `validate_dataframe()` | Warns on non-monotonic timestamps, zero-volume bars, gaps > 2x interval |
 | `clean_catalog_data()` | Deletes existing parquet dirs for a bar type before rewrite |
 | `wrangle_and_write()` | BarDataWrangler + ts_init_delta shift + catalog write |
+| `bars_to_dataframe()` | Convert NT Bar objects back to OHLCV DataFrame (for merge workflow) |
+| `get_catalog_range()` | Return `(first_ts_ms, last_ts_ms)` of existing catalog data, or `None` |
+| `merge_and_write()` | Read existing bars, merge with new data, dedup, validate, write |
 
 `CATALOG_PATH` is also defined here (`data/catalog`).
 
@@ -136,5 +167,5 @@ Follow the existing pattern:
 | Binance rate limit (HTTP 429) | Script auto-retries with backoff. If persistent, reduce `--coins` or wait. |
 | `WARNING: timestamps not monotonic` | Exchange returned out-of-order data. Usually harmless — NT sorts internally. |
 | `WARNING: X gaps > 2x interval` | Missing candles. Normal for low-liquidity coins/periods. Check if the gap is a market closure or data issue. |
-| Duplicate bars in backtest | Re-run the fetch script — it cleans existing data before writing. |
-| `ERROR: No defaults for 'X'` | Add the coin to `COIN_DEFAULTS` in the script. See "Adding a New Coin" above. |
+| Duplicate bars in backtest | Re-run the fetch script — it merges and deduplicates automatically. |
+| `--backfill` or `--update` says "no existing data" | Run with `--days` first to seed initial data, then backfill/update. |

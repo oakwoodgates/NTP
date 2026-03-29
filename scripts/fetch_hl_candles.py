@@ -1,9 +1,11 @@
+"""Fetch Hyperliquid OHLCV candles into NautilusTrader's ParquetDataCatalog."""
+
 from __future__ import annotations
 
 import argparse
 import sys
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -13,6 +15,8 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from scripts._catalog import (
     CATALOG_PATH,
     candles_to_dataframe,
+    get_catalog_range,
+    merge_and_write,
     retry_request,
     validate_dataframe,
     wrangle_and_write,
@@ -26,6 +30,9 @@ from src.core.instruments import make_hyperliquid_perp
 
 # Column mapping: HL candleSnapshot keys → standard OHLCV names
 _HL_COL_MAP = {"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"}
+
+# Default number of days when no mode is specified.
+_DEFAULT_DAYS = 180
 
 
 # ── Hyperliquid API ──────────────────────────────────────────────────
@@ -142,23 +149,57 @@ def fetch_candles(
 # ── Main ─────────────────────────────────────────────────────────────
 
 
+def _parse_mode(args: argparse.Namespace) -> str:
+    """Resolve the fetch mode from CLI args. Exits on conflicts."""
+    flags = []
+    if args.backfill:
+        flags.append("backfill")
+    if args.update:
+        flags.append("update")
+    if args.start is not None:
+        flags.append("start")
+    if args.days is not None:
+        flags.append("days")
+
+    if len(flags) > 1:
+        print(
+            f"ERROR: --{' and --'.join(flags)} are mutually exclusive",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if not flags:
+        return "days"  # default
+    return flags[0]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Fetch Hyperliquid OHLCV to ParquetDataCatalog")
     parser.add_argument("--coins", nargs="+", default=["BTC", "ETH", "SOL"])
     parser.add_argument("--intervals", nargs="+", default=["1h", "4h", "1d"])
-    parser.add_argument("--days", type=int, default=180)
+    parser.add_argument("--days", type=int, default=None, help="Fetch last N days (default: 180)")
+    parser.add_argument("--start", type=str, default=None, help="Explicit start date YYYY-MM-DD")
+    parser.add_argument(
+        "--backfill",
+        action="store_true",
+        help="Extend data backwards to exchange's earliest available",
+    )
+    parser.add_argument(
+        "--update",
+        action="store_true",
+        help="Extend data forwards from last bar to now",
+    )
     args = parser.parse_args()
+
+    mode = _parse_mode(args)
+    days = args.days if args.days is not None else _DEFAULT_DAYS
 
     for interval in args.intervals:
         if interval not in INTERVAL_TO_BAR_SPEC:
             print(f"ERROR: Unknown interval '{interval}'", file=sys.stderr)
             sys.exit(1)
 
-    now = datetime.now(UTC)
-    start_dt = now - timedelta(days=args.days)
-    start_ms = int(start_dt.timestamp() * 1000)
-    end_ms = int(now.timestamp() * 1000)
-
+    now_ms = int(datetime.now(UTC).timestamp() * 1000)
     catalog = ParquetDataCatalog(str(CATALOG_PATH))
 
     with httpx.Client(timeout=30.0) as client:
@@ -184,8 +225,52 @@ def main() -> None:
         for coin in args.coins:
             instrument = instruments[coin]
             for interval in args.intervals:
-                print(f"Fetching {coin} {interval} ({args.days} days)...")
-                candles = fetch_candles(client, coin, interval, start_ms, end_ms)
+                step, aggregation = INTERVAL_TO_BAR_SPEC[interval]
+                bar_type_str = f"{instrument.id}-{step}-{aggregation}-LAST-EXTERNAL"
+                bar_type = BarType.from_str(bar_type_str)
+
+                # ── Resolve fetch range based on mode ──
+                catalog_range = get_catalog_range(catalog, bar_type_str)
+
+                if mode == "backfill":
+                    if not catalog_range:
+                        print(
+                            f"  {coin} {interval}: no existing data — use --days first",
+                            file=sys.stderr,
+                        )
+                        continue
+                    fetch_start_ms = 0
+                    fetch_end_ms = catalog_range[0]
+                    label = f"backfill -> {datetime.fromtimestamp(fetch_end_ms / 1000, tz=UTC):%Y-%m-%d}"
+
+                elif mode == "update":
+                    if not catalog_range:
+                        print(
+                            f"  {coin} {interval}: no existing data — use --days first",
+                            file=sys.stderr,
+                        )
+                        continue
+                    fetch_start_ms = catalog_range[1]
+                    fetch_end_ms = now_ms
+                    # Skip if already up to date (within 2x interval duration)
+                    interval_ms = step * {"MINUTE": 60_000, "HOUR": 3_600_000, "DAY": 86_400_000}[aggregation]
+                    if (fetch_end_ms - fetch_start_ms) < interval_ms * 2:
+                        print(f"  {coin} {interval}: already up to date, skipping")
+                        continue
+                    label = f"update {datetime.fromtimestamp(fetch_start_ms / 1000, tz=UTC):%Y-%m-%d} -> now"
+
+                elif mode == "start":
+                    fetch_start_ms = int(datetime.strptime(args.start, "%Y-%m-%d").replace(tzinfo=UTC).timestamp() * 1000)
+                    fetch_end_ms = now_ms
+                    label = f"{args.start} -> now"
+
+                else:  # days
+                    fetch_start_ms = now_ms - days * 86_400_000
+                    fetch_end_ms = now_ms
+                    label = f"last {days} days"
+
+                print(f"Fetching {coin} {interval} ({label})...")
+                candles = fetch_candles(client, coin, interval, fetch_start_ms, fetch_end_ms)
 
                 if not candles:
                     print(f"  No data returned for {coin} {interval}", file=sys.stderr)
@@ -194,12 +279,12 @@ def main() -> None:
                 df = candles_to_dataframe(candles, ts_col="t", col_map=_HL_COL_MAP)
                 validate_dataframe(df, coin, interval)
 
-                step, aggregation = INTERVAL_TO_BAR_SPEC[interval]
-                bar_type_str = f"{instrument.id}-{step}-{aggregation}-LAST-EXTERNAL"
-                bar_type = BarType.from_str(bar_type_str)
-
-                bar_count = wrangle_and_write(df, instrument, interval, bar_type, catalog)
-                print(f"  Written {bar_count} bars, range: {df.index[0]} -> {df.index[-1]}")
+                # Merge with existing data if catalog has bars, otherwise write fresh
+                if catalog_range:
+                    bar_count = merge_and_write(df, instrument, interval, bar_type, bar_type_str, catalog)
+                else:
+                    bar_count = wrangle_and_write(df, instrument, interval, bar_type, catalog)
+                    print(f"  Written {bar_count:,} bars, range: {df.index[0]} -> {df.index[-1]}")
 
                 time.sleep(0.5)
 

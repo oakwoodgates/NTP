@@ -151,8 +151,9 @@ def validate_dataframe(df: pd.DataFrame, symbol: str, interval: str) -> None:
 def clean_catalog_data(bar_type_str: str, catalog_path: Path = CATALOG_PATH) -> None:
     """Delete existing catalog data for this bar type to allow clean rewrite.
 
-    ParquetDataCatalog.write_data() with overlapping time ranges produces
-    duplicate bars. Wipe the relevant parquet directory before writing.
+    ParquetDataCatalog.write_data() raises ValueError on overlapping time
+    ranges.  Wipe the relevant parquet directory before writing to allow a
+    full rewrite of the merged dataset.
     """
     bar_dir = catalog_path / "data" / "bar"
     if not bar_dir.exists():
@@ -190,3 +191,89 @@ def wrangle_and_write(
     catalog.write_data(bars)
 
     return len(bars)
+
+
+# ── Catalog read + merge helpers ───────────────────────────────────
+
+
+def bars_to_dataframe(bars: list[Any]) -> pd.DataFrame:
+    """Convert NT Bar objects back to the OHLCV DataFrame that BarDataWrangler expects.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns ['open', 'high', 'low', 'close', 'volume'] with UTC DatetimeIndex.
+
+    """
+    if not bars:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+    ts_index = pd.to_datetime(
+        [bar.ts_event for bar in bars], unit="ns", utc=True,
+    )
+    df = pd.DataFrame(
+        {
+            "open": [float(bar.open) for bar in bars],
+            "high": [float(bar.high) for bar in bars],
+            "low": [float(bar.low) for bar in bars],
+            "close": [float(bar.close) for bar in bars],
+            "volume": [float(bar.volume) for bar in bars],
+        },
+        index=ts_index,
+    )
+    df.index.name = "timestamp"
+    return df
+
+
+def get_catalog_range(
+    catalog: ParquetDataCatalog,
+    bar_type_str: str,
+) -> tuple[int, int] | None:
+    """Return (first_ts_ms, last_ts_ms) of existing catalog data, or None if empty."""
+    bars = catalog.bars(bar_types=[bar_type_str])
+    if not bars:
+        return None
+    first_ms = bars[0].ts_event // 1_000_000
+    last_ms = bars[-1].ts_event // 1_000_000
+    return first_ms, last_ms
+
+
+def merge_and_write(
+    new_df: pd.DataFrame,
+    instrument: Any,
+    interval: str,
+    bar_type: BarType,
+    bar_type_str: str,
+    catalog: ParquetDataCatalog,
+    catalog_path: Path = CATALOG_PATH,
+) -> int:
+    """Merge new OHLCV data with existing catalog data and write the result.
+
+    1. Read existing bars from catalog.
+    2. Convert to DataFrame via ``bars_to_dataframe()``.
+    3. Concatenate, deduplicate (fresh exchange data wins), sort.
+    4. Validate and write via ``wrangle_and_write()``.
+
+    Returns the bar count of the merged result.
+    """
+    existing_bars = catalog.bars(bar_types=[bar_type_str])
+
+    if not existing_bars:
+        print("  No existing data — writing fresh")
+        return wrangle_and_write(new_df, instrument, interval, bar_type, catalog, catalog_path)
+
+    existing_df = bars_to_dataframe(existing_bars)
+    n_existing = len(existing_df)
+    n_new = len(new_df)
+
+    merged = pd.concat([existing_df, new_df])
+    merged = merged[~merged.index.duplicated(keep="last")]
+    merged = merged.sort_index()
+
+    # Extract symbol from instrument id for validation messages
+    symbol = str(instrument.id).split("-")[0]
+    validate_dataframe(merged, symbol, interval)
+
+    bar_count = wrangle_and_write(merged, instrument, interval, bar_type, catalog, catalog_path)
+    print(f"  Merged {n_existing:,} existing + {n_new:,} new -> {bar_count:,} total bars")
+    return bar_count
