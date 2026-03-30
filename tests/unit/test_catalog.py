@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-from unittest.mock import MagicMock
+from typing import TYPE_CHECKING, Any
+from unittest.mock import MagicMock, patch
 
 import pandas as pd
+import pytest
 
 from scripts._catalog import (
+    _recover_catalog_dir,
+    _safe_catalog_swap,
     bars_to_dataframe,
     candles_to_dataframe,
     validate_dataframe,
 )
 
 if TYPE_CHECKING:
-    import pytest
+    from pathlib import Path
 
 
 # ── Fake bar objects ─────────────────────────────────────────────────
@@ -172,3 +175,131 @@ class TestValidateDataframe:
         validate_dataframe(df, "BTC", "1h")
         captured = capsys.readouterr()
         assert "gaps" in captured.err
+
+
+# ── Crash-safe write helpers ────────────────────────────────────────
+
+_BAR_TYPE = "BTCUSDT-PERP.BINANCE-1-HOUR-LAST-EXTERNAL"
+
+
+def _make_catalog_dirs(catalog_path: Path) -> Path:
+    """Create the data/bar directory structure and return bar_dir."""
+    bar_dir = catalog_path / "data" / "bar"
+    bar_dir.mkdir(parents=True, exist_ok=True)
+    return bar_dir
+
+
+def _populate_dir(d: Path) -> None:
+    """Create a directory with a dummy parquet file inside."""
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "dummy.parquet").write_text("old data")
+
+
+class TestRecoverCatalogDir:
+    def test_cleans_orphaned_staging(self, tmp_path: Path) -> None:
+        bar_dir = _make_catalog_dirs(tmp_path)
+        staging = tmp_path / "_staging"
+        staging.mkdir()
+        (staging / "leftover").write_text("junk")
+
+        # Real data should be untouched
+        _populate_dir(bar_dir / _BAR_TYPE)
+
+        _recover_catalog_dir(_BAR_TYPE, tmp_path)
+
+        assert not staging.exists()
+        assert (bar_dir / _BAR_TYPE).exists()
+
+    def test_cleans_orphaned_backup(self, tmp_path: Path) -> None:
+        bar_dir = _make_catalog_dirs(tmp_path)
+        _populate_dir(bar_dir / _BAR_TYPE)
+        _populate_dir(bar_dir / (_BAR_TYPE + ".backup"))
+
+        _recover_catalog_dir(_BAR_TYPE, tmp_path)
+
+        assert (bar_dir / _BAR_TYPE).exists()
+        assert not (bar_dir / (_BAR_TYPE + ".backup")).exists()
+
+    def test_restores_backup_when_real_missing(self, tmp_path: Path) -> None:
+        bar_dir = _make_catalog_dirs(tmp_path)
+        backup = bar_dir / (_BAR_TYPE + ".backup")
+        _populate_dir(backup)
+
+        _recover_catalog_dir(_BAR_TYPE, tmp_path)
+
+        real_dir = bar_dir / _BAR_TYPE
+        assert real_dir.exists()
+        assert (real_dir / "dummy.parquet").read_text() == "old data"
+        assert not backup.exists()
+
+    def test_noop_when_no_artifacts(self, tmp_path: Path) -> None:
+        bar_dir = _make_catalog_dirs(tmp_path)
+        _populate_dir(bar_dir / _BAR_TYPE)
+
+        _recover_catalog_dir(_BAR_TYPE, tmp_path)
+
+        assert (bar_dir / _BAR_TYPE).exists()
+
+
+def _mock_write_data(staging_root: Path, bar_type_str: str) -> Any:
+    """Return a side_effect callable that creates a fake parquet in the staging catalog."""
+    def side_effect(bars: list[Any]) -> None:  # noqa: ARG001
+        staged = staging_root / "data" / "bar" / bar_type_str
+        staged.mkdir(parents=True, exist_ok=True)
+        (staged / "2024-01-01_2024-02-01.parquet").write_text("new data")
+    return side_effect
+
+
+class TestSafeCatalogSwap:
+    def test_fresh_write(self, tmp_path: Path) -> None:
+        _make_catalog_dirs(tmp_path)
+        staging_root = tmp_path / "_staging"
+
+        with patch("scripts._catalog.ParquetDataCatalog") as mock_cls:
+            mock_cls.return_value.write_data = MagicMock(
+                side_effect=_mock_write_data(staging_root, _BAR_TYPE),
+            )
+            _safe_catalog_swap(["fake_bar"], _BAR_TYPE, tmp_path)
+
+        real_dir = tmp_path / "data" / "bar" / _BAR_TYPE
+        assert real_dir.exists()
+        assert any(real_dir.glob("*.parquet"))
+        # No artifacts left
+        assert not staging_root.exists()
+        assert not (tmp_path / "data" / "bar" / (_BAR_TYPE + ".backup")).exists()
+
+    def test_replaces_existing(self, tmp_path: Path) -> None:
+        bar_dir = _make_catalog_dirs(tmp_path)
+        _populate_dir(bar_dir / _BAR_TYPE)
+        staging_root = tmp_path / "_staging"
+
+        with patch("scripts._catalog.ParquetDataCatalog") as mock_cls:
+            mock_cls.return_value.write_data = MagicMock(
+                side_effect=_mock_write_data(staging_root, _BAR_TYPE),
+            )
+            _safe_catalog_swap(["fake_bar"], _BAR_TYPE, tmp_path)
+
+        real_dir = bar_dir / _BAR_TYPE
+        assert real_dir.exists()
+        # New data replaced old
+        parquet_files = list(real_dir.glob("*.parquet"))
+        assert len(parquet_files) == 1
+        assert parquet_files[0].read_text() == "new data"
+        # No artifacts
+        assert not staging_root.exists()
+        assert not (bar_dir / (_BAR_TYPE + ".backup")).exists()
+
+    def test_aborts_on_failed_staging(self, tmp_path: Path) -> None:
+        bar_dir = _make_catalog_dirs(tmp_path)
+        _populate_dir(bar_dir / _BAR_TYPE)
+
+        with patch("scripts._catalog.ParquetDataCatalog") as mock_cls:
+            # write_data does nothing → no parquet produced
+            mock_cls.return_value.write_data = MagicMock()
+            with pytest.raises(RuntimeError, match="no parquet files"):
+                _safe_catalog_swap(["fake_bar"], _BAR_TYPE, tmp_path)
+
+        # Old data is intact
+        real_dir = bar_dir / _BAR_TYPE
+        assert real_dir.exists()
+        assert (real_dir / "dummy.parquet").read_text() == "old data"
