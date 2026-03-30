@@ -94,9 +94,13 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │   ├── backtest_macd_rsi.ipynb
 │   ├── backtest_sma_cross.ipynb
 │   ├── compare_sweeps.ipynb     # Cross-instrument/timeframe comparison
-│   ├── validate_strategy.ipynb  # Walk-forward, plateau, bootstrap
-│   ├── verify_pipeline.ipynb    # Data pipeline verification
-│   └── charts.py                # Plotting helpers (plotly, matplotlib, TVLC reports)
+│   ├── validate_strategy.ipynb     # Walk-forward, plateau, bootstrap
+│   ├── verify_01_pipeline.ipynb   # Data pipeline verification
+│   ├── verify_02_data.ipynb       # Catalog vs exchange spot-checks
+│   ├── verify_03_signals.ipynb    # Indicator / signal verification
+│   ├── verify_04_persistence.ipynb # DB persistence verification
+│   ├── charts.py                  # Plotting helpers (plotly, matplotlib, TVLC reports)
+│   └── ulits.py                   # Shared notebook helpers (save files)
 ├── scripts/
 │   ├── _catalog.py            # Shared utilities for data fetch scripts
 │   ├── fetch_hl_candles.py    # Hyperliquid OHLCV data fetcher
@@ -109,7 +113,8 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 ├── reports/                 # Generated HTML backtest reports (gitignored)
 ├── tests/
 │   ├── unit/
-│   │   └── test_core.py
+│   │   ├── test_core.py
+│   │   └── ...
 │   └── integration/
 ├── alembic/                 # DB migrations
 ├── frontend/                # React application (Phase 3b)

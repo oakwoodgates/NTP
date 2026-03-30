@@ -183,12 +183,16 @@ src/
 │   └── alert.py          # AlertActor — Telegram notifications
 ├── api/              # FastAPI app, routes, WebSocket handlers (Phase 3b)
 ├── persistence/      # DB schemas (SQLAlchemy Core), no migrations
+│   └── schema.py
 ├── backtesting/      # Backtest orchestration (wraps NT's BacktestEngine/Node)
 │   └── engine.py         # make_engine, run_single_backtest, run_sweep,
 │                         # load_sweeps, run_walk_forward
 ├── config/           # Pydantic Settings model
 │   └── settings.py       # get_settings() — single source of truth
 └── core/             # TIGHT SCOPE: type aliases, constants, interface protocols, pure utils
+│   ├── constants.py
+│   ├── instruments.py
+│   └── utils.py
 alembic/              # Alembic migrations (deployment artifact, not runtime code)
 alembic.ini           # Alembic config
 grafana/
@@ -203,10 +207,14 @@ scripts/
 └── run_live.py           # Live trading runner (HyperliquidExecClient)
 notebooks/            # Jupyter research + charts.py plotting helpers
 ├── backtest_*.ipynb      # Per-strategy backtest + sweep notebooks
-├── compare_sweeps.ipynb  # Cross-instrument, cross-timeframe comparison
-├── validate_strategy.ipynb # Walk-forward, plateau, bootstrap validation
-├── verify_pipeline.ipynb # Data pipeline verification
-└── charts.py             # Plotly, matplotlib, TVLC HTML report generation
+├── compare_sweeps.ipynb       # Cross-instrument, cross-timeframe comparison
+├── validate_strategy.ipynb    # Walk-forward, plateau, bootstrap validation
+├── verify_01_pipeline.ipynb   # Data pipeline verification
+├── verify_02_data.ipynb       # Catalog vs exchange spot-checks
+├── verify_03_signals.ipynb    # Indicator / signal verification
+├── verify_04_persistence.ipynb # DB persistence verification
+├── charts.py                  # Plotly, matplotlib, TVLC HTML report generation
+└── ulits.py                   # Shared notebook helpers (save files)
 data/
 ├── catalog/          # ParquetDataCatalog root (gitignored)
 └── sweeps/           # Sweep result Parquet files (gitignored)
@@ -248,8 +256,28 @@ tests/                # unit/ and integration/
 
 ## Common Tasks
 
+### Data management (fetch, backfill, update)
+Both fetch scripts (`fetch_binance_candles.py`, `fetch_hl_candles.py`) support four mutually exclusive modes:
+- **Default (`--days 180`):** Fetch last N days. Merges with existing data if present.
+- **`--backfill`:** Extend history backwards to exchange's earliest available. Requires existing data — run `--days` first.
+- **`--update`:** Extend data from last bar to now. Skips if already up to date.
+- **`--start YYYY-MM-DD`:** Fetch from explicit date to now.
+
+All modes merge with existing catalog data (dedup on timestamp, fresh exchange data wins). See `docs/DATA_FETCHING.md` for full details.
+
+```bash
+# Seed initial data
+python scripts/fetch_binance_candles.py --coins BTC ETH SOL --intervals 1h 4h 1d
+
+# Backfill to exchange's earliest (Binance has ~9 years for BTC)
+python scripts/fetch_binance_candles.py --backfill --coins BTC --intervals 1h 4h 1d
+
+# Periodic update to now
+python scripts/fetch_binance_candles.py --update
+```
+
 ### Phase 1 workflow (backtesting)
-1. Fetch OHLCV data with `scripts/fetch_hl_candles.py` or `scripts/fetch_binance_candles.py`. Data writes to NT's `ParquetDataCatalog` at `data/catalog/`.
+1. Fetch OHLCV data with `scripts/fetch_hl_candles.py` or `scripts/fetch_binance_candles.py`. Data writes to NT's `ParquetDataCatalog` at `data/catalog/`. Use `--backfill` to extend history, `--update` to bring data to present.
 2. In a Jupyter notebook: configure `BacktestEngine` (venue, instrument, fees, fill model). Use `backtesting/engine.py` helpers (`make_engine()`, `run_single_backtest()`) to avoid boilerplate.
 3. Write or tweak a `Strategy` subclass.
 4. Run the backtest, inspect DataFrames (`generate_orders_report()`, `generate_positions_report()`).
