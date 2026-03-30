@@ -40,13 +40,18 @@ python scripts/fetch_hl_candles.py --start 2021-01-01 --coins BTC --intervals 1h
 
 **API:** POST `https://api.hyperliquid.xyz/info` — no auth required, max 5000 candles/request.
 
-## Binance (USDM Futures)
+## Binance (USDM Futures + Spot)
+
+Supports both USDM Futures (perpetuals) and Spot markets via the `--market` flag. Defaults to `perp`.
 
 ```bash
-# Default: BTC, ETH, SOL — 1h, 4h, 1d — 180 days
+# Default: BTC, ETH, SOL — 1h, 4h, 1d — 180 days (perp)
 python scripts/fetch_binance_candles.py
 
-# Testnet (no geo-block)
+# Spot market
+python scripts/fetch_binance_candles.py --market spot --coins BTC ETH --intervals 1h 4h 1d
+
+# Testnet (perp only — spot has no testnet)
 python scripts/fetch_binance_candles.py --testnet
 
 # Custom
@@ -66,15 +71,20 @@ python scripts/fetch_binance_candles.py --start 2019-09-01 --coins BTC --interva
 |-----|---------|-------------|
 | `--coins` | `BTC ETH SOL` | Coin tickers |
 | `--intervals` | `1h 4h 1d` | Candle intervals |
+| `--market` | `perp` | Market type: `perp` (USDM Futures) or `spot` |
 | `--days` | `180` | Lookback period (default if no mode specified) |
 | `--backfill` | off | Extend data backwards to exchange's earliest available |
 | `--update` | off | Extend data forwards from last bar to now |
 | `--start` | — | Explicit start date (`YYYY-MM-DD`) to now |
-| `--testnet` | off | Use Binance testnet API (no geo-restrictions) |
+| `--testnet` | off | Use Binance testnet API (perp only, no geo-restrictions) |
 
 `--days`, `--backfill`, `--update`, and `--start` are mutually exclusive. If none specified, defaults to `--days 180`.
 
-**API:** GET `https://fapi.binance.com/fapi/v1/klines` — no auth required, max 1500 candles/request, weight-based rate limiting (1200/min).
+`--testnet` + `--market spot` is an error — Binance Spot has no testnet API.
+
+**API (perp):** GET `https://fapi.binance.com/fapi/v1/klines` — no auth required, max 1500 candles/request, weight-based rate limiting (1200/min).
+
+**API (spot):** GET `https://api.binance.com/api/v3/klines` — no auth required, same response format as futures.
 
 ### VPN / Geo-Block
 
@@ -97,7 +107,7 @@ Both scripts fetch instrument metadata at runtime — no hardcoded precision val
 - **Hyperliquid:** `szDecimals` and `maxLeverage` from the meta endpoint. Price precision inferred from recent candle price strings (HL uses a 5-significant-figure rule that's price-magnitude-dependent).
 - **Binance:** `tickSize` and `stepSize` from `exchangeInfo` PRICE_FILTER and LOT_SIZE filters.
 
-Any perpetual available on either exchange can be fetched by passing its ticker via `--coins`.
+Any perpetual (or spot pair for Binance with `--market spot`) available on either exchange can be fetched by passing its ticker via `--coins`.
 
 ## Supported Intervals
 
@@ -115,10 +125,13 @@ data/catalog/
 │   ├── bar/
 │   │   ├── BTC-USD-PERP.HYPERLIQUID-1-HOUR-LAST-EXTERNAL/
 │   │   ├── BTCUSDT-PERP.BINANCE-1-HOUR-LAST-EXTERNAL/
+│   │   ├── BTCUSDT.BINANCE-1-HOUR-LAST-EXTERNAL/        # spot
 │   │   └── ...
-│   └── crypto_perpetual/
-│       ├── HYPERLIQUID/
-│       └── BINANCE/
+│   ├── crypto_perpetual/
+│   │   ├── HYPERLIQUID/
+│   │   └── BINANCE/
+│   └── currency_pair/
+│       └── BINANCE/                                       # spot instruments
 ```
 
 **Merge-on-write.** All modes merge new data with existing catalog data. Fresh exchange data wins on timestamp collisions (deduplication keeps the latest value). Safe to re-run at any time.
@@ -127,7 +140,8 @@ data/catalog/
 
 **Instrument IDs:**
 - Hyperliquid: `BTC-USD-PERP.HYPERLIQUID`
-- Binance: `BTCUSDT-PERP.BINANCE`
+- Binance perp: `BTCUSDT-PERP.BINANCE`
+- Binance spot: `BTCUSDT.BINANCE`
 
 ## Adding a New Coin
 
@@ -138,7 +152,7 @@ data/catalog/
 Follow the existing pattern:
 
 1. **Constants** — add venue URL, candle limit, and fee constants to `src/core/constants.py`.
-2. **Instrument factory** — add a `make_<exchange>_perp()` function to `src/core/instruments.py`. Use NT's built-in venue constant if available (e.g., `BINANCE_VENUE` from `nautilus_trader.adapters.binance.common.constants`).
+2. **Instrument factory** — add a `make_<exchange>_perp()` (and/or `make_<exchange>_spot()`) function to `src/core/instruments.py`. Perps use `CryptoPerpetual`, spot uses `CurrencyPair`. Use NT's built-in venue constant if available (e.g., `BINANCE_VENUE` from `nautilus_trader.adapters.binance.common.constants`).
 3. **Fetch script** — create `scripts/fetch_<exchange>_candles.py`. Import shared utilities from `scripts/_catalog.py`:
    - `retry_request()` — HTTP calls with exponential backoff
    - `candles_to_dataframe()` — convert raw data to OHLCV DataFrame (pass exchange-specific column mapping)

@@ -1,14 +1,16 @@
-"""Instrument factories for exchange perpetuals (Hyperliquid, Binance)."""
+"""Instrument factories for exchange instruments (Hyperliquid, Binance)."""
 
 from decimal import Decimal
 
 from nautilus_trader.adapters.binance.common.constants import BINANCE_VENUE
 from nautilus_trader.model.identifiers import InstrumentId, Symbol
-from nautilus_trader.model.instruments import CryptoPerpetual
+from nautilus_trader.model.instruments import CryptoPerpetual, CurrencyPair
 from nautilus_trader.model.objects import Currency, Price, Quantity
 
 from src.core.constants import (
     BINANCE_MAKER_FEE,
+    BINANCE_SPOT_MAKER_FEE,
+    BINANCE_SPOT_TAKER_FEE,
     BINANCE_TAKER_FEE,
     HYPERLIQUID_VENUE,
     MAKER_FEE,
@@ -134,6 +136,55 @@ def make_binance_perp(
         ts_init=0,
         margin_init=Decimal(1),    # Per NT Binance adapter convention
         margin_maint=Decimal(1),
+        maker_fee=maker_fee,
+        taker_fee=taker_fee,
+    )
+
+
+def make_binance_spot(
+    coin: str,
+    tick_size: str,
+    step_size: str,
+    maker_fee: Decimal = BINANCE_SPOT_MAKER_FEE,
+    taker_fee: Decimal = BINANCE_SPOT_TAKER_FEE,
+) -> CurrencyPair:
+    """Create a CurrencyPair instrument for Binance Spot.
+
+    Parameters
+    ----------
+    coin : str
+        The coin ticker (e.g., "BTC", "ETH", "SOL").
+    tick_size : str
+        Price tick size from PRICE_FILTER (e.g., "0.01" for BTC).
+    step_size : str
+        Order size step from LOT_SIZE (e.g., "0.00001" for BTC).
+    maker_fee : Decimal
+        Maker fee rate. Default: Binance Spot VIP 0 base tier.
+    taker_fee : Decimal
+        Taker fee rate. Default: Binance Spot VIP 0 base tier.
+
+    Returns
+    -------
+    CurrencyPair
+
+    """
+    symbol = f"{coin}USDT"
+    quote = Currency.from_str("USDT")
+
+    price_precision = abs(int(Decimal(tick_size).as_tuple().exponent))
+    size_precision = abs(int(Decimal(step_size).as_tuple().exponent))
+
+    return CurrencyPair(
+        instrument_id=InstrumentId(Symbol(symbol), BINANCE_VENUE),
+        raw_symbol=Symbol(symbol),
+        base_currency=Currency.from_str(coin),
+        quote_currency=quote,
+        price_precision=price_precision,
+        size_precision=size_precision,
+        price_increment=Price.from_str(tick_size),
+        size_increment=Quantity.from_str(step_size),
+        ts_event=0,
+        ts_init=0,
         maker_fee=maker_fee,
         taker_fee=taker_fee,
     )

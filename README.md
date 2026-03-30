@@ -105,7 +105,7 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 ├── scripts/
 │   ├── _catalog.py            # Shared utilities for data fetch scripts (crash-safe writes)
 │   ├── fetch_hl_candles.py    # Hyperliquid OHLCV data fetcher
-│   ├── fetch_binance_candles.py # Binance Futures OHLCV data fetcher
+│   ├── fetch_binance_candles.py # Binance OHLCV data fetcher (Futures + Spot via --market)
 │   ├── run_sandbox.py         # Paper trading runner (SandboxExecutionClient)
 │   └── run_live.py            # Live trading runner (HyperliquidExecClient)
 ├── data/
@@ -167,7 +167,8 @@ pip install -e ".[dev]"
 
 # Fetch historical data for backtesting (run from project root)
 python scripts/fetch_hl_candles.py               # Hyperliquid candles
-python scripts/fetch_binance_candles.py           # Binance candles (may need VPN)
+python scripts/fetch_binance_candles.py           # Binance Futures candles (may need VPN)
+python scripts/fetch_binance_candles.py --market spot  # Binance Spot candles
 
 jupyter notebook notebooks/
 ```

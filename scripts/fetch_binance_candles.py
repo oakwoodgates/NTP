@@ -1,4 +1,7 @@
-"""Fetch Binance USDM Futures OHLCV candles into NautilusTrader's ParquetDataCatalog."""
+"""Fetch Binance OHLCV candles into NautilusTrader's ParquetDataCatalog.
+
+Supports both USDM Futures (perpetuals) and Spot markets via the --market flag.
+"""
 
 from __future__ import annotations
 
@@ -24,10 +27,11 @@ from scripts._catalog import (
 from src.core.constants import (
     BINANCE_CANDLE_LIMIT,
     BINANCE_FUTURES_API_URL,
+    BINANCE_SPOT_API_URL,
     BINANCE_TESTNET_API_URL,
     INTERVAL_TO_BAR_SPEC,
 )
-from src.core.instruments import make_binance_perp
+from src.core.instruments import make_binance_perp, make_binance_spot
 
 # Rate limit threshold — back off when used weight approaches the 1200/min limit.
 _WEIGHT_BACKOFF_THRESHOLD = 1000
@@ -39,8 +43,13 @@ _DEFAULT_DAYS = 180
 # ── Binance API ──────────────────────────────────────────────────────
 
 
-def get_base_url(testnet: bool) -> str:
-    """Return the appropriate Binance Futures API base URL."""
+def get_base_url(testnet: bool, market: str) -> str:
+    """Return the appropriate Binance API base URL for the given market type."""
+    if market == "spot":
+        if testnet:
+            print("ERROR: Binance Spot has no testnet API. Remove --testnet.", file=sys.stderr)
+            sys.exit(1)
+        return BINANCE_SPOT_API_URL
     return BINANCE_TESTNET_API_URL if testnet else BINANCE_FUTURES_API_URL
 
 
@@ -48,24 +57,38 @@ def fetch_instrument_metadata(
     client: httpx.Client,
     base_url: str,
     coins: list[str],
+    market: str,
 ) -> dict[str, dict[str, str]]:
     """Fetch tick_size and step_size for each coin from Binance exchangeInfo.
 
     Returns a dict mapping coin → {"tick_size": str, "step_size": str}.
     Errors if a requested coin is not found.
     """
-    resp = retry_request(client, "GET", f"{base_url}/fapi/v1/exchangeInfo")
+    if market == "spot":
+        endpoint = f"{base_url}/api/v3/exchangeInfo"
+    else:
+        endpoint = f"{base_url}/fapi/v1/exchangeInfo"
+    resp = retry_request(client, "GET", endpoint)
     data: dict[str, Any] = resp.json()
 
     symbols_by_base: dict[str, dict[str, Any]] = {}
     for s in data.get("symbols", []):
-        if s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT":
-            symbols_by_base[s["baseAsset"]] = s
+        if market == "spot":
+            if (
+                s.get("status") == "TRADING"
+                and s.get("quoteAsset") == "USDT"
+                and s.get("isSpotTradingAllowed") is True
+            ):
+                symbols_by_base[s["baseAsset"]] = s
+        else:
+            if s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT":
+                symbols_by_base[s["baseAsset"]] = s
 
     result: dict[str, dict[str, str]] = {}
     for coin in coins:
         if coin not in symbols_by_base:
-            print(f"ERROR: {coin}USDT perpetual not found on Binance", file=sys.stderr)
+            kind = "spot pair" if market == "spot" else "perpetual"
+            print(f"ERROR: {coin}USDT {kind} not found on Binance", file=sys.stderr)
             sys.exit(1)
 
         info = symbols_by_base[coin]
@@ -98,12 +121,18 @@ def fetch_candles(
     interval: str,
     start_ms: int,
     end_ms: int,
+    market: str,
 ) -> list[dict[str, Any]]:
     """Fetch all candles for a symbol/interval range, paginating as needed.
 
     Binance klines returns arrays: [open_time, open, high, low, close, volume, close_time, ...].
     We convert each to a dict for consistency with the shared candles_to_dataframe().
     """
+    if market == "spot":
+        klines_endpoint = f"{base_url}/api/v3/klines"
+    else:
+        klines_endpoint = f"{base_url}/fapi/v1/klines"
+
     all_candles: list[dict[str, Any]] = []
     cursor_ms = start_ms
 
@@ -115,7 +144,7 @@ def fetch_candles(
             "endTime": end_ms,
             "limit": BINANCE_CANDLE_LIMIT,
         }
-        resp = retry_request(client, "GET", f"{base_url}/fapi/v1/klines", params=params)
+        resp = retry_request(client, "GET", klines_endpoint, params=params)
 
         # Check rate limit weight
         used_weight = int(resp.headers.get("X-MBX-USED-WEIGHT-1m", "0"))
@@ -188,7 +217,7 @@ def _parse_mode(args: argparse.Namespace) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Fetch Binance USDM Futures OHLCV to ParquetDataCatalog"
+        description="Fetch Binance OHLCV (Futures or Spot) to ParquetDataCatalog"
     )
     parser.add_argument("--coins", nargs="+", default=["BTC", "ETH", "SOL"])
     parser.add_argument("--intervals", nargs="+", default=["1h", "4h", "1d"])
@@ -205,9 +234,15 @@ def main() -> None:
         help="Extend data forwards from last bar to now",
     )
     parser.add_argument(
+        "--market",
+        choices=["perp", "spot"],
+        default="perp",
+        help="Market type: perp (USDM Futures, default) or spot",
+    )
+    parser.add_argument(
         "--testnet",
         action="store_true",
-        help="Use Binance testnet API (no geo-block)",
+        help="Use Binance testnet API (no geo-block, perp only)",
     )
     args = parser.parse_args()
 
@@ -219,9 +254,12 @@ def main() -> None:
             print(f"ERROR: Unknown interval '{interval}'", file=sys.stderr)
             sys.exit(1)
 
-    base_url = get_base_url(args.testnet)
+    market: str = args.market
+    base_url = get_base_url(args.testnet, market)
     if args.testnet:
         print(f"Using Binance TESTNET: {base_url}")
+    if market == "spot":
+        print("Market: Binance Spot")
 
     now_ms = int(datetime.now(UTC).timestamp() * 1000)
     catalog = ParquetDataCatalog(str(CATALOG_PATH))
@@ -232,7 +270,7 @@ def main() -> None:
         # Fetch instrument metadata from exchange
         print("Fetching instrument metadata from Binance exchangeInfo...")
         try:
-            metadata = fetch_instrument_metadata(client, base_url, args.coins)
+            metadata = fetch_instrument_metadata(client, base_url, args.coins, market)
         except (httpx.ConnectError, httpx.TimeoutException):
             print(
                 "ERROR: Cannot reach Binance API.\n"
@@ -247,7 +285,10 @@ def main() -> None:
         instruments = {}
         for coin in args.coins:
             meta = metadata[coin]
-            inst = make_binance_perp(coin, meta["tick_size"], meta["step_size"])
+            if market == "spot":
+                inst = make_binance_spot(coin, meta["tick_size"], meta["step_size"])
+            else:
+                inst = make_binance_perp(coin, meta["tick_size"], meta["step_size"])
             instruments[coin] = inst
             catalog.write_data([inst])
             print(f"Wrote instrument: {inst.id}")
@@ -301,7 +342,7 @@ def main() -> None:
                     label = f"last {days} days"
 
                 print(f"Fetching {symbol} {interval} ({label})...")
-                candles = fetch_candles(client, base_url, symbol, interval, fetch_start_ms, fetch_end_ms)
+                candles = fetch_candles(client, base_url, symbol, interval, fetch_start_ms, fetch_end_ms, market)
 
                 if not candles:
                     print(f"  No data returned for {symbol} {interval}", file=sys.stderr)

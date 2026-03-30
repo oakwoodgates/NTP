@@ -15,6 +15,9 @@ from src.core.constants import (
     BINANCE_CANDLE_LIMIT,
     BINANCE_FUTURES_API_URL,
     BINANCE_MAKER_FEE,
+    BINANCE_SPOT_API_URL,
+    BINANCE_SPOT_MAKER_FEE,
+    BINANCE_SPOT_TAKER_FEE,
     BINANCE_TAKER_FEE,
     BINANCE_TESTNET_API_URL,
     HL_CANDLE_LIMIT,
@@ -26,13 +29,21 @@ from src.core.constants import (
     TAKER_FEE,
     TS_INIT_DELTAS,
 )
-from src.core.instruments import make_binance_perp, make_hyperliquid_perp, with_leverage
+from src.core.instruments import (
+    make_binance_perp,
+    make_binance_spot,
+    make_hyperliquid_perp,
+    with_leverage,
+)
 from src.core.utils import bar_type_str
 
 __all__ = [
     "BINANCE_CANDLE_LIMIT",
     "BINANCE_FUTURES_API_URL",
     "BINANCE_MAKER_FEE",
+    "BINANCE_SPOT_API_URL",
+    "BINANCE_SPOT_MAKER_FEE",
+    "BINANCE_SPOT_TAKER_FEE",
     "BINANCE_TAKER_FEE",
     "BINANCE_TESTNET_API_URL",
     "HL_CANDLE_LIMIT",
@@ -45,6 +56,7 @@ __all__ = [
     "TS_INIT_DELTAS",
     "bar_type_str",
     "make_binance_perp",
+    "make_binance_spot",
     "make_hyperliquid_perp",
     "with_leverage",
 ]

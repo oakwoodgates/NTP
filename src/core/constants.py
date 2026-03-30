@@ -27,12 +27,17 @@ HL_CANDLE_LIMIT = 5000
 
 BINANCE_FUTURES_API_URL = "https://fapi.binance.com"
 BINANCE_TESTNET_API_URL = "https://testnet.binancefuture.com"
+BINANCE_SPOT_API_URL = "https://api.binance.com"
 
 # Fees — Binance Futures base tier (VIP 0).
 BINANCE_MAKER_FEE = Decimal("0.000200")  # 0.02%
 BINANCE_TAKER_FEE = Decimal("0.000500")  # 0.05%
 
-# Binance klines API max candles per request
+# Fees — Binance Spot base tier (VIP 0).
+BINANCE_SPOT_MAKER_FEE = Decimal("0.001000")  # 0.10%
+BINANCE_SPOT_TAKER_FEE = Decimal("0.001000")  # 0.10%
+
+# Binance klines API max candles per request (same for futures and spot)
 BINANCE_CANDLE_LIMIT = 1500
 
 # Map HL interval strings to NT BarSpec components: (step, aggregation_string)
