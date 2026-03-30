@@ -209,6 +209,7 @@ notebooks/            # Jupyter research + charts.py plotting helpers
 ├── backtest_*.ipynb      # Per-strategy backtest + sweep notebooks
 ├── compare_sweeps.ipynb       # Cross-instrument, cross-timeframe comparison
 ├── validate_strategy.ipynb    # Walk-forward, plateau, bootstrap validation
+├── review_live_run.ipynb      # Post-run analysis of live/paper trades
 ├── verify_01_pipeline.ipynb   # Data pipeline verification
 ├── verify_02_data.ipynb       # Catalog vs exchange spot-checks
 ├── verify_03_signals.ipynb    # Indicator / signal verification

@@ -93,8 +93,9 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │   ├── backtest_ema_cross_atr.ipynb
 │   ├── backtest_macd_rsi.ipynb
 │   ├── backtest_sma_cross.ipynb
-│   ├── compare_sweeps.ipynb     # Cross-instrument/timeframe comparison
-│   ├── validate_strategy.ipynb     # Walk-forward, plateau, bootstrap
+│   ├── compare_sweeps.ipynb       # Cross-instrument/timeframe comparison
+│   ├── validate_strategy.ipynb    # Walk-forward, plateau, bootstrap
+│   ├── review_live_run.ipynb      # Post-run analysis of live/paper trades
 │   ├── verify_01_pipeline.ipynb   # Data pipeline verification
 │   ├── verify_02_data.ipynb       # Catalog vs exchange spot-checks
 │   ├── verify_03_signals.ipynb    # Indicator / signal verification
@@ -102,7 +103,7 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │   ├── charts.py                  # Plotting helpers (plotly, matplotlib, TVLC reports)
 │   └── ulits.py                   # Shared notebook helpers (save files)
 ├── scripts/
-│   ├── _catalog.py            # Shared utilities for data fetch scripts
+│   ├── _catalog.py            # Shared utilities for data fetch scripts (crash-safe writes)
 │   ├── fetch_hl_candles.py    # Hyperliquid OHLCV data fetcher
 │   ├── fetch_binance_candles.py # Binance Futures OHLCV data fetcher
 │   ├── run_sandbox.py         # Paper trading runner (SandboxExecutionClient)
@@ -114,7 +115,10 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 ├── tests/
 │   ├── unit/
 │   │   ├── test_core.py
-│   │   └── ...
+│   │   ├── test_catalog.py    # Crash-safe write recovery + swap tests
+│   │   ├── test_schema.py
+│   │   ├── test_settings.py
+│   │   └── test_actors.py
 │   └── integration/
 ├── alembic/                 # DB migrations
 ├── frontend/                # React application (Phase 3b)

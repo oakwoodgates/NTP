@@ -121,7 +121,9 @@ data/catalog/
 │       └── BINANCE/
 ```
 
-**Merge-on-write.** All modes merge new data with existing catalog data. Fresh exchange data wins on timestamp collisions (deduplication keeps the latest value). The underlying write still cleans + rewrites the full bar type directory, but data is never silently lost. Safe to re-run at any time.
+**Merge-on-write.** All modes merge new data with existing catalog data. Fresh exchange data wins on timestamp collisions (deduplication keeps the latest value). Safe to re-run at any time.
+
+**Crash-safe writes.** The catalog write pipeline uses a staging-swap pattern: new data is written to a temporary `_staging/` catalog first, then the existing bar directory is renamed to `.backup`, and the staged data is moved into place via `os.rename`. If the process crashes at any point, existing data is either intact or automatically recovered on the next run.
 
 **Instrument IDs:**
 - Hyperliquid: `BTC-USD-PERP.HYPERLIQUID`
@@ -151,11 +153,12 @@ Follow the existing pattern:
 | `retry_request()` | HTTP request with exponential backoff (retries on 429, 5xx, timeouts) |
 | `candles_to_dataframe()` | Generic OHLCV DataFrame builder — takes column mapping dict |
 | `validate_dataframe()` | Warns on non-monotonic timestamps, zero-volume bars, gaps > 2x interval |
-| `clean_catalog_data()` | Deletes existing parquet dirs for a bar type before rewrite |
-| `wrangle_and_write()` | BarDataWrangler + ts_init_delta shift + catalog write |
+| `wrangle_and_write()` | BarDataWrangler + ts_init_delta shift + crash-safe catalog write |
 | `bars_to_dataframe()` | Convert NT Bar objects back to OHLCV DataFrame (for merge workflow) |
 | `get_catalog_range()` | Return `(first_ts_ms, last_ts_ms)` of existing catalog data, or `None` |
 | `merge_and_write()` | Read existing bars, merge with new data, dedup, validate, write |
+| `_recover_catalog_dir()` | Clean up `.backup`/`_staging` artifacts from a previous interrupted write |
+| `_safe_catalog_swap()` | Write bars to staging catalog, verify, swap into real location via `os.rename` |
 
 `CATALOG_PATH` is also defined here (`data/catalog`).
 
