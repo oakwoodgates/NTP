@@ -14,8 +14,8 @@ HYPERLIQUID_API_URL = "https://api.hyperliquid.xyz/info"
 # Fees are tiered by 30d volume and HLP staking. Base tier used here.
 # NautilusTrader 1.224.0 removed builder fee charges from the Hyperliquid
 # adapter; these maker/taker fees now match live execution more closely.
-MAKER_FEE = Decimal("0.00010")
-TAKER_FEE = Decimal("0.00035")
+MAKER_FEE = Decimal("0.00010") # 0.01%
+TAKER_FEE = Decimal("0.00035") # 0.035%
 
 # Settlement currency for all HL perps
 SETTLEMENT_CURRENCY = USDC
