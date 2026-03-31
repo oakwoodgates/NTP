@@ -190,15 +190,37 @@ def make_binance_spot(
     )
 
 
-def with_leverage(instrument: CryptoPerpetual, max_leverage: int) -> CryptoPerpetual:
-    """Clone a CryptoPerpetual with margin values derived from leverage.
+def with_venue_config(
+    instrument: CryptoPerpetual,
+    max_leverage: int,
+    maker_fee: Decimal | None = None,
+    taker_fee: Decimal | None = None,
+) -> CryptoPerpetual:
+    """Clone a CryptoPerpetual with venue-specific backtesting overrides.
 
-    Catalog instruments store raw margins (e.g., Binance uses 1.0/1.0 matching
-    the live adapter). For backtesting, NT's risk engine enforces these values,
-    so realistic margins are needed. This function clones the instrument with
-    margin_init = 1/max_leverage and margin_maint = margin_init/2.
+    Catalog instruments store raw margins and default exchange fees. For
+    backtesting, NT's risk engine enforces margin values, and fees affect PnL
+    calculations. This function clones the instrument with:
+    - margin_init = 1/max_leverage, margin_maint = margin_init/2
+    - Optional maker/taker fee overrides (when None, preserves catalog fees)
 
     Works for any exchange — no factory-specific logic.
+
+    Parameters
+    ----------
+    instrument : CryptoPerpetual
+        The source instrument (typically from ParquetDataCatalog).
+    max_leverage : int
+        Desired leverage. Margin is derived as 1/max_leverage.
+    maker_fee : Decimal | None
+        Override maker fee. None preserves the instrument's existing fee.
+    taker_fee : Decimal | None
+        Override taker fee. None preserves the instrument's existing fee.
+
+    Returns
+    -------
+    CryptoPerpetual
+
     """
     margin_init = Decimal(1) / Decimal(max_leverage)
     margin_maint = margin_init / 2
@@ -218,8 +240,8 @@ def with_leverage(instrument: CryptoPerpetual, max_leverage: int) -> CryptoPerpe
         ts_init=instrument.ts_init,
         margin_init=margin_init,
         margin_maint=margin_maint,
-        maker_fee=instrument.maker_fee,
-        taker_fee=instrument.taker_fee,
+        maker_fee=maker_fee if maker_fee is not None else instrument.maker_fee,
+        taker_fee=taker_fee if taker_fee is not None else instrument.taker_fee,
     )
 
 

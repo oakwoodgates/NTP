@@ -33,7 +33,7 @@ from src.core.instruments import (
     make_binance_perp,
     make_binance_spot,
     make_hyperliquid_perp,
-    with_leverage,
+    with_venue_config,
 )
 from src.core.utils import bar_type_str
 
@@ -58,5 +58,5 @@ __all__ = [
     "make_binance_perp",
     "make_binance_spot",
     "make_hyperliquid_perp",
-    "with_leverage",
+    "with_venue_config",
 ]
