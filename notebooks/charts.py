@@ -1010,6 +1010,208 @@ def _compute_stats(position_rows: list[dict], starting_capital: float) -> dict:
     }
 
 
+# ── Analysis tool charts ──────────────────────────────────────────────────────
+
+
+def plot_rolling_pnl(
+    rolling_df: pd.DataFrame,
+    *,
+    title: str = "Rolling Performance",
+    currency: str = "USDC",
+) -> None:
+    """Bar chart of per-window PnL from rolling_performance().
+
+    Calls ``plt.show()`` directly — designed for inline notebook use.
+
+    Parameters
+    ----------
+    rolling_df
+        DataFrame from ``rolling_performance()`` with columns
+        ``window_start``, ``pnl``, ``num_positions``.
+    title
+        Chart title.
+    currency
+        Currency label for the y-axis.
+
+    """
+    if rolling_df.empty:
+        print("No rolling data to plot.")
+        return
+
+    import matplotlib.dates as mdates
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+    fig.patch.set_facecolor(_BG)
+    ax.set_facecolor(_BG)
+
+    dates = rolling_df["window_start"]
+    pnls = rolling_df["pnl"]
+    colors = [_GREEN if p > 0 else _RED for p in pnls]
+
+    ax.bar(dates, pnls, width=20, color=colors, edgecolor="none", alpha=0.85)
+    ax.axhline(0, color="white", linewidth=0.5, alpha=0.3)
+
+    # Position count annotations above each bar
+    for dt, pnl_val, n in zip(dates, pnls, rolling_df["num_positions"]):
+        if n > 0:
+            offset = max(abs(pnls.max()), abs(pnls.min())) * 0.03
+            y = pnl_val + offset if pnl_val >= 0 else pnl_val - offset
+            ax.text(
+                dt, y, str(int(n)),
+                ha="center", va="bottom" if pnl_val >= 0 else "top",
+                fontsize=7, color=_TEXT, alpha=0.6,
+            )
+
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b\n%Y"))
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.set_ylabel(f"PnL ({currency})", color=_TEXT)
+    ax.set_title(title, color=_TEXT, fontsize=13)
+    ax.tick_params(colors=_TEXT)
+    for spine in ax.spines.values():
+        spine.set_color(_BORDER)
+    ax.grid(axis="y", color=_GRID, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_fee_sensitivity(
+    fee_df: pd.DataFrame,
+    *,
+    title: str = "Fee Sensitivity",
+    currency: str = "USDC",
+) -> None:
+    """Line + scatter chart of PnL vs fee level from run_fee_sweep().
+
+    Calls ``plt.show()`` directly — designed for inline notebook use.
+
+    Parameters
+    ----------
+    fee_df
+        DataFrame from ``run_fee_sweep()`` with columns
+        ``fee_bps``, ``total_pnl``, ``breakeven``.
+    title
+        Chart title.
+    currency
+        Currency label for the y-axis.
+
+    """
+    if fee_df.empty:
+        print("No fee sweep data to plot.")
+        return
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    fig.patch.set_facecolor(_BG)
+    ax.set_facecolor(_BG)
+
+    bps = fee_df["fee_bps"]
+    pnl = fee_df["total_pnl"]
+    be = fee_df["breakeven"]
+
+    # Line
+    ax.plot(bps, pnl, color=_BLUE, linewidth=2, alpha=0.8, zorder=2)
+
+    # Scatter — green if breakeven, red if not
+    colors = [_GREEN if b else _RED for b in be]
+    ax.scatter(bps, pnl, c=colors, s=60, zorder=3, edgecolors="white", linewidths=0.5)
+
+    # Zero line
+    ax.axhline(0, color="white", linewidth=0.5, alpha=0.3)
+
+    # Exchange reference lines
+    ax.axvline(3.5, color=_AMBER, linewidth=1, linestyle="--", alpha=0.5)
+    ax.text(3.5, pnl.max() * 0.95, " HL taker", color=_AMBER, fontsize=8, va="top")
+    ax.axvline(5.0, color=_TEXT, linewidth=1, linestyle="--", alpha=0.4)
+    ax.text(5.0, pnl.max() * 0.95, " Binance taker", color=_TEXT, fontsize=8, va="top", alpha=0.7)
+
+    ax.set_xlabel("Fee (basis points)", color=_TEXT)
+    ax.set_ylabel(f"Total PnL ({currency})", color=_TEXT)
+    ax.set_title(title, color=_TEXT, fontsize=13)
+    ax.tick_params(colors=_TEXT)
+    for spine in ax.spines.values():
+        spine.set_color(_BORDER)
+    ax.grid(axis="y", color=_GRID, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_regime_overlay(
+    regime_df: pd.DataFrame,
+    *,
+    title: str = "Market Regimes",
+) -> None:
+    """Price chart with colored background spans for each market regime.
+
+    Calls ``plt.show()`` directly — designed for inline notebook use.
+
+    Parameters
+    ----------
+    regime_df
+        DataFrame from ``tag_regimes()`` with a DatetimeIndex and
+        columns ``close``, ``regime``.
+    title
+        Chart title.
+
+    """
+    if regime_df.empty:
+        print("No regime data to plot.")
+        return
+
+    # Regime → (color, alpha)
+    _REGIME_COLORS: dict[str, tuple[str, float]] = {
+        "TRENDING":      (_GREEN, 0.15),
+        "RANGING":       (_RED,   0.15),
+        "TRANSITIONAL":  ("#888888", 0.08),
+        "HIGH_VOL":      (_AMBER, 0.15),
+        "LOW_VOL":       (_BLUE,  0.12),
+    }
+
+    fig, ax = plt.subplots(figsize=(16, 6))
+    fig.patch.set_facecolor(_BG)
+    ax.set_facecolor(_BG)
+
+    # Price line
+    ax.plot(regime_df.index, regime_df["close"], color=_TEXT, linewidth=0.8, alpha=0.9)
+
+    # Group consecutive bars with the same regime into spans
+    regimes = regime_df["regime"]
+    prev_regime = None
+    span_start = None
+    legend_drawn: set[str] = set()
+
+    for ts, regime_val in regimes.items():
+        if regime_val != prev_regime:
+            # Close previous span
+            if prev_regime is not None and prev_regime in _REGIME_COLORS and span_start is not None:
+                color, alpha = _REGIME_COLORS[prev_regime]
+                label = prev_regime if prev_regime not in legend_drawn else None
+                ax.axvspan(span_start, ts, color=color, alpha=alpha, label=label, linewidth=0)
+                if label:
+                    legend_drawn.add(prev_regime)
+            span_start = ts
+            prev_regime = regime_val
+
+    # Close final span
+    if prev_regime is not None and prev_regime in _REGIME_COLORS and span_start is not None:
+        color, alpha = _REGIME_COLORS[prev_regime]
+        label = prev_regime if prev_regime not in legend_drawn else None
+        ax.axvspan(span_start, regime_df.index[-1], color=color, alpha=alpha, label=label, linewidth=0)
+
+    ax.set_ylabel("Close", color=_TEXT)
+    ax.set_title(title, color=_TEXT, fontsize=13)
+    ax.tick_params(colors=_TEXT)
+    for spine in ax.spines.values():
+        spine.set_color(_BORDER)
+    ax.legend(
+        facecolor="#1e222d", edgecolor=_BORDER, labelcolor=_TEXT,
+        loc="upper left", fontsize=9,
+    )
+
+    plt.tight_layout()
+    plt.show()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public: self-contained TVLC HTML
 # ─────────────────────────────────────────────────────────────────────────────
