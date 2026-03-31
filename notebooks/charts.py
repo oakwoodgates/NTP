@@ -36,6 +36,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from nautilus_trader.model.currencies import USDC
 from nautilus_trader.indicators import (
+    BollingerBands,
     ExponentialMovingAverage,
     MovingAverageConvergenceDivergence,
     RelativeStrengthIndex,
@@ -562,6 +563,177 @@ def _apply_macd_rsi_layout(
 
     # Bottom x-axis date formatting
     fig.update_xaxes(tickformat="%b %d\n%Y", row=3, col=1)
+
+
+# ── BB Mean Reversion chart ─────────────────────────────────────────────────
+
+_BB_FILL = "rgba(33, 150, 243, 0.08)"  # very light blue fill between bands
+_BB_LINE = "rgba(33, 150, 243, 0.5)"   # semi-transparent blue band lines
+
+
+def plot_bb_meanrev(
+    bars: list[Bar],
+    fills_report: pd.DataFrame,
+    bb_period: int,
+    bb_std: float,
+    rsi_period: int,
+    rsi_buy_threshold: float = 0.30,
+    rsi_sell_threshold: float = 0.70,
+    *,
+    instrument_label: str = "BTC-USD-PERP",
+    bar_label: str = "1h",
+    height: int = 800,
+) -> go.Figure:
+    """2-panel chart: candlesticks + BB bands + trades, RSI with thresholds.
+
+    Parameters
+    ----------
+    bars:
+        Ordered list of NT Bar objects.
+    fills_report:
+        DataFrame from ``engine.trader.generate_order_fills_report()``.
+    bb_period / bb_std:
+        Bollinger Bands period and standard deviation multiplier.
+    rsi_period:
+        RSI period.
+    rsi_buy_threshold / rsi_sell_threshold:
+        RSI threshold levels (0.0-1.0 scale) drawn as horizontal lines.
+    instrument_label / bar_label:
+        Display strings for the chart title.
+    height:
+        Figure height in pixels.
+
+    Returns
+    -------
+    go.Figure
+    """
+    df = _bars_to_bb_rsi_df(bars, bb_period, bb_std, rsi_period)
+    buys, sells = _parse_fills(fills_report)
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.03,
+        row_heights=[0.7, 0.3],
+        subplot_titles=("Price", "RSI"),
+    )
+
+    # Row 1: Candlesticks + BB bands + trade markers
+    _add_candlesticks(fig, df, row=1)
+    _add_bb_bands(fig, df, bb_period, bb_std, row=1)
+    _add_trade_markers(fig, buys, sells, df, row=1)
+
+    # Row 2: RSI panel (reuse existing helper)
+    _add_rsi_panel(fig, df, rsi_period, rsi_sell_threshold, rsi_buy_threshold, row=2)
+
+    _apply_bb_meanrev_layout(
+        fig, bb_period, bb_std, rsi_period,
+        instrument_label, bar_label, height,
+    )
+
+    return fig
+
+
+def _bars_to_bb_rsi_df(
+    bars: list[Bar],
+    bb_period: int,
+    bb_std: float,
+    rsi_period: int,
+) -> pd.DataFrame:
+    """Convert NT Bars to OHLCV DataFrame with BB bands and RSI."""
+    bb = BollingerBands(bb_period, bb_std)
+    rsi = RelativeStrengthIndex(rsi_period)
+
+    rows = []
+    for bar in bars:
+        bb.handle_bar(bar)
+        rsi.handle_bar(bar)
+        rows.append({
+            "ts":        pd.Timestamp(bar.ts_event, unit="ns", tz="UTC"),
+            "open":      float(bar.open),
+            "high":      float(bar.high),
+            "low":       float(bar.low),
+            "close":     float(bar.close),
+            "vol":       float(bar.volume),
+            "bb_upper":  bb.upper if bb.initialized else np.nan,
+            "bb_middle": bb.middle if bb.initialized else np.nan,
+            "bb_lower":  bb.lower if bb.initialized else np.nan,
+            "rsi":       rsi.value if rsi.initialized else np.nan,
+        })
+
+    return pd.DataFrame(rows).set_index("ts")
+
+
+def _add_bb_bands(
+    fig: go.Figure,
+    df: pd.DataFrame,
+    bb_period: int,
+    bb_std: float,
+    row: int,
+) -> None:
+    """Add Bollinger Bands overlay with semi-transparent fill between bands."""
+    # Lower band first (fill='tonexty' on upper band fills between them)
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df["bb_lower"],
+        name=f"BB Lower",
+        mode="lines",
+        line=dict(color=_BB_LINE, width=1),
+        showlegend=False,
+    ), row=row, col=1)
+
+    # Upper band with fill down to lower band
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df["bb_upper"],
+        name=f"BB({bb_period}, {bb_std})",
+        mode="lines",
+        line=dict(color=_BB_LINE, width=1),
+        fill="tonexty",
+        fillcolor=_BB_FILL,
+    ), row=row, col=1)
+
+    # Middle band (SMA baseline)
+    fig.add_trace(go.Scatter(
+        x=df.index,
+        y=df["bb_middle"],
+        name=f"SMA({bb_period})",
+        mode="lines",
+        line=dict(color=_AMBER, width=1, dash="dash"),
+    ), row=row, col=1)
+
+
+def _apply_bb_meanrev_layout(
+    fig: go.Figure,
+    bb_period: int,
+    bb_std: float,
+    rsi_period: int,
+    instrument_label: str,
+    bar_label: str,
+    height: int,
+) -> None:
+    title = (
+        f"{instrument_label} · {bar_label} · "
+        f"BB({bb_period}, {bb_std}) + RSI({rsi_period})"
+    )
+    _apply_base_layout(fig, title, height, rangeslider=False)
+
+    # Disable rangeslider on all subplot x-axes
+    fig.update_xaxes(rangeslider_visible=False)
+
+    # Style all subplot axes
+    for i in range(1, 3):
+        fig.update_xaxes(gridcolor=_GRID, linecolor=_BORDER, row=i, col=1)
+        fig.update_yaxes(gridcolor=_GRID, linecolor=_BORDER, side="right", row=i, col=1)
+
+    # Price axis formatting
+    fig.update_yaxes(tickprefix="$", tickformat=",.0f", row=1, col=1)
+
+    # RSI axis range
+    fig.update_yaxes(range=[0, 1], row=2, col=1)
+
+    # Bottom x-axis date formatting
+    fig.update_xaxes(tickformat="%b %d\n%Y", row=2, col=1)
 
 
 # ── Matplotlib display helpers ───────────────────────────────────────────────
