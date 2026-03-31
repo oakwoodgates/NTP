@@ -84,7 +84,7 @@ module = ["nautilus_trader", "nautilus_trader.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
-module = ["pandas", "pandas.*", "plotly", "plotly.*", "asyncpg"]
+module = ["pandas", "pandas.*", "plotly", "plotly.*", "asyncpg", "pandas_ta", "pandas_ta.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
