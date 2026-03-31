@@ -117,6 +117,7 @@ React Frontend ←WebSocket/REST→ FastAPI Gateway        ← Phase 3b (future)
 - **Sweep orchestration:** `run_sweep()` runs a parameter grid across any strategy, persists full analyzer stats to Parquet. `load_sweeps()` reads them back for comparison.
 - **Walk-forward analysis:** `run_walk_forward()` trains on sliding windows, tests best params out-of-sample. Catches overfitting before paper trading.
 - **Validation notebook:** plateau detection (are best params robust or fragile?), bootstrap confidence intervals (how much depends on a few lucky trades?), go/no-go assessment.
+- **Post-backtest analysis:** `rolling_performance()` checks PnL consistency across time windows, `tag_regimes()` + `performance_by_regime()` quantifies strategy behavior in trending vs ranging markets, `run_fee_sweep()` measures fee resilience and breakeven points.
 - **Comparison notebook:** cross-instrument, cross-timeframe sweep comparison. Parameter stability analysis across sweeps.
 - **Interactive HTML reports:** TradingView Lightweight Charts with buy/sell markers, hover tooltips, trade table with click-to-zoom, stats bar. Self-contained HTML files in `reports/`.
 - **PersistenceActor:** custom Actor inside TradingNode that subscribes to NT MessageBus events and writes fills, positions, and account snapshots to PostgreSQL.
@@ -185,8 +186,10 @@ src/
 ├── persistence/      # DB schemas (SQLAlchemy Core), no migrations
 │   └── schema.py
 ├── backtesting/      # Backtest orchestration (wraps NT's BacktestEngine/Node)
-│   └── engine.py         # make_engine, run_single_backtest, run_sweep,
-│                         # load_sweeps, run_walk_forward
+│   ├── engine.py         # make_engine, run_single_backtest, run_sweep,
+│   │                     # load_sweeps, run_walk_forward
+│   └── analysis.py       # rolling_performance, tag_regimes,
+│                         # performance_by_regime, run_fee_sweep
 ├── config/           # Pydantic Settings model
 │   └── settings.py       # get_settings() — single source of truth
 └── core/             # TIGHT SCOPE: type aliases, constants, interface protocols, pure utils
@@ -232,16 +235,16 @@ tests/                # unit/ and integration/
 **Phase 3a (current) — Research tooling + strategy validation:**
 - `run_sweep()` — parameter grid search with automatic Parquet persistence to `data/sweeps/`.
 - `run_walk_forward()` — sliding-window walk-forward analysis (train on N%, test on M%, slide).
+- `rolling_performance()` — per-window PnL consistency analysis.
+- `tag_regimes()` + `performance_by_regime()` — market regime detection (ADX-based) and per-regime stats.
+- `run_fee_sweep()` — fee sensitivity analysis with breakeven detection.
 - `compare_sweeps.ipynb` — load saved sweeps, side-by-side heatmaps, best-params table, parameter stability across instruments/timeframes.
-- `validate_strategy.ipynb` — plateau detection, walk-forward, bootstrap confidence intervals, go/no-go assessment.
+- `validate_strategy.ipynb` — plateau detection, walk-forward, bootstrap confidence intervals, rolling performance, fee sensitivity, regime analysis, go/no-go assessment.
 - Focus: validate strategies before committing them to paper/live trading. Build more strategies, test on more instruments.
 
 **Phase 3a — future research tools (build when pain emerges):**
-- Rolling performance windows — is the edge consistent across time or one burst?
 - Equity curve overlay — do strategies draw down together or diversify?
-- Slippage/fee sensitivity sweeps — does the edge survive realistic execution costs?
 - Randomized entry baseline — does the strategy beat random?
-- Regime tagging — does the strategy work in trending vs ranging markets?
 - Strategy return correlation matrix — portfolio-level diversification analysis.
 
 **Phase 3b (future) — Web layer (build when multiple validated strategies are running live and Grafana/SQL isn't enough):**
