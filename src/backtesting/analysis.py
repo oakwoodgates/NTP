@@ -435,6 +435,9 @@ def run_fee_sweep(
 
     # Derive leverage from instrument's margin_init
     max_leverage = int(Decimal(1) / instrument.margin_init)
+    if max_leverage <= 1 and instrument.margin_init >= Decimal(1):
+        msg = "Instrument appears unconfigured — apply with_venue_config() before run_fee_sweep()"
+        raise ValueError(msg)
 
     results: list[dict[str, Any]] = []
     t0 = time.monotonic()
