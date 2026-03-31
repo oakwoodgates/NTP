@@ -339,7 +339,8 @@ def performance_by_regime(
         if pd.isna(loc):
             regimes.append(None)
         else:
-            regimes.append(regime_df.loc[loc, "regime"])
+            val = regime_df.loc[loc, "regime"]
+            regimes.append(val.iloc[0] if isinstance(val, pd.Series) else val)
     pos_df["regime"] = regimes
 
     # Drop positions with no regime assignment (opened before first bar)
