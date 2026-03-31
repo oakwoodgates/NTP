@@ -11,6 +11,17 @@ from nbconvert import HTMLExporter
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+
+def make_instrument_id(asset: str, exchange: str) -> str:
+    """Build a perp instrument ID string for the given exchange.
+
+    Hyperliquid uses ``BTC-USD-PERP.HYPERLIQUID`` format.
+    Binance (and others) use ``BTCUSDT-PERP.BINANCE`` format.
+    """
+    if exchange == "HYPERLIQUID":
+        return f"{asset}-USD-PERP.{exchange}"
+    return f"{asset}USDT-PERP.{exchange}"
+
 def save_notebook(
     notebook_filename: str,
     result_filename: str,
