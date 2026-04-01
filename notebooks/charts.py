@@ -1332,11 +1332,11 @@ def plot_regime_overlay(
 
     # Regime → (color, alpha)
     _REGIME_COLORS: dict[str, tuple[str, float]] = {
-        "TRENDING":      (_GREEN, 0.15),
-        "RANGING":       (_RED,   0.15),
+        "TRENDING":      (_BLUE, 0.15),
+        "RANGING":       (_AMBER,   0.15),
         "TRANSITIONAL":  ("#888888", 0.08),
-        "HIGH_VOL":      (_AMBER, 0.15),
-        "LOW_VOL":       (_BLUE,  0.12),
+        "HIGH_VOL":      (_RED, 0.15),
+        "LOW_VOL":       (_GREEN,  0.12),
     }
 
     fig, ax = plt.subplots(figsize=(16, 6))
