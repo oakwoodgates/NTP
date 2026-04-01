@@ -361,6 +361,7 @@ The `StreamingActor` (in `src/actors/streaming.py`) subscribes to NT MessageBus 
 - **Sweep filename is deterministic.** `run_sweep()` saves to `{strategy}_{instrument}_{interval}.parquet`. Re-running the same combo overwrites the previous file. The `_swept_at` metadata column inside the file records when it was generated.
 - **Walk-forward is expensive.** `run_walk_forward()` runs the full param grid per fold. With 60 combos × 4 folds = 240 backtests. Budget 3-5 min for hourly bars, 15-20 min for 5m bars over a year.
 - **Binance API geo-blocked in some regions.** Connect NordVPN (`nordvpn connect`) before running `fetch_binance_candles.py`, or use `--testnet` for development (no geo-block, perp only — spot has no testnet). The script detects connection failures and prints VPN instructions.
+- **MIT/LIT orders never trigger in bar-only backtests.** NT's SimulatedExchange bid/ask are never initialized from OHLCV data, and synthetic TradeTicks from bar decomposition are not published to the message bus (so OrderEmulator can't trigger either). Use manual trigger checking in `on_bar` + MARKET orders instead. See `docs/BAR_BACKTESTING_GOTCHAS.md`.
 
 ## Communicating with This Developer
 
