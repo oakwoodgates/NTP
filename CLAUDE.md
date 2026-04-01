@@ -173,6 +173,8 @@ React Frontend ←WebSocket/REST→ FastAPI Gateway        ← Phase 3b (future)
 - **Category-prefix naming, not sequential numbers.** `backtest_ema_cross.ipynb`, not `02_backtest_ema_cross.ipynb`. Prefixes group by purpose: `backtest_*`, `compare_*`, `validate_*`, `verify_*`.
 - **Sweep results auto-persist to Parquet.** Use `run_sweep()` instead of manual `run_single_backtest` loops. Results land in `data/sweeps/` with deterministic filenames.
 - **Strategy factory pattern.** Each backtest notebook defines a `strategy_factory(engine, params)` callable that `run_sweep` and `run_walk_forward` use. This keeps sweep/validation code strategy-agnostic.
+- **Shared config in Cell 1.** All tuneable values live in Cell 1: `EXCHANGE`, `ASSET`, `INSTRUMENT_ID` (via `make_instrument_id(ASSET, EXCHANGE)`), `BAR_INTERVAL`, `SAVE_TEARSHEET`, `RESULT_NAME`, etc. `RESULT_NAME` is the canonical filename stem used by tearsheet save, TradingView HTML export, and notebook snapshot save.
+- **`notebooks/utils.py` helpers.** `make_instrument_id(asset, exchange)` builds the correct instrument ID format per exchange (Hyperliquid vs Binance). `save_tearsheet(html, result_name)` saves tearsheet HTML to `reports/tearsheets/`. `save_notebook` and `save_notebook_html` copy/export notebooks to `reports/`.
 
 ## Project Structure
 
@@ -218,11 +220,16 @@ notebooks/            # Jupyter research + charts.py plotting helpers
 ├── verify_03_signals.ipynb    # Indicator / signal verification
 ├── verify_04_persistence.ipynb # DB persistence verification
 ├── charts.py                  # Plotly, matplotlib, TVLC HTML report generation
-└── ulits.py                   # Shared notebook helpers (save files)
+└── utils.py                   # Shared notebook helpers (make_instrument_id, save_tearsheet,
+│                              #   save_notebook, save_notebook_html)
 data/
 ├── catalog/          # ParquetDataCatalog root (gitignored)
 └── sweeps/           # Sweep result Parquet files (gitignored)
-reports/              # Generated HTML backtest reports (gitignored)
+reports/              # Generated reports (gitignored)
+├── backtest/         # TradingView Lightweight Charts HTML reports
+├── html/             # Exported notebook HTML snapshots
+├── notebooks/        # Copied notebook snapshots (.ipynb)
+└── tearsheets/       # NT tearsheet HTML (saved when SAVE_TEARSHEET=True)
 tests/                # unit/ and integration/
 ```
 

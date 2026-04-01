@@ -65,8 +65,11 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 ```
 ├── src/
 │   ├── strategies/          # NT Strategy subclasses
+│   │   ├── bb_meanrev.py
 │   │   ├── ema_cross.py
 │   │   ├── ema_cross_atr.py
+│   │   ├── ema_cross_long_only.py
+│   │   ├── ema_cross_trailing.py
 │   │   ├── macd_rsi.py
 │   │   ├── sma_cross.py
 │   │   └── ...
@@ -101,7 +104,8 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │   ├── verify_03_signals.ipynb    # Indicator / signal verification
 │   ├── verify_04_persistence.ipynb # DB persistence verification
 │   ├── charts.py                  # Plotting helpers (plotly, matplotlib, TVLC reports)
-│   └── ulits.py                   # Shared notebook helpers (save files)
+│   └── utils.py                   # Shared notebook helpers (make_instrument_id, save_tearsheet,
+│                                  #   save_notebook, save_notebook_html)
 ├── scripts/
 │   ├── _catalog.py            # Shared utilities for data fetch scripts (crash-safe writes)
 │   ├── fetch_hl_candles.py    # Hyperliquid OHLCV data fetcher
@@ -111,7 +115,11 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 ├── data/
 │   ├── catalog/             # ParquetDataCatalog root (gitignored)
 │   └── sweeps/              # Sweep result Parquet files (gitignored)
-├── reports/                 # Generated HTML backtest reports (gitignored)
+├── reports/                 # Generated reports (gitignored)
+│   ├── backtest/            # TradingView Lightweight Charts HTML reports
+│   ├── html/                # Exported notebook HTML snapshots
+│   ├── notebooks/           # Copied notebook snapshots (.ipynb)
+│   └── tearsheets/          # NT tearsheet HTML (saved when SAVE_TEARSHEET=True)
 ├── tests/
 │   ├── unit/
 │   │   ├── test_core.py
