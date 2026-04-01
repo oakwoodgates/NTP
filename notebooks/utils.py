@@ -22,6 +22,16 @@ def make_instrument_id(asset: str, exchange: str) -> str:
         return f"{asset}-USD-PERP.{exchange}"
     return f"{asset}USDT-PERP.{exchange}"
 
+def save_tearsheet(html: str, result_name: str) -> Path:
+    """Save a tearsheet HTML string to reports/tearsheets/."""
+    results_dir = _PROJECT_ROOT / "reports" / "tearsheets"
+    results_dir.mkdir(exist_ok=True, parents=True)
+    dest = results_dir / f"{result_name}_tearsheet.html"
+    dest.write_text(html, encoding="utf-8")
+    print(f"Tearsheet saved → {dest}")
+    return dest
+
+
 def save_notebook(
     notebook_filename: str,
     result_filename: str,
