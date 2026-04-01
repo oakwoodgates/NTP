@@ -35,6 +35,12 @@ NOTE — Bar-based backtesting:
   initialized from OHLCV data).  This strategy checks the breakout
   condition manually in ``on_bar`` and uses MARKET orders for entry,
   which is the standard approach for bar-based breakout strategies.
+
+Fill price note:
+  The original NT example's MIT fills at the trigger price (breakout level).
+  This bar-based version fills at the next bar's open after confirmation —
+  slightly more conservative, but intra-bar precision isn't available from
+  bar data anyway.
 """
 
 from __future__ import annotations

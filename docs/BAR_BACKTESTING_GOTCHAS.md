@@ -146,7 +146,24 @@ NT's own example (`ema_cross_stop_entry.py`) handles both entry and trailing sto
 
 ---
 
-## 5. Debugging strategy: empirical over theoretical
+## 5. Quote tick guard blocks trailing stop submission
+
+NT's example `ema_cross_trailing_stop.py` checks `cache.quote_tick()` before submitting trailing stops:
+
+```python
+last_quote = self.cache.quote_tick(self.config.instrument_id)
+if not last_quote:
+    self.log.warning("Cannot submit trailing stop: no quotes yet")
+    return
+```
+
+In bar-only backtests, no `QuoteTick` data exists in the cache (quotes come from `subscribe_quote_ticks`, but synthetic quotes from bar decomposition are processed internally — same issue as section 2). The guard silently returns and the trailing stop is **never submitted**. The position stays open with no exit mechanism.
+
+**Fix:** Remove the quote check. The trailing stop only needs ATR for its offset calculation, not a current quote price. See `ema_cross_trailing.py` lines 236-239 (commented out) for the fix applied to our codebase.
+
+---
+
+## 6. Debugging strategy: empirical over theoretical
 
 When a strategy produces 0 fills, don't trust source code analysis alone. NT's Cython internals have complex interactions between the SimulatedExchange, OrderEmulator, and message bus that are hard to reason about from reading code.
 
