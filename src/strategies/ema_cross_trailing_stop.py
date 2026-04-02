@@ -41,8 +41,8 @@ if TYPE_CHECKING:
     from nautilus_trader.model.instruments import Instrument
 
 
-class EMACrossTrailingConfig(StrategyConfig, frozen=True):
-    """Configuration for EMACrossTrailing strategy.
+class EMACrossTrailingStopConfig(StrategyConfig, frozen=True):
+    """Configuration for EMACrossTrailingStop strategy.
 
     Parameters
     ----------
@@ -89,7 +89,7 @@ class EMACrossTrailingConfig(StrategyConfig, frozen=True):
     close_positions_on_stop: bool = True
 
 
-class EMACrossTrailing(Strategy):
+class EMACrossTrailingStop(Strategy):
     """EMA crossover strategy with ATR trailing stop exit.
 
     Enters long when flat and fast EMA >= slow EMA.
@@ -101,7 +101,7 @@ class EMACrossTrailing(Strategy):
 
     Parameters
     ----------
-    config : EMACrossTrailingConfig
+    config : EMACrossTrailingStopConfig
         The configuration for the instance.
 
     Raises
@@ -112,7 +112,7 @@ class EMACrossTrailing(Strategy):
 
     """
 
-    def __init__(self, config: EMACrossTrailingConfig) -> None:
+    def __init__(self, config: EMACrossTrailingStopConfig) -> None:
         PyCondition.is_true(
             config.fast_ema_period < config.slow_ema_period,
             f"{config.fast_ema_period=} must be less than {config.slow_ema_period=}",

@@ -17,8 +17,8 @@ Order flow:
 4. Trailing stop fills -> position closed -> re-entry on next bar if regime
    still holds.
 
-Behavioral differences from EMACrossTrailing:
-- EMACrossTrailing enters immediately on any bar while in regime.
+Behavioral differences from EMACrossTrailingStop:
+- EMACrossTrailingStop enters immediately on any bar while in regime.
   EMACrossStopEntry requires the next bar to break beyond the previous
   bar's high/low — filtering false EMA signals via breakout confirmation.
 - Both use trailing stop exit.  Both are regime-based (re-enter after exit
