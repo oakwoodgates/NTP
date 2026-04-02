@@ -8,8 +8,8 @@ winners run.
 
 Order flow:
 1. Each bar while flat + EMA regime aligned: record a breakout trigger level.
-   - BUY: trigger at bar.high + (entry_offset_ticks x tick_size)
-   - SELL: trigger at bar.low - (entry_offset_ticks x tick_size)
+   - BUY: trigger at bar.high + (entry_offset_atr × ATR)
+   - SELL: trigger at bar.low - (entry_offset_atr × ATR)
 2. On the NEXT bar: if bar.high >= trigger (BUY) or bar.low <= trigger
    (SELL), submit a MARKET entry order.
 3. Entry fill -> on_event detects PositionOpened -> submit trailing stop on
@@ -95,10 +95,12 @@ class EMACrossStopEntryConfig(StrategyConfig, frozen=True):
         The ATR period for trailing stop offset sizing.
     trailing_atr_multiple : float, default 3.0
         Trailing stop offset = ATR x this multiplier.
-    entry_offset_ticks : int, default 2
-        Number of ticks above bar.high (BUY) or below bar.low (SELL)
-        for the breakout trigger. Requires the next bar to confirm the
-        breakout before entering.
+    entry_offset_atr : float, default 0.25
+        Breakout trigger distance as a fraction of ATR.  The trigger is
+        set at bar.high + (ATR × entry_offset_atr) for BUY, or
+        bar.low - (ATR × entry_offset_atr) for SELL.  Scales with
+        instrument volatility — unlike tick-based offsets which are
+        negligible on high-priced instruments with small tick sizes.
     trailing_offset_type : str, default "PRICE"
         The trailing offset type (interpreted as ``TrailingOffsetType``).
     trigger_type : str, default "LAST_PRICE"
@@ -118,7 +120,7 @@ class EMACrossStopEntryConfig(StrategyConfig, frozen=True):
     slow_ema_period: PositiveInt = 20
     atr_period: PositiveInt = 20
     trailing_atr_multiple: PositiveFloat = 3.0
-    entry_offset_ticks: PositiveInt = 2
+    entry_offset_atr: PositiveFloat = 0.25
     trailing_offset_type: str = "PRICE"
     trigger_type: str = "LAST_PRICE"
     emulation_trigger: str = "NO_TRIGGER"
@@ -158,7 +160,6 @@ class EMACrossStopEntry(Strategy):
         super().__init__(config)
 
         self.instrument: Instrument | None = None
-        self.tick_size: Price | None = None
 
         self.fast_ema = ExponentialMovingAverage(config.fast_ema_period)
         self.slow_ema = ExponentialMovingAverage(config.slow_ema_period)
@@ -180,8 +181,6 @@ class EMACrossStopEntry(Strategy):
             self.log.error(f"Could not find instrument {self.config.instrument_id}")
             self.stop()
             return
-
-        self.tick_size = self.instrument.price_increment
 
         self.register_indicator_for_bars(self.config.bar_type, self.fast_ema)
         self.register_indicator_for_bars(self.config.bar_type, self.slow_ema)
@@ -226,10 +225,10 @@ class EMACrossStopEntry(Strategy):
             return
 
         # Set breakout trigger for next bar
-        if self.instrument is None or self.tick_size is None:
+        if self.instrument is None:
             return
 
-        offset = self.tick_size * self.config.entry_offset_ticks
+        offset = self.atr.value * self.config.entry_offset_atr
 
         if self.fast_ema.value >= self.slow_ema.value:
             self._pending_side = OrderSide.BUY
