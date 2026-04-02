@@ -54,7 +54,7 @@ def on_bar(self, bar: Bar) -> None:
         self._pending_trigger = None
         return
 
-    offset = self.tick_size * self.config.entry_offset_ticks
+    offset = self.atr.value * self.config.entry_offset_atr
     if self.fast_ema.value >= self.slow_ema.value:
         self._pending_side = OrderSide.BUY
         self._pending_trigger = self.instrument.make_price(bar.high + offset)
