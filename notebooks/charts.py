@@ -1495,6 +1495,7 @@ def generate_backtest_html(
     html = html.replace("__MARKER_DETAIL_JSON__",       json.dumps(marker_detail))
     html = html.replace("__TRADES_JSON__",              json.dumps(position_rows))
     html = html.replace("__STATS_JSON__",               json.dumps(stats))
+    html = html.replace("__STARTING_CAPITAL__",          str(starting_capital))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
@@ -1774,7 +1775,8 @@ const EMA_SLOW_DATA = __EMA_SLOW_JSON__;
 const MARKERS       = __MARKERS_JSON__;
 const MARKER_DETAIL = __MARKER_DETAIL_JSON__;   // {unix_s_str: {is_buy,side,qty,px,trade_num}}
 const TRADES        = __TRADES_JSON__;
-const STATS         = __STATS_JSON__;
+const STATS              = __STATS_JSON__;
+const STARTING_CAPITAL   = __STARTING_CAPITAL__;
 const FAST_PERIOD   = __FAST__;
 const SLOW_PERIOD   = __SLOW__;
 const MA_TYPE       = '__MA_TYPE__';
@@ -1900,21 +1902,43 @@ chart.subscribeCrosshairMove(param => {
 });
 
 // ── Stats bar ──────────────────────────────────────────────────────────────────
-(function renderStats() {
+function computeStats(trades) {
+  const pnls = trades.map(t => t.pnl).filter(p => p != null);
+  if (pnls.length === 0) return {};
+
+  const totalPnl  = pnls.reduce((s, p) => s + p, 0);
+  const winners   = pnls.filter(p => p > 0);
+  const losers    = pnls.filter(p => p < 0);
+  const grossWin  = winners.reduce((s, p) => s + p, 0);
+  const grossLoss = Math.abs(losers.reduce((s, p) => s + p, 0));
+
+  return {
+    total_pnl:     totalPnl,
+    total_pnl_pct: STARTING_CAPITAL ? (totalPnl / STARTING_CAPITAL * 100) : 0,
+    num_trades:    pnls.length,
+    win_rate:      (winners.length / pnls.length * 100),
+    avg_win:       winners.length ? (grossWin / winners.length) : 0,
+    avg_loss:      losers.length  ? (-grossLoss / losers.length) : 0,
+    profit_factor: grossLoss ? (grossWin / grossLoss) : null,
+  };
+}
+
+function renderStats(stats) {
   const bar = document.getElementById('stats-bar');
-  if (!STATS || Object.keys(STATS).length === 0) { bar.style.display = 'none'; return; }
+  if (!stats || Object.keys(stats).length === 0) { bar.style.display = 'none'; return; }
+  bar.style.display = '';
 
   const sign = v => v > 0 ? 'pos' : (v < 0 ? 'neg' : '');
-  const pf   = STATS.profit_factor;
+  const pf   = stats.profit_factor;
   const pfStr = (pf == null) ? '—' : (pf > 999 ? '∞' : fmtNum(pf));
 
   const cells = [
-    { label: 'Total PnL',     value: fmtNum(STATS.total_pnl),         sfx: ' USDC',  cls: sign(STATS.total_pnl) },
-    { label: 'Return',        value: fmtNum(STATS.total_pnl_pct) + '%', sfx: '',      cls: sign(STATS.total_pnl_pct) },
-    { label: 'Trades',        value: STATS.num_trades,                  sfx: '',      cls: '' },
-    { label: 'Win Rate',      value: fmtNum(STATS.win_rate, 1) + '%',   sfx: '',      cls: STATS.win_rate >= 50 ? 'pos' : 'neg' },
-    { label: 'Avg Win',       value: fmtNum(STATS.avg_win),             sfx: '',      cls: 'pos' },
-    { label: 'Avg Loss',      value: fmtNum(STATS.avg_loss),            sfx: '',      cls: 'neg' },
+    { label: 'Total PnL',     value: fmtNum(stats.total_pnl),         sfx: ' USDC',  cls: sign(stats.total_pnl) },
+    { label: 'Return',        value: fmtNum(stats.total_pnl_pct) + '%', sfx: '',      cls: sign(stats.total_pnl_pct) },
+    { label: 'Trades',        value: stats.num_trades,                  sfx: '',      cls: '' },
+    { label: 'Win Rate',      value: fmtNum(stats.win_rate, 1) + '%',   sfx: '',      cls: stats.win_rate >= 50 ? 'pos' : 'neg' },
+    { label: 'Avg Win',       value: fmtNum(stats.avg_win),             sfx: '',      cls: 'pos' },
+    { label: 'Avg Loss',      value: fmtNum(stats.avg_loss),            sfx: '',      cls: 'neg' },
     { label: 'Profit Factor', value: pfStr,                              sfx: '',      cls: (pf != null && pf >= 1) ? 'pos' : 'neg' },
   ];
 
@@ -1924,7 +1948,9 @@ chart.subscribeCrosshairMove(param => {
       <div class="stat-value ${c.cls}">${c.value}${c.sfx}</div>
     </div>`
   ).join('');
-})();
+}
+
+renderStats(STATS);
 
 // ── Trade table ───────────────────────────────────────────────────────────────
 (function renderTrades() {
@@ -2041,6 +2067,15 @@ function applyFilter() {
     if (show) visible++;
   });
   document.getElementById('trade-count').textContent = visible;
+
+  // Recompute stats for filtered subset
+  if (currentFilter === 'all') {
+    renderStats(STATS);
+  } else {
+    const side = currentFilter === 'long' ? 'Long' : 'Short';
+    const filtered = TRADES.filter(t => t.side === side);
+    renderStats(computeStats(filtered));
+  }
 }
 
 document.querySelectorAll('.filter-btn').forEach(btn => {
