@@ -37,6 +37,7 @@ from plotly.subplots import make_subplots
 from nautilus_trader.model.currencies import USDC
 from nautilus_trader.indicators import (
     BollingerBands,
+    DonchianChannel,
     ExponentialMovingAverage,
     MovingAverageConvergenceDivergence,
     RelativeStrengthIndex,
@@ -734,6 +735,139 @@ def _apply_bb_meanrev_layout(
 
     # Bottom x-axis date formatting
     fig.update_xaxes(tickformat="%b %d\n%Y", row=2, col=1)
+
+
+# ── Donchian Channel Breakout chart ──────────────────────────────────────────
+
+_DC_FILL = "rgba(255, 152, 0, 0.08)"   # very light orange fill between entry bands
+_DC_LINE = "rgba(255, 152, 0, 0.5)"    # semi-transparent orange entry band lines
+
+
+def plot_donchian_breakout(
+    bars: list[Bar],
+    fills_report: pd.DataFrame,
+    entry_period: int,
+    exit_period: int,
+    *,
+    instrument_label: str = "BTC-USD-PERP",
+    bar_label: str = "1h",
+    height: int = 600,
+) -> go.Figure:
+    """Candlestick chart with dual Donchian Channel bands and trade markers.
+
+    Parameters
+    ----------
+    bars:
+        Ordered list of NT Bar objects.
+    fills_report:
+        DataFrame from ``engine.trader.generate_order_fills_report()``.
+    entry_period:
+        Entry channel period (longer).
+    exit_period:
+        Exit channel period (shorter).
+    instrument_label / bar_label:
+        Display strings for the chart title.
+    height:
+        Figure height in pixels.
+
+    Returns
+    -------
+    go.Figure
+    """
+    df = _bars_to_donchian_df(bars, entry_period, exit_period)
+    buys, sells = _parse_fills(fills_report)
+
+    fig = go.Figure()
+    _add_candlesticks(fig, df)
+    _add_dc_bands(fig, df, entry_period, exit_period)
+    _add_trade_markers(fig, buys, sells, df)
+    title = (
+        f"{instrument_label} · {bar_label} · "
+        f"DonchianBreakout(entry={entry_period}, exit={exit_period})"
+    )
+    _apply_base_layout(fig, title, height)
+    return fig
+
+
+def _bars_to_donchian_df(
+    bars: list[Bar],
+    entry_period: int,
+    exit_period: int,
+) -> pd.DataFrame:
+    """Convert NT Bars to OHLCV DataFrame with Donchian Channel bands."""
+    dc_entry = DonchianChannel(entry_period)
+    dc_exit = DonchianChannel(exit_period)
+
+    rows = []
+    for bar in bars:
+        dc_entry.handle_bar(bar)
+        dc_exit.handle_bar(bar)
+        rows.append({
+            "ts":              pd.Timestamp(bar.ts_event, unit="ns", tz="UTC"),
+            "open":            float(bar.open),
+            "high":            float(bar.high),
+            "low":             float(bar.low),
+            "close":           float(bar.close),
+            "vol":             float(bar.volume),
+            "dc_entry_upper":  dc_entry.upper if dc_entry.initialized else np.nan,
+            "dc_entry_lower":  dc_entry.lower if dc_entry.initialized else np.nan,
+            "dc_entry_middle": dc_entry.middle if dc_entry.initialized else np.nan,
+            "dc_exit_upper":   dc_exit.upper if dc_exit.initialized else np.nan,
+            "dc_exit_lower":   dc_exit.lower if dc_exit.initialized else np.nan,
+        })
+
+    return pd.DataFrame(rows).set_index("ts")
+
+
+def _add_dc_bands(
+    fig: go.Figure,
+    df: pd.DataFrame,
+    entry_period: int,
+    exit_period: int,
+) -> None:
+    """Add dual Donchian Channel overlay: entry band fill + exit channel dashes."""
+    # Entry channel lower (fill='tonexty' on upper fills between them)
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["dc_entry_lower"],
+        name="Entry Lower",
+        mode="lines",
+        line=dict(color=_DC_LINE, width=1),
+        showlegend=False,
+    ))
+
+    # Entry channel upper with fill to lower
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["dc_entry_upper"],
+        name=f"Entry DC({entry_period})",
+        mode="lines",
+        line=dict(color=_DC_LINE, width=1),
+        fill="tonexty",
+        fillcolor=_DC_FILL,
+    ))
+
+    # Entry channel middle (midpoint)
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["dc_entry_middle"],
+        name=f"Mid({entry_period})",
+        mode="lines",
+        line=dict(color=_AMBER, width=1, dash="dash"),
+    ))
+
+    # Exit channel upper (dotted red — triggers short exit)
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["dc_exit_upper"],
+        name=f"Exit Upper({exit_period})",
+        mode="lines",
+        line=dict(color=_RED, width=1, dash="dot"),
+    ))
+
+    # Exit channel lower (dotted green — triggers long exit)
+    fig.add_trace(go.Scatter(
+        x=df.index, y=df["dc_exit_lower"],
+        name=f"Exit Lower({exit_period})",
+        mode="lines",
+        line=dict(color=_GREEN, width=1, dash="dot"),
+    ))
 
 
 # ── Matplotlib display helpers ───────────────────────────────────────────────
