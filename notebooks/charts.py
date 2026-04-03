@@ -1632,7 +1632,26 @@ header .subtitle { font-size: 12px; color: #787b86; }
   letter-spacing: 0.6px;
   border-bottom: 1px solid #2a2e39;
   background: #181c2a;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
 }
+.filter-bar { display: flex; gap: 4px; }
+.filter-btn {
+  background: transparent;
+  border: 1px solid #2a2e39;
+  color: #787b86;
+  padding: 3px 10px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  transition: all 0.1s;
+}
+.filter-btn:hover { border-color: #363a45; color: #b2b5be; }
+.filter-btn.active { background: #2a2e39; color: #e1e4ec; border-color: #363a45; }
 .trades-wrap { overflow-x: auto; max-height: 420px; overflow-y: auto; }
 
 table.trades {
@@ -1653,6 +1672,11 @@ table.trades thead th {
   z-index: 1;
 }
 table.trades thead th.r { text-align: right; }
+table.trades thead th.sortable { cursor: pointer; user-select: none; }
+table.trades thead th.sortable:hover { color: #b2b5be; }
+.sort-arrow { font-size: 10px; margin-left: 3px; opacity: 0.5; }
+table.trades thead th.sortable.asc .sort-arrow,
+table.trades thead th.sortable.desc .sort-arrow { opacity: 1; color: #2196f3; }
 table.trades tbody tr {
   border-bottom: 1px solid #1a1e2a;
   cursor: pointer;
@@ -1716,7 +1740,12 @@ td.pnl.neg { color: #ef5350; }
 <div class="stats-bar" id="stats-bar"></div>
 
 <div class="trades-header">
-  Trade History &mdash; <span id="trade-count">0</span> closed positions
+  <span>Trade History &mdash; <span id="trade-count">0</span> closed positions</span>
+  <div class="filter-bar">
+    <button class="filter-btn active" data-filter="all">All</button>
+    <button class="filter-btn" data-filter="long">Long</button>
+    <button class="filter-btn" data-filter="short">Short</button>
+  </div>
 </div>
 <div class="trades-wrap">
   <table class="trades">
@@ -1729,8 +1758,8 @@ td.pnl.neg { color: #ef5350; }
         <th class="r">Size</th>
         <th class="r">Entry Px</th>
         <th class="r">Exit Px</th>
-        <th class="r">PnL</th>
-        <th class="r">Return %</th>
+        <th class="r sortable" id="th-pnl">PnL <span class="sort-arrow">&varr;</span></th>
+        <th class="r sortable" id="th-ret">Return % <span class="sort-arrow">&varr;</span></th>
       </tr>
     </thead>
     <tbody id="trades-body"></tbody>
@@ -1916,7 +1945,7 @@ chart.subscribeCrosshairMove(param => {
     const retStr   = (ret == null) ? '—' : (ret >= 0 ? '+' : '') + fmtNum(ret * 100, 2) + '%';
     const retCls   = (ret == null) ? '' : (ret >= 0 ? 'pos' : 'neg');
 
-    return `<tr data-ts="${t.opened_ts_s || 0}" onclick="scrollChart(this)">
+    return `<tr data-ts="${t.opened_ts_s || 0}" data-pnl="${pnl ?? 0}" data-ret="${ret ?? 0}" data-side="${isLong ? 'long' : 'short'}" onclick="scrollChart(this)">
       <td class="id">${i + 1}</td>
       <td>${t.opened}</td>
       <td>${t.closed}</td>
@@ -1947,6 +1976,81 @@ function scrollChart(row) {
     to:   ts + window / 2,
   });
 }
+
+// ── Sortable columns ─────────────────────────────────────────────────────────
+(function setupSort() {
+  const cols = [
+    { id: 'th-pnl', key: 'pnl' },
+    { id: 'th-ret', key: 'ret' },
+  ];
+  const state = {};
+  cols.forEach(c => { state[c.id] = 0; });
+
+  function resetTh(th) {
+    th.className = 'r sortable';
+    th.querySelector('.sort-arrow').innerHTML = '&varr;';
+  }
+
+  cols.forEach(({ id, key }) => {
+    const th = document.getElementById(id);
+    if (!th) return;
+
+    th.addEventListener('click', () => {
+      cols.forEach(c => {
+        if (c.id !== id) {
+          state[c.id] = 0;
+          const otherTh = document.getElementById(c.id);
+          if (otherTh) resetTh(otherTh);
+        }
+      });
+
+      state[id] = (state[id] + 1) % 3;
+      const dir = state[id];
+      const tbody = document.getElementById('trades-body');
+      const rows = Array.from(tbody.querySelectorAll('tr'));
+
+      if (dir === 0) {
+        rows.sort((a, b) => parseFloat(a.dataset.ts) - parseFloat(b.dataset.ts));
+        resetTh(th);
+      } else if (dir === 1) {
+        rows.sort((a, b) => parseFloat(b.dataset[key]) - parseFloat(a.dataset[key]));
+        th.className = 'r sortable desc';
+        th.querySelector('.sort-arrow').textContent = '\\u25BC';
+      } else {
+        rows.sort((a, b) => parseFloat(a.dataset[key]) - parseFloat(b.dataset[key]));
+        th.className = 'r sortable asc';
+        th.querySelector('.sort-arrow').textContent = '\\u25B2';
+      }
+
+      rows.forEach(r => tbody.appendChild(r));
+      applyFilter();
+    });
+  });
+})();
+
+// ── Filter by side ───────────────────────────────────────────────────────────
+let currentFilter = 'all';
+
+function applyFilter() {
+  const tbody = document.getElementById('trades-body');
+  const rows = tbody.querySelectorAll('tr[data-side]');
+  let visible = 0;
+  rows.forEach(r => {
+    const show = currentFilter === 'all' || r.dataset.side === currentFilter;
+    r.style.display = show ? '' : 'none';
+    if (show) visible++;
+  });
+  document.getElementById('trade-count').textContent = visible;
+}
+
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    currentFilter = btn.dataset.filter;
+    applyFilter();
+  });
+});
 </script>
 </body>
 </html>
