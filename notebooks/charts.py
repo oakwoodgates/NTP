@@ -1530,6 +1530,7 @@ def generate_backtest_html(
     fast_period: int = 20,
     slow_period: int = 50,
     ma_type: str = "EMA",
+    overlay_type: str = "ma",
     instrument_label: str = "",
     bar_label: str = "1h",
     starting_capital: float = 10_000.0,
@@ -1546,9 +1547,13 @@ def generate_backtest_html(
     bars              NT Bar list from ParquetDataCatalog.
     fills_report      engine.trader.generate_order_fills_report()
     positions_report  engine.trader.generate_positions_report()
-    fast_period       Fast MA period.
-    slow_period       Slow MA period.
-    ma_type           "EMA" or "SMA".
+    fast_period       Fast MA period. When overlay_type="donchian", used as
+                      entry channel period.
+    slow_period       Slow MA period. When overlay_type="donchian", used as
+                      exit channel period.
+    ma_type           "EMA" or "SMA". Ignored when overlay_type="donchian".
+    overlay_type      "ma" (default) for EMA/SMA lines, or "donchian" for
+                      dual Donchian Channel bands (entry + exit).
     instrument_label  Display label (e.g. "BTC-USD-PERP.HYPERLIQUID").
     bar_label         Timeframe string (e.g. "1h").
     starting_capital  Used for total-return % calculation.
@@ -1569,16 +1574,37 @@ def generate_backtest_html(
         df[["time", "open", "high", "low", "close"]].to_dict(orient="records")
     )
 
-    fast_ma_data = [
-        {"time": int(t), "value": round(v, 6)}
-        for t, v in zip(df["time"], _ma_series(df["close"], fast_period, ma_type))
-        if not math.isnan(v)
-    ]
-    slow_ma_data = [
-        {"time": int(t), "value": round(v, 6)}
-        for t, v in zip(df["time"], _ma_series(df["close"], slow_period, ma_type))
-        if not math.isnan(v)
-    ]
+    if overlay_type == "donchian":
+        dc_df = _bars_to_donchian_df(bars, entry_period=fast_period, exit_period=slow_period)
+
+        def _dc_series(col: str) -> list[dict]:
+            return [
+                {"time": int(t), "value": round(v, 6)}
+                for t, v in zip(df["time"], dc_df[col].values)
+                if not math.isnan(v)
+            ]
+
+        overlay_lines = [
+            {"label": f"Entry Upper({fast_period})", "color": "#2196f3", "width": 1, "style": 0, "data": _dc_series("dc_entry_upper")},
+            {"label": f"Entry Lower({fast_period})", "color": "#2196f3", "width": 1, "style": 0, "data": _dc_series("dc_entry_lower")},
+            {"label": f"Exit Upper({slow_period})",  "color": "#ff9800", "width": 1, "style": 2, "data": _dc_series("dc_exit_upper")},
+            {"label": f"Exit Lower({slow_period})",  "color": "#ff9800", "width": 1, "style": 2, "data": _dc_series("dc_exit_lower")},
+        ]
+    else:
+        fast_ma_data = [
+            {"time": int(t), "value": round(v, 6)}
+            for t, v in zip(df["time"], _ma_series(df["close"], fast_period, ma_type))
+            if not math.isnan(v)
+        ]
+        slow_ma_data = [
+            {"time": int(t), "value": round(v, 6)}
+            for t, v in zip(df["time"], _ma_series(df["close"], slow_period, ma_type))
+            if not math.isnan(v)
+        ]
+        overlay_lines = [
+            {"label": f"{ma_type}{fast_period}", "color": "#2196f3", "width": 1, "style": 0, "data": fast_ma_data},
+            {"label": f"{ma_type}{slow_period}", "color": "#ff9800", "width": 1, "style": 0, "data": slow_ma_data},
+        ]
 
     # Build unix-second timestamp → 1-based trade number mapping so chart
     # markers show the trade number from the table.
@@ -1610,26 +1636,41 @@ def generate_backtest_html(
     output_path = (_REPORTS_DIR / f"{result_filename}_{timestamp}.html").resolve()
 
     # ── Render template ──────────────────────────────────────────────────────
-    title    = f"Backtest — {instrument_label} {bar_label}  {ma_type} {fast_period}/{slow_period}"
+    if overlay_type == "donchian":
+        title = f"Backtest — {instrument_label} {bar_label}  DC({fast_period}/{slow_period})"
+    else:
+        title = f"Backtest — {instrument_label} {bar_label}  {ma_type} {fast_period}/{slow_period}"
     subtitle = (
         f"{len(df):,} bars"
         + (f"  ·  {stats.get('num_trades', 0)} trades" if stats else "")
         + (f"  ·  capital {starting_capital:,.0f} USDC" if starting_capital else "")
     )
 
-    html = _HTML_TEMPLATE.replace("__TITLE__",          title)
-    html = html.replace("__SUBTITLE__",                 subtitle)
-    html = html.replace("__FAST__",                     str(fast_period))
-    html = html.replace("__SLOW__",                     str(slow_period))
-    html = html.replace("__MA_TYPE__",                  ma_type)
-    html = html.replace("__OHLCV_JSON__",               ohlcv_json)
-    html = html.replace("__EMA_FAST_JSON__",            json.dumps(fast_ma_data))
-    html = html.replace("__EMA_SLOW_JSON__",            json.dumps(slow_ma_data))
-    html = html.replace("__MARKERS_JSON__",             json.dumps(markers))
-    html = html.replace("__MARKER_DETAIL_JSON__",       json.dumps(marker_detail))
-    html = html.replace("__TRADES_JSON__",              json.dumps(position_rows))
-    html = html.replace("__STATS_JSON__",               json.dumps(stats))
-    html = html.replace("__STARTING_CAPITAL__",          str(starting_capital))
+    # Build legend HTML from overlay lines
+    legend_parts = []
+    for line in overlay_lines:
+        if line.get("style", 0) == 2:
+            style = f"background:transparent; border-top:2px dashed {line['color']}; height:0"
+        else:
+            style = f"background:{line['color']}"
+        legend_parts.append(
+            f'<div class="legend-item">'
+            f'<div class="legend-line" style="{style}"></div>'
+            f'<span>{line["label"]}</span>'
+            f'</div>'
+        )
+    overlay_legend_html = "\n  ".join(legend_parts)
+
+    html = _HTML_TEMPLATE.replace("__TITLE__",              title)
+    html = html.replace("__SUBTITLE__",                     subtitle)
+    html = html.replace("__OVERLAY_LEGEND_HTML__",          overlay_legend_html)
+    html = html.replace("__OVERLAY_LINES_JSON__",           json.dumps(overlay_lines))
+    html = html.replace("__OHLCV_JSON__",                   ohlcv_json)
+    html = html.replace("__MARKERS_JSON__",                 json.dumps(markers))
+    html = html.replace("__MARKER_DETAIL_JSON__",           json.dumps(marker_detail))
+    html = html.replace("__TRADES_JSON__",                  json.dumps(position_rows))
+    html = html.replace("__STATS_JSON__",                   json.dumps(stats))
+    html = html.replace("__STARTING_CAPITAL__",             str(starting_capital))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
@@ -1849,14 +1890,7 @@ td.pnl.neg { color: #ef5350; }
 </header>
 
 <div class="legend">
-  <div class="legend-item">
-    <div class="legend-line" style="background:#2196f3"></div>
-    <span>__MA_TYPE__ __FAST__ (fast)</span>
-  </div>
-  <div class="legend-item">
-    <div class="legend-line" style="background:#ff9800"></div>
-    <span>__MA_TYPE__ __SLOW__ (slow)</span>
-  </div>
+  __OVERLAY_LEGEND_HTML__
   <div class="legend-item">
     <div class="legend-arrow-up"></div>
     <span>Long entry</span>
@@ -1904,16 +1938,12 @@ td.pnl.neg { color: #ef5350; }
 <script>
 // ── Injected data (serialised by Python) ─────────────────────────────────────
 const OHLCV         = __OHLCV_JSON__;
-const EMA_FAST_DATA = __EMA_FAST_JSON__;
-const EMA_SLOW_DATA = __EMA_SLOW_JSON__;
+const OVERLAY_LINES = __OVERLAY_LINES_JSON__;
 const MARKERS       = __MARKERS_JSON__;
 const MARKER_DETAIL = __MARKER_DETAIL_JSON__;   // {unix_s_str: {is_buy,side,qty,px,trade_num}}
 const TRADES        = __TRADES_JSON__;
 const STATS              = __STATS_JSON__;
 const STARTING_CAPITAL   = __STARTING_CAPITAL__;
-const FAST_PERIOD   = __FAST__;
-const SLOW_PERIOD   = __SLOW__;
-const MA_TYPE       = '__MA_TYPE__';
 
 // ── Chart ─────────────────────────────────────────────────────────────────────
 const chartEl = document.getElementById('chart');
@@ -1946,21 +1976,18 @@ const candleSeries = chart.addCandlestickSeries({
 });
 candleSeries.setData(OHLCV);
 
-// Fast MA
-const fastLine = chart.addLineSeries({
-  color: '#2196f3', lineWidth: 1,
-  priceLineVisible: false, lastValueVisible: true,
-  title: MA_TYPE + FAST_PERIOD,
+// Overlay line series (MA, Donchian, etc.)
+OVERLAY_LINES.forEach(line => {
+  const series = chart.addLineSeries({
+    color: line.color,
+    lineWidth: line.width || 1,
+    lineStyle: line.style || 0,
+    priceLineVisible: false,
+    lastValueVisible: true,
+    title: line.label,
+  });
+  series.setData(line.data);
 });
-fastLine.setData(EMA_FAST_DATA);
-
-// Slow MA
-const slowLine = chart.addLineSeries({
-  color: '#ff9800', lineWidth: 1,
-  priceLineVisible: false, lastValueVisible: true,
-  title: MA_TYPE + SLOW_PERIOD,
-});
-slowLine.setData(EMA_SLOW_DATA);
 
 // Markers
 if (MARKERS.length > 0) {
