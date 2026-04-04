@@ -8,9 +8,13 @@ The entry channel (longer period) captures major breakouts.  The exit channel
 (shorter period) acts as a tighter trailing exit, locking in gains on pullbacks
 without requiring the full entry-channel reversal.
 
-Uses crossover detection — only enters on the breakout bar itself, not on every
-bar while price remains beyond the channel.  Market orders only (MIT/LIT orders
-never trigger in bar-only backtests — see BAR_BACKTESTING_GOTCHAS.md).
+Compares against previous-bar channel values because NT updates registered
+indicators with the current bar's data BEFORE ``on_bar`` fires.  For
+DonchianChannel this means ``dc.upper`` already includes the current bar's
+high, making ``close > dc.upper`` always False on the breakout bar.
+
+Market orders only (MIT/LIT orders never trigger in bar-only backtests —
+see BAR_BACKTESTING_GOTCHAS.md).
 """
 
 from __future__ import annotations
@@ -67,15 +71,16 @@ class DonchianBreakoutConfig(StrategyConfig, frozen=True):
 class DonchianBreakout(Strategy):
     """Donchian Channel breakout strategy with dual-period channels.
 
-    Enters long when price breaks above the entry channel upper band
-    (new N-period high).  Enters short when price breaks below the entry
-    channel lower band (new N-period low).
+    Enters long when price breaks above the previous bar's entry channel
+    upper band (new N-period high).  Enters short when price breaks below
+    the previous bar's entry channel lower band (new N-period low).
 
-    Exits long when price drops below the exit channel lower band.
-    Exits short when price rises above the exit channel upper band.
+    Exits long when price drops below the previous bar's exit channel lower.
+    Exits short when price rises above the previous bar's exit channel upper.
 
-    Uses crossover detection — only enters on the breakout bar, not on
-    every bar while price remains beyond the channel.
+    Position-state guards (``is_net_long``/``is_net_short``) prevent
+    re-entry while already in a position, so explicit crossover detection
+    is not needed.
 
     Parameters
     ----------
@@ -100,7 +105,14 @@ class DonchianBreakout(Strategy):
         self.dc_entry = DonchianChannel(config.entry_period)
         self.dc_exit = DonchianChannel(config.exit_period)
 
-        self._prev_close: float = 0.0
+        # Previous-bar channel values — NT updates indicators before on_bar,
+        # so we must compare against the prior bar's channel to detect breakouts.
+        # Init to 0.0; the ``> 0`` guards in signal checks skip warmup bars.
+        # Assumes all traded instruments have positive prices (true for crypto).
+        self._prev_upper: float = 0.0
+        self._prev_lower: float = 0.0
+        self._prev_exit_upper: float = 0.0
+        self._prev_exit_lower: float = 0.0
 
     def on_start(self) -> None:
         """Register indicators, request historical bars, subscribe to bars."""
@@ -116,7 +128,7 @@ class DonchianBreakout(Strategy):
         lookback_bars = self.config.entry_period + 10
         self.request_bars(
             self.config.bar_type,
-            start=self._clock.utc_now() - timedelta(hours=lookback_bars),
+            start=self._clock.utc_now() - timedelta(days=lookback_bars),
         )
         self.subscribe_bars(self.config.bar_type)
 
@@ -139,35 +151,53 @@ class DonchianBreakout(Strategy):
         if not self._check_exit(close):
             self._check_entry(close, price)
 
-        self._prev_close = close
+        # Snapshot AFTER signal checks so next bar compares against these values
+        self._prev_upper = self.dc_entry.upper
+        self._prev_lower = self.dc_entry.lower
+        self._prev_exit_upper = self.dc_exit.upper
+        self._prev_exit_lower = self.dc_exit.lower
 
     def _check_exit(self, close: float) -> bool:
-        """Close position if price has breached the exit channel.
+        """Close position if price has breached the previous bar's exit channel.
 
         Returns True if a position was closed (caller should skip entry).
         """
         iid = self.config.instrument_id
-        if self.portfolio.is_net_long(iid) and close < self.dc_exit.lower:
+        if (
+            self.portfolio.is_net_long(iid)
+            and self._prev_exit_lower > 0
+            and close < self._prev_exit_lower
+        ):
             self.close_all_positions(iid)
             return True
-        if self.portfolio.is_net_short(iid) and close > self.dc_exit.upper:
+        if (
+            self.portfolio.is_net_short(iid)
+            and self._prev_exit_upper > 0
+            and close > self._prev_exit_upper
+        ):
             self.close_all_positions(iid)
             return True
         return False
 
     def _check_entry(self, close: float, price: Decimal) -> None:
-        """Enter on breakout above entry upper or below entry lower."""
+        """Enter on breakout above previous entry upper or below previous entry lower.
+
+        Note: ``close_all_positions`` is synchronous in backtests but async in
+        live trading.  The ``is_net_long``/``is_net_short`` check that follows
+        may see stale state in live, risking a double position.  This is the
+        same pattern used across all strategies — verify during paper trading.
+        """
         iid = self.config.instrument_id
 
-        # Long breakout: price crosses above entry channel upper
-        if self._prev_close <= self.dc_entry.upper and close > self.dc_entry.upper:
+        # Long breakout: close breaks above previous bar's entry channel upper
+        if close > self._prev_upper and self._prev_upper > 0:
             if self.portfolio.is_net_short(iid):
                 self.close_all_positions(iid)
             if not self.portfolio.is_net_long(iid):
                 self._enter(OrderSide.BUY, price)
 
-        # Short breakout: price crosses below entry channel lower
-        elif self._prev_close >= self.dc_entry.lower and close < self.dc_entry.lower:
+        # Short breakout: close breaks below previous bar's entry channel lower
+        elif close < self._prev_lower and self._prev_lower > 0:
             if self.portfolio.is_net_long(iid):
                 self.close_all_positions(iid)
             if not self.portfolio.is_net_short(iid):
@@ -208,4 +238,7 @@ class DonchianBreakout(Strategy):
         """Reset indicators and state for engine reuse (parameter sweeps)."""
         self.dc_entry.reset()
         self.dc_exit.reset()
-        self._prev_close = 0.0
+        self._prev_upper = 0.0
+        self._prev_lower = 0.0
+        self._prev_exit_upper = 0.0
+        self._prev_exit_lower = 0.0
