@@ -237,6 +237,7 @@ def run_sweep(
     strategy_name: str,
     instrument_id: str,
     bar_interval: str,
+    save_sweep: bool = True,
     sweep_dir: str | Path = _DEFAULT_SWEEP_DIR,
     log_level: str = "ERROR",
     verbose: bool = True,
@@ -282,6 +283,8 @@ def run_sweep(
         Instrument string, e.g. ``"BTC-USD-PERP.HYPERLIQUID"``.
     bar_interval
         Bar interval string, e.g. ``"1h"`` or ``"5m"``.
+    save_sweep
+        Whether to save the sweep to a Parquet file.
     sweep_dir
         Directory for Parquet output.  Created if it doesn't exist.
     log_level
@@ -347,17 +350,16 @@ def run_sweep(
     # Deterministic name: re-running the same strategy+instrument+interval
     # overwrites the previous file.  Timestamp is NOT in the filename —
     # _swept_at inside the file records when it was generated.
-    safe_instrument = instrument_id.replace("/", "-")
-    filename = f"{strategy_name}_{safe_instrument}_{bar_interval}.parquet"
-    out_path = Path(sweep_dir) / filename
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    df.to_parquet(out_path, index=False)
+    if save_sweep:
+        safe_instrument = instrument_id.replace("/", "-")
+        filename = f"{strategy_name}_{safe_instrument}_{bar_interval}.parquet"
+        out_path = Path(sweep_dir) / filename
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_parquet(out_path, index=False)
+        print(f"✓ Saved → {out_path}")
 
     if verbose:
-        print(
-            f"\n✓ Sweep complete — {total} combos in {elapsed:.1f}s"
-            f"\n✓ Saved → {out_path}"
-        )
+        print(f"✓ Sweep complete — {total} combos in {elapsed:.1f}s")
 
     return df
 
