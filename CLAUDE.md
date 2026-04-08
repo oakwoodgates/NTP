@@ -80,7 +80,7 @@ Jupyter Notebooks (research + validation)          ← Phase 1 + 3a
         ├── run_sweep()        → data/sweeps/*.parquet
         ├── run_walk_forward() → in-memory DataFrame
         └── load_sweeps()      ← reads from data/sweeps/
-  └── notebooks/charts.py     → reports/*.html (TVLC interactive)
+  └── notebooks/charts.py     → reports/charts/*.html (TVLC interactive)
 
                               PostgreSQL+TimescaleDB (persistence)
                               Redis (cache)
@@ -174,7 +174,7 @@ React Frontend ←WebSocket/REST→ FastAPI Gateway        ← Phase 3b (future)
 - **Sweep results auto-persist to Parquet.** Use `run_sweep()` instead of manual `run_single_backtest` loops. Results land in `data/sweeps/` with deterministic filenames.
 - **Strategy factory pattern.** Each backtest notebook defines a `strategy_factory(engine, params)` callable that `run_sweep` and `run_walk_forward` use. This keeps sweep/validation code strategy-agnostic.
 - **Shared config in Cell 1.** All tuneable values live in Cell 1: `EXCHANGE`, `ASSET`, `INSTRUMENT_ID` (via `make_instrument_id(ASSET, EXCHANGE)`), `BAR_INTERVAL`, `SAVE_TEARSHEET`, `RESULT_NAME`, etc. `RESULT_NAME` is the canonical filename stem used by tearsheet save, TradingView HTML export, and notebook snapshot save.
-- **`notebooks/utils.py` helpers.** `make_instrument_id(asset, exchange)` builds the correct instrument ID format per exchange (Hyperliquid vs Binance). `save_tearsheet(html, result_name)` saves tearsheet HTML to `reports/tearsheets/`. `save_notebook` and `save_notebook_html` copy/export notebooks to `reports/`.
+- **`notebooks/utils.py` helpers.** `make_instrument_id(asset, exchange)` builds the correct instrument ID format per exchange (Hyperliquid vs Binance). `save_tearsheet(html, result_name)` saves tearsheet HTML to `reports/tearsheets/`. `save_notebook` and `save_notebook_html` copy/export notebooks to `reports/notebooks/{category}/` and `reports/html/{category}/` respectively (default `category="backtest"`).
 
 ## Project Structure
 
@@ -226,9 +226,13 @@ data/
 ├── catalog/          # ParquetDataCatalog root (gitignored)
 └── sweeps/           # Sweep result Parquet files (gitignored)
 reports/              # Generated reports (gitignored)
-├── backtest/         # TradingView Lightweight Charts HTML reports
-├── html/             # Exported notebook HTML snapshots
-├── notebooks/        # Copied notebook snapshots (.ipynb)
+├── charts/           # TradingView Lightweight Charts HTML reports
+├── html/
+│   ├── backtest/     # Notebook HTML exports from backtest_*.ipynb
+│   └── validate/     # Notebook HTML exports from validate_strategy.ipynb
+├── notebooks/
+│   ├── backtest/     # Notebook snapshots from backtest_*.ipynb
+│   └── validate/     # Notebook snapshots from validate_strategy.ipynb
 └── tearsheets/       # NT tearsheet HTML (saved when SAVE_TEARSHEET=True)
 tests/                # unit/ and integration/
 ```
