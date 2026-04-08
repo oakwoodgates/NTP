@@ -108,7 +108,7 @@ React Frontend ←WebSocket/REST→ FastAPI Gateway        ← Phase 3b (future)
 - Exchange adapters for Binance (Spot/Futures), Bybit, Hyperliquid, Interactive Brokers, dYdX, Kraken, OKX, and others
 - Sandbox execution adapter for paper trading against live data (SandboxExecutionClient)
 - Redis cache integration (positions, orders, account state)
-- Portfolio analyzer (Sharpe, Sortino, drawdown, profit factor, win rate) — Rust-ported
+- Portfolio analyzer (drawdown, profit factor, win rate) — Rust-ported. Sharpe/Sortino returns are unreliable (see `docs/ANALYZER_RETURNS_CAVEAT.md`).
 - Built-in indicators (EMA, SMA, MACD, Ichimoku, etc.)
 - Execution reconciliation on startup (crash recovery)
 - HTML tearsheet generation
@@ -132,7 +132,7 @@ React Frontend ←WebSocket/REST→ FastAPI Gateway        ← Phase 3b (future)
 
 | Component | Technology | Notes |
 |-----------|-----------|-------|
-| Trading engine | NautilusTrader 1.224.0 | Pinned version, pip dependency |
+| Trading engine | NautilusTrader 1.225.0 | Pinned version, pip dependency |
 | Persistence | asyncpg → PostgreSQL 16 + TimescaleDB | Actors write via asyncpg in executor threads |
 | Migrations | Alembic | |
 | Cache | Redis | NT native cache (positions, orders, account state) |
@@ -349,14 +349,15 @@ The `StreamingActor` (in `src/actors/streaming.py`) subscribes to NT MessageBus 
 - **Slippage modeling matters.** Configure NT's `FillModel`: 0.05-0.1% for top-10 coins, 0.5-2% outside top 100, 5-10% for microcaps.
 - **NETTING mode position stats:** `cache.positions()` returns only the current Position object per instrument-strategy pair — NOT all historical positions. Closed positions are stored as snapshots. For correct analyzer stats, use `cache.position_snapshots() + cache.positions()`.
 - **`analyzer.returns()` requires `calculate_statistics()` first.** Call `calculate_statistics()` immediately after `engine.run()`, before any plotting or stats access.
+- **Analyzer returns stats are unreliable.** NT's `get_performance_stats_returns()` (Sharpe, Sortino, Volatility, returns-based Profit Factor) uses a flawed methodology in v1.225.0 — equity pct_change at event timestamps zero-padded to a daily calendar, which massively deflates Sharpe. PnL-section stats (Total PnL, Win Rate, Expectancy, PnL-based Profit Factor) are correct. See `docs/ANALYZER_RETURNS_CAVEAT.md`. Do not use Sharpe/Sortino for strategy selection or go/no-go decisions until NT fixes this upstream.
 - **Actor callbacks must never block.** Use `self.run_in_executor(callable, args)` for all I/O. Blocking directly in `on_order_filled` or similar callbacks stalls the TradingNode.
 - **asyncpg in Actor executors:** Use `asyncio.run(asyncpg.connect(...))` inside `run_in_executor` callables. A fresh connection per write is acceptable at hourly-bar frequency. No connection pool needed in Phase 2.
-- **Actor has no `create_task`.** NT 1.224.0 Actor uses `run_in_executor` (ThreadPoolExecutor) for I/O, not `create_task`. Strategy has different APIs than Actor.
+- **Actor has no `create_task`.** NT 1.225.0 Actor uses `run_in_executor` (ThreadPoolExecutor) for I/O, not `create_task`. Strategy has different APIs than Actor.
 - **Position events in Actors:** Override `on_event(self, event)` and check `isinstance(event, PositionClosed)`. Actor has `on_order_filled` but no `on_position_closed` callback.
 - **NT financial types to PostgreSQL NUMERIC:** Always `str(event.last_px)`, never `float(event.last_px)`. asyncpg accepts strings for NUMERIC columns and preserves precision.
 - **HL_TESTNET defaults to True.** `run_live.py` requires explicitly setting `HL_TESTNET=false` in `.env` to trade on mainnet. Intentional friction.
 - **HyperliquidDataClientConfig needs NO credentials.** Just `testnet=False` for real market data. Credentials are only needed on the exec client.
-- **HyperliquidExecClientConfig uses `private_key` + `vault_address`** (NOT `wallet_address`). Verified in NT 1.224.0.
+- **HyperliquidExecClientConfig uses `private_key` + `vault_address`** (NOT `wallet_address`). Verified in NT 1.225.0.
 - **Adapter factories must be registered.** Call `node.add_data_client_factory("HYPERLIQUID", HyperliquidLiveDataClientFactory)` and `node.add_exec_client_factory(...)` before `node.build()`.
 - **Sweep filename is deterministic.** `run_sweep()` saves to `{strategy}_{instrument}_{interval}.parquet`. Re-running the same combo overwrites the previous file. The `_swept_at` metadata column inside the file records when it was generated.
 - **Walk-forward is expensive.** `run_walk_forward()` runs the full param grid per fold. With 60 combos × 4 folds = 240 backtests. Budget 3-5 min for hourly bars, 15-20 min for 5m bars over a year.

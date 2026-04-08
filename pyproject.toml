@@ -10,7 +10,7 @@ requires-python = ">=3.12"
 dependencies = [
     # Core engine — PIN THIS. Breaking changes between releases.
     # Check https://github.com/nautechsystems/nautilus_trader/releases before upgrading.
-    "nautilus_trader==1.224.0",
+    "nautilus_trader==1.225.0",
 
     # API
     "fastapi>=0.115.0,<1.0",
