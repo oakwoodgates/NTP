@@ -36,6 +36,7 @@ def save_notebook(
     notebook_filename: str,
     result_filename: str,
     results_dir: str | Path | None = None,
+    category: str = "backtest",
 ) -> Path:
     """Copy a notebook (with outputs) to the results directory.
 
@@ -50,7 +51,11 @@ def save_notebook(
         (e.g., ``"SMACross_BTCUSDT-PERP.BINANCE_4h_f15_s25"``).
         A timestamp is appended automatically.
     results_dir
-        Target directory. Created if it doesn't exist. Default ``"results"``.
+        Target directory. Created if it doesn't exist.
+        Defaults to ``reports/notebooks/{category}``.
+    category
+        Subdirectory under ``reports/notebooks/`` (e.g., ``"backtest"``,
+        ``"validate"``). Ignored when *results_dir* is provided.
 
     Returns
     -------
@@ -59,9 +64,9 @@ def save_notebook(
 
     """
     if results_dir is None:
-        results_dir = _PROJECT_ROOT / "reports" / "notebooks"
+        results_dir = _PROJECT_ROOT / "reports" / "notebooks" / category
     results_path = Path(results_dir)
-    results_path.mkdir(exist_ok=True)
+    results_path.mkdir(exist_ok=True, parents=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     dest = results_path / f"{result_filename}_{timestamp}.ipynb"
@@ -75,6 +80,7 @@ def save_notebook_html(
     notebook_filename: str,
     result_filename: str,
     results_dir: str | Path | None = None,
+    category: str = "backtest",
 ) -> Path:
     """Export a notebook to a self-contained HTML file in the results directory.
 
@@ -89,7 +95,11 @@ def save_notebook_html(
         (e.g., ``"SMACross_BTCUSDT-PERP.BINANCE_4h_f15_s25"``).
         A timestamp is appended automatically.
     results_dir
-        Target directory. Created if it doesn't exist. Default ``"results"``.
+        Target directory. Created if it doesn't exist.
+        Defaults to ``reports/html/{category}``.
+    category
+        Subdirectory under ``reports/html/`` (e.g., ``"backtest"``,
+        ``"validate"``). Ignored when *results_dir* is provided.
 
     Returns
     -------
@@ -98,9 +108,9 @@ def save_notebook_html(
 
     """
     if results_dir is None:
-        results_dir = _PROJECT_ROOT / "reports" / "html"
+        results_dir = _PROJECT_ROOT / "reports" / "html" / category
     results_path = Path(results_dir)
-    results_path.mkdir(exist_ok=True)
+    results_path.mkdir(exist_ok=True, parents=True)
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M")
     dest = results_path / f"{result_filename}_{timestamp}.html"

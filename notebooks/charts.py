@@ -27,7 +27,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-_REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports" / "backtest"
+_REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports" / "charts"
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 import numpy as np
