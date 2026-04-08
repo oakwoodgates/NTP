@@ -22,6 +22,7 @@ from nautilus_trader.model.objects import Money
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from nautilus_trader.common.component import LogGuard
     from nautilus_trader.model.data import Bar
     from nautilus_trader.model.identifiers import Venue
     from nautilus_trader.model.instruments import Instrument
@@ -29,6 +30,32 @@ if TYPE_CHECKING:
 
 # ── Default sweep output directory ───────────────────────────────────────────
 _DEFAULT_SWEEP_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "sweeps"
+
+
+# ── Rust LogGuard singleton ──────────────────────────────────────────────────
+# NT 1.225.0's Rust logging subsystem panics if re-initialized after the
+# LogGuard is freed (i.e. after an engine.dispose()).  BacktestNode solves
+# this by capturing the guard once and keeping it alive (node.py:369-374).
+# We mirror that pattern here so that make_engine() can create unlimited
+# fresh engines without triggering the Rust panic.
+_log_guard: LogGuard | None = None
+
+
+def _ensure_log_guard(log_level: str = "ERROR") -> None:
+    """Initialize the Rust logger once and capture the LogGuard."""
+    global _log_guard
+    if _log_guard is not None:
+        return
+    init_engine = BacktestEngine(
+        config=BacktestEngineConfig(logging=LoggingConfig(log_level=log_level)),
+    )
+    _log_guard = init_engine.kernel.get_log_guard()
+    init_engine.dispose()
+
+
+def _native_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Convert numpy scalars to Python native types."""
+    return {k: v.item() if hasattr(v, "item") else v for k, v in params.items()}
 
 
 def make_engine(
@@ -54,9 +81,8 @@ def make_engine(
         NT log level. Default ``"ERROR"`` to avoid stdout flooding.
 
     """
-    engine = BacktestEngine(config=BacktestEngineConfig(
-        logging=LoggingConfig(log_level=log_level),
-    ))
+    _ensure_log_guard(log_level)
+    engine = BacktestEngine(config=BacktestEngineConfig())
     engine.add_venue(
         venue=venue,
         oms_type=OmsType.NETTING,
@@ -600,7 +626,7 @@ def run_walk_forward(
 
         best_idx = valid[select_by].idxmax()
         param_keys = list(param_combos[0].keys())
-        best_params = {k: train_df.loc[best_idx, k] for k in param_keys}
+        best_params = _native_params({k: train_df.loc[best_idx, k] for k in param_keys})
         best_train_pnl = float(train_df.loc[best_idx, "total_pnl"])
 
         if verbose:
