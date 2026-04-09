@@ -8,7 +8,7 @@ Requires HL_TESTNET=false in .env for mainnet. Defaults to true (testnet).
 Do NOT run this until paper trading (run_sandbox.py) has been stable for 2+ weeks.
 
 Configure via .env or environment variables:
-    STRATEGY=EMACross         # EMACross | SMACross | EMACrossATR | MACDRSI
+    STRATEGY=MACross          # MACross | …Cross | MACrossLongOnly | …CrossLongOnly | MACrossATR | MACDRSI
     INSTRUMENT_ID=BTC-USD-PERP.HYPERLIQUID
     BAR_INTERVAL=1-HOUR-LAST-EXTERNAL
     TRADE_NOTIONAL=100        # USD notional per trade (all strategies)
@@ -62,7 +62,10 @@ def _build_strategy(
 
     To customize strategy-specific parameters, edit the defaults below.
     """
-    _ma_cross_types = {"MACross": "EMA", "EMACross": "EMA", "SMACross": "SMA", "HMACross": "HMA"}
+    _ma_cross_types = {
+        "MACross": "EMA", "EMACross": "EMA", "SMACross": "SMA", "HMACross": "HMA",
+        "DEMACross": "DEMA", "AMACross": "AMA", "VIDYACross": "VIDYA",
+    }
     if strategy_name in _ma_cross_types:
         from src.strategies.ma_cross import MACross, MACrossConfig
         ma_type = _ma_cross_types[strategy_name]
@@ -78,20 +81,41 @@ def _build_strategy(
             "ma_type": ma_type, "fast": fast, "slow": slow, "notional": str(trade_notional),
         }
 
-    if strategy_name == "EMACrossATR":
-        from src.strategies.ema_cross_atr import EMACrossATR, EMACrossATRConfig
-        fast, slow, atr = 20, 50, 14
-        sl_mult, tp_mult = 1.5, 3.0
-        return EMACrossATR(EMACrossATRConfig(
+    _ma_cross_lo_types = {
+        "MACrossLongOnly": "EMA", "EMACrossLongOnly": "EMA",
+        "SMACrossLongOnly": "SMA", "HMACrossLongOnly": "HMA",
+        "DEMACrossLongOnly": "DEMA", "AMACrossLongOnly": "AMA",
+        "VIDYACrossLongOnly": "VIDYA",
+    }
+    if strategy_name in _ma_cross_lo_types:
+        from src.strategies.ma_cross_long_only import MACrossLongOnly, MACrossLongOnlyConfig
+        ma_type = _ma_cross_lo_types[strategy_name]
+        fast, slow = 10, 20
+        return MACrossLongOnly(MACrossLongOnlyConfig(
             instrument_id=instrument_id,
             bar_type=bar_type,
             trade_notional=trade_notional,
-            fast_ema_period=fast,
-            slow_ema_period=slow,
+            ma_type=ma_type,
+            fast_period=fast,
+            slow_period=slow,
+        )), f"MACrossLongOnly-{ma_type}-{fast}-{slow}", {
+            "ma_type": ma_type, "fast": fast, "slow": slow, "notional": str(trade_notional),
+        }
+
+    if strategy_name == "MACrossATR":
+        from src.strategies.ma_cross_atr import MACrossATR, MACrossATRConfig
+        fast, slow, atr = 20, 50, 14
+        sl_mult, tp_mult = 1.5, 3.0
+        return MACrossATR(MACrossATRConfig(
+            instrument_id=instrument_id,
+            bar_type=bar_type,
+            trade_notional=trade_notional,
+            fast_period=fast,
+            slow_period=slow,
             atr_period=atr,
             atr_sl_multiplier=sl_mult,
             atr_tp_multiplier=tp_mult,
-        )), f"EMACrossATR-{fast}-{slow}-{atr}", {
+        )), f"MACrossATR-{fast}-{slow}-{atr}", {
             "fast": fast, "slow": slow, "atr": atr,
             "sl_mult": sl_mult, "tp_mult": tp_mult, "notional": str(trade_notional),
         }
@@ -112,7 +136,13 @@ def _build_strategy(
             "signal": signal, "rsi": rsi, "notional": str(trade_notional),
         }
 
-    valid = ["MACross", "EMACross", "SMACross", "HMACross", "EMACrossATR", "MACDRSI"]
+    valid = [
+        "MACross", "EMACross", "SMACross", "HMACross",
+        "DEMACross", "AMACross", "VIDYACross",
+        "MACrossLongOnly", "EMACrossLongOnly", "SMACrossLongOnly", "HMACrossLongOnly",
+        "DEMACrossLongOnly", "AMACrossLongOnly", "VIDYACrossLongOnly",
+        "MACrossATR", "MACDRSI",
+    ]
     msg = f"Unknown strategy: {strategy_name!r}. Valid: {valid}"
     raise ValueError(msg)
 

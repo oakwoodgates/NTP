@@ -109,7 +109,7 @@ React Frontend ←WebSocket/REST→ FastAPI Gateway        ← Phase 3b (future)
 - Sandbox execution adapter for paper trading against live data (SandboxExecutionClient)
 - Redis cache integration (positions, orders, account state)
 - Portfolio analyzer (drawdown, profit factor, win rate) — Rust-ported. Sharpe/Sortino returns are unreliable (see `docs/ANALYZER_RETURNS_CAVEAT.md`).
-- Built-in indicators (EMA, SMA, MACD, Ichimoku, etc.)
+- Built-in indicators (EMA, SMA, HMA, DEMA, AMA/KAMA, VIDYA, MACD, Ichimoku, etc.) and `MovingAverageFactory` for generic MA construction
 - Execution reconciliation on startup (crash recovery)
 - HTML tearsheet generation
 

@@ -1,4 +1,4 @@
-"""Moving-average crossover strategy (EMA / SMA / HMA via MovingAverageFactory)."""
+"""Moving-average crossover strategy (EMA / SMA / HMA / DEMA / AMA / VIDYA)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING
 
 from nautilus_trader.config import PositiveInt
 from nautilus_trader.core.correctness import PyCondition
-from nautilus_trader.indicators import MovingAverageFactory, MovingAverageType
+from nautilus_trader.indicators import (
+    AdaptiveMovingAverage,
+    MovingAverageFactory,
+    MovingAverageType,
+)
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import InstrumentId
@@ -19,9 +23,12 @@ if TYPE_CHECKING:
     from nautilus_trader.model.instruments import Instrument
 
 _MA_TYPE_LOOKUP: dict[str, MovingAverageType] = {
-    "SMA": MovingAverageType.SIMPLE,
-    "EMA": MovingAverageType.EXPONENTIAL,
-    "HMA": MovingAverageType.HULL,
+    "SMA":   MovingAverageType.SIMPLE,
+    "EMA":   MovingAverageType.EXPONENTIAL,
+    "HMA":   MovingAverageType.HULL,
+    "DEMA":  MovingAverageType.DOUBLE_EXPONENTIAL,
+    "AMA":   MovingAverageType.ADAPTIVE,
+    "VIDYA": MovingAverageType.VARIABLE_INDEX_DYNAMIC,
 }
 
 
@@ -39,12 +46,18 @@ class MACrossConfig(StrategyConfig, frozen=True):
         time as ``trade_notional / current_price``, so each trade risks
         approximately the same dollar amount regardless of asset price.
     ma_type : str, default "EMA"
-        Moving average type: ``"EMA"`` | ``"SMA"`` | ``"HMA"``.
-        Passed to :class:`MovingAverageFactory` internally.
+        Moving average type: ``"EMA"`` | ``"SMA"`` | ``"HMA"`` |
+        ``"DEMA"`` | ``"AMA"`` | ``"VIDYA"``.
     fast_period : int, default 10
         The fast MA period.
     slow_period : int, default 20
         The slow MA period.
+    ama_alpha_fast : int, default 2
+        Fast smoothing constant period for AMA (Kaufman).
+        Only used when ``ma_type="AMA"``.
+    ama_alpha_slow : int, default 30
+        Slow smoothing constant period for AMA (Kaufman).
+        Only used when ``ma_type="AMA"``.
     close_positions_on_stop : bool, default True
         If all open positions should be closed on strategy stop.
         Set to False to stop the strategy without liquidating (e.g., during
@@ -58,6 +71,8 @@ class MACrossConfig(StrategyConfig, frozen=True):
     ma_type: str = "EMA"
     fast_period: PositiveInt = 10
     slow_period: PositiveInt = 20
+    ama_alpha_fast: PositiveInt = 2
+    ama_alpha_slow: PositiveInt = 30
     close_positions_on_stop: bool = True
 
 
@@ -91,8 +106,17 @@ class MACross(Strategy):
 
         self.instrument: Instrument | None = None
         ma_enum = _MA_TYPE_LOOKUP[config.ma_type]
-        self.fast_ma = MovingAverageFactory.create(config.fast_period, ma_enum)
-        self.slow_ma = MovingAverageFactory.create(config.slow_period, ma_enum)
+        # AMA requires 3 constructor args; MovingAverageFactory returns None for it.
+        if config.ma_type == "AMA":
+            self.fast_ma = AdaptiveMovingAverage(
+                config.fast_period, config.ama_alpha_fast, config.ama_alpha_slow,
+            )
+            self.slow_ma = AdaptiveMovingAverage(
+                config.slow_period, config.ama_alpha_fast, config.ama_alpha_slow,
+            )
+        else:
+            self.fast_ma = MovingAverageFactory.create(config.fast_period, ma_enum)
+            self.slow_ma = MovingAverageFactory.create(config.slow_period, ma_enum)
 
     def on_start(self) -> None:
         """Register indicators, request historical bars, subscribe to bars."""

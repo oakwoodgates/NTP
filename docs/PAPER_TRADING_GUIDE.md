@@ -36,18 +36,18 @@ alembic upgrade head       # create tables (first time only)
 python scripts/run_sandbox.py
 ```
 
-Default config: EMACross(10,20) on BTC-USD-PERP, 1-hour bars, 0.001 BTC per trade.
+Default config: MACross-EMA(10,20) on BTC-USD-PERP, 1-hour bars, $100 USD notional per trade.
 
 **What happens:**
 - Registers a `strategy_runs` row in PostgreSQL with a unique `run_id`
 - Connects to live Hyperliquid market data (real prices, simulated execution)
-- EMACross generates trades based on EMA crossovers
+- MACross generates trades based on moving average crossovers (EMA by default)
 - Every fill → PersistenceActor writes to `order_fills` + AlertActor sends Telegram
 - Every position close → writes to `positions` + Telegram
 - Every 60s → account balance snapshot to `account_snapshots`
 - Ctrl+C → graceful shutdown, `strategy_runs.stopped_at` updated
 
-**First trade timing:** EMACross needs 20 bars (slow EMA period) before generating signals. With 1-hour bars and historical bar request on start, the first signal may come within a few hours.
+**First trade timing:** MACross needs `slow_period` bars before generating signals. With default EMA(10,20) on 1-hour bars and historical bar request on start, the first signal may come within a few hours.
 
 ## 3b. Start Paper Trading (Docker)
 
@@ -128,8 +128,8 @@ You should receive messages for fills, position closes (WIN/LOSS with PnL), and 
 Change these in `.env`:
 
 ```bash
-# Strategy: EMACross | SMACross | EMACrossATR | MACDRSI
-STRATEGY=EMACross
+# Strategy: MACross | …Cross | MACrossLongOnly | …CrossLongOnly | MACrossATR | MACDRSI
+STRATEGY=MACross
 
 # Instrument: BTC | ETH | SOL
 INSTRUMENT_ID=BTC-USD-PERP.HYPERLIQUID
@@ -145,11 +145,33 @@ Then restart: Ctrl+C the running node, `python scripts/run_sandbox.py`.
 
 ### Available strategies
 
+**MA crossover variants** (all use unified `ma_cross.py` via `MovingAverageFactory`):
+
+| Strategy | MA Type | Description | Default params |
+|----------|---------|-------------|----------------|
+| MACross / EMACross | EMA | Exponential MA crossover | fast=10, slow=20 |
+| SMACross | SMA | Simple MA crossover | fast=10, slow=20 |
+| HMACross | HMA | Hull MA crossover (less lag) | fast=10, slow=20 |
+| DEMACross | DEMA | Double Exponential MA crossover (smoother) | fast=10, slow=20 |
+| AMACross | AMA | Kaufman Adaptive MA crossover (volatility-adaptive) | fast=10, slow=20 |
+| VIDYACross | VIDYA | Variable Index Dynamic Average crossover (CMO-adaptive) | fast=10, slow=20 |
+
+**MA crossover long-only variants** (all use unified `ma_cross_long_only.py` — never opens short positions):
+
+| Strategy | MA Type | Description | Default params |
+|----------|---------|-------------|----------------|
+| MACrossLongOnly / EMACrossLongOnly | EMA | Exponential MA long-only | fast=10, slow=20 |
+| SMACrossLongOnly | SMA | Simple MA long-only | fast=10, slow=20 |
+| HMACrossLongOnly | HMA | Hull MA long-only | fast=10, slow=20 |
+| DEMACrossLongOnly | DEMA | Double Exponential MA long-only | fast=10, slow=20 |
+| AMACrossLongOnly | AMA | Kaufman Adaptive MA long-only | fast=10, slow=20 |
+| VIDYACrossLongOnly | VIDYA | Variable Index Dynamic Average long-only | fast=10, slow=20 |
+
+**Other strategies:**
+
 | Strategy | Description | Key params (edit in `_build_strategy()`) |
 |----------|-------------|------------------------------------------|
-| EMACross | Simple EMA crossover | fast=10, slow=20 |
-| SMACross | Simple SMA crossover | fast=10, slow=20 |
-| EMACrossATR | EMA cross + ATR bracket TP/SL | fast=20, slow=50, atr=14, sl=1.5x, tp=3.0x |
+| MACrossATR | EMA cross + ATR bracket TP/SL | fast=20, slow=50, atr=14, sl=1.5x, tp=3.0x |
 | MACDRSI | MACD + RSI confluence | macd 12/26/9, rsi=14 |
 
 ### Available instruments
@@ -174,7 +196,7 @@ Then restart: Ctrl+C the running node, `python scripts/run_sandbox.py`.
 
 ## 7. NautilusTrader upgrades
 
-This project currently pins NautilusTrader `1.224.0` in `pyproject.toml`. When
+This project currently pins NautilusTrader `1.225.0` in `pyproject.toml`. When
 upgrading NautilusTrader in future:
 
 - Re-run the canonical EMA Cross backtest notebook to sanity-check P&L,

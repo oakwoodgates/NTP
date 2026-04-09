@@ -1,13 +1,13 @@
-"""EMA regime-based strategy with breakout confirmation entry and trailing stop exit.
+"""MA regime-based strategy with breakout confirmation entry and trailing stop exit (EMA / SMA / HMA / DEMA / AMA / VIDYA).
 
-Adapted from NautilusTrader's example ``ema_cross_stop_entry.py``.  Combines
+Adapted from NautilusTrader's example ``ema_cross_stop_entry.py`` (NT repo).  Combines
 **breakout confirmation** with **trailing stop exit** for a classic
-trend-following setup: only enter if the next bar confirms the EMA regime
+trend-following setup: only enter if the next bar confirms the MA regime
 by breaking beyond the previous bar's extreme, then trail the stop to let
 winners run.
 
 Order flow:
-1. Each bar while flat + EMA regime aligned: record a breakout trigger level.
+1. Each bar while flat + MA regime aligned: record a breakout trigger level.
    - BUY: trigger at bar.high + (entry_offset_atr × ATR)
    - SELL: trigger at bar.low - (entry_offset_atr × ATR)
 2. On the NEXT bar: if bar.high >= trigger (BUY) or bar.low <= trigger
@@ -17,15 +17,15 @@ Order flow:
 4. Trailing stop fills -> position closed -> re-entry on next bar if regime
    still holds.
 
-Behavioral differences from EMACrossTrailingStop:
-- EMACrossTrailingStop enters immediately on any bar while in regime.
-  EMACrossStopEntry requires the next bar to break beyond the previous
-  bar's high/low — filtering false EMA signals via breakout confirmation.
+Behavioral differences from MACrossTrailingStop:
+- MACrossTrailingStop enters immediately on any bar while in regime.
+  MACrossStopEntry requires the next bar to break beyond the previous
+  bar's high/low — filtering false MA signals via breakout confirmation.
 - Both use trailing stop exit.  Both are regime-based (re-enter after exit
   if regime holds).
 
-No EMA reversal handling — the trailing stop is the sole exit mechanism.
-The strategy does NOT close on EMA flip while in position.
+No MA reversal handling — the trailing stop is the sole exit mechanism.
+The strategy does NOT close on MA flip while in position.
 
 NOTE — Bar-based backtesting:
   The original NT example uses MarketIfTouched orders, which only trigger
@@ -52,7 +52,12 @@ from typing import TYPE_CHECKING
 from nautilus_trader.config import PositiveFloat, PositiveInt
 from nautilus_trader.core.correctness import PyCondition
 from nautilus_trader.core.message import Event
-from nautilus_trader.indicators import AverageTrueRange, ExponentialMovingAverage
+from nautilus_trader.indicators import (
+    AdaptiveMovingAverage,
+    AverageTrueRange,
+    MovingAverageFactory,
+    MovingAverageType,
+)
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import (
     OrderSide,
@@ -74,9 +79,18 @@ from nautilus_trader.trading.strategy import Strategy
 if TYPE_CHECKING:
     from nautilus_trader.model.instruments import Instrument
 
+_MA_TYPE_LOOKUP: dict[str, MovingAverageType] = {
+    "SMA":   MovingAverageType.SIMPLE,
+    "EMA":   MovingAverageType.EXPONENTIAL,
+    "HMA":   MovingAverageType.HULL,
+    "DEMA":  MovingAverageType.DOUBLE_EXPONENTIAL,
+    "AMA":   MovingAverageType.ADAPTIVE,
+    "VIDYA": MovingAverageType.VARIABLE_INDEX_DYNAMIC,
+}
 
-class EMACrossStopEntryConfig(StrategyConfig, frozen=True):
-    """Configuration for EMACrossStopEntry strategy.
+
+class MACrossStopEntryConfig(StrategyConfig, frozen=True):
+    """Configuration for MACrossStopEntry strategy.
 
     Parameters
     ----------
@@ -87,10 +101,13 @@ class EMACrossStopEntryConfig(StrategyConfig, frozen=True):
     trade_notional : Decimal
         The USD notional amount per trade. Quantity is computed dynamically
         from trade_notional / entry_price at each entry.
-    fast_ema_period : int, default 10
-        The fast EMA period.
-    slow_ema_period : int, default 20
-        The slow EMA period.
+    ma_type : str, default "EMA"
+        Moving average type: ``"EMA"`` | ``"SMA"`` | ``"HMA"`` |
+        ``"DEMA"`` | ``"AMA"`` | ``"VIDYA"``.
+    fast_period : int, default 10
+        The fast MA period.
+    slow_period : int, default 20
+        The slow MA period.
     atr_period : int, default 20
         The ATR period for trailing stop offset sizing.
     trailing_atr_multiple : float, default 3.0
@@ -108,6 +125,12 @@ class EMACrossStopEntryConfig(StrategyConfig, frozen=True):
     emulation_trigger : str, default "NO_TRIGGER"
         Emulation trigger for trailing stop orders.  ``"NO_TRIGGER"`` means
         the exchange (or SimulatedExchange) manages the trailing stop natively.
+    ama_alpha_fast : int, default 2
+        Fast smoothing constant period for AMA (Kaufman).
+        Only used when ``ma_type="AMA"``.
+    ama_alpha_slow : int, default 30
+        Slow smoothing constant period for AMA (Kaufman).
+        Only used when ``ma_type="AMA"``.
     close_positions_on_stop : bool, default True
         If all open positions should be closed on strategy stop.
 
@@ -116,53 +139,68 @@ class EMACrossStopEntryConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
     bar_type: BarType
     trade_notional: Decimal
-    fast_ema_period: PositiveInt = 10
-    slow_ema_period: PositiveInt = 20
+    ma_type: str = "EMA"
+    fast_period: PositiveInt = 10
+    slow_period: PositiveInt = 20
     atr_period: PositiveInt = 20
     trailing_atr_multiple: PositiveFloat = 3.0
     entry_offset_atr: PositiveFloat = 0.25
     trailing_offset_type: str = "PRICE"
     trigger_type: str = "LAST_PRICE"
     emulation_trigger: str = "NO_TRIGGER"
+    ama_alpha_fast: PositiveInt = 2
+    ama_alpha_slow: PositiveInt = 30
     close_positions_on_stop: bool = True
 
 
-class EMACrossStopEntry(Strategy):
-    """EMA regime-based strategy with breakout confirmation and trailing stop.
+class MACrossStopEntry(Strategy):
+    """MA regime-based strategy with breakout confirmation and trailing stop.
 
-    On each bar while flat and EMA regime aligned, records a breakout trigger
+    On each bar while flat and MA regime aligned, records a breakout trigger
     level (bar.high + offset for BUY, bar.low - offset for SELL).  On the
     next bar, if the bar's range crosses the trigger, enters via MARKET order.
 
     Exits via trailing stop market order submitted on position open.
-    No EMA reversal handling — the trailing stop is the sole exit.
+    No MA reversal handling — the trailing stop is the sole exit.
 
-    After a trailing stop exit, re-enters on the next bar if the EMA regime
+    After a trailing stop exit, re-enters on the next bar if the MA regime
     still holds (regime-based, not crossover-based).
 
     Parameters
     ----------
-    config : EMACrossStopEntryConfig
+    config : MACrossStopEntryConfig
         The configuration for the instance.
 
     Raises
     ------
     ValueError
-        If fast_ema_period >= slow_ema_period.
+        If ``config.fast_period`` is not less than ``config.slow_period``.
+        If ``config.ma_type`` is not a recognised type.
 
     """
 
-    def __init__(self, config: EMACrossStopEntryConfig) -> None:
+    def __init__(self, config: MACrossStopEntryConfig) -> None:
         PyCondition.is_true(
-            config.fast_ema_period < config.slow_ema_period,
-            f"{config.fast_ema_period=} must be less than {config.slow_ema_period=}",
+            config.fast_period < config.slow_period,
+            f"{config.fast_period=} must be less than {config.slow_period=}",
         )
+        PyCondition.is_in(config.ma_type, _MA_TYPE_LOOKUP, "config.ma_type", "_MA_TYPE_LOOKUP")
         super().__init__(config)
 
         self.instrument: Instrument | None = None
 
-        self.fast_ema = ExponentialMovingAverage(config.fast_ema_period)
-        self.slow_ema = ExponentialMovingAverage(config.slow_ema_period)
+        ma_enum = _MA_TYPE_LOOKUP[config.ma_type]
+        if config.ma_type == "AMA":
+            self.fast_ma = AdaptiveMovingAverage(
+                config.fast_period, config.ama_alpha_fast, config.ama_alpha_slow,
+            )
+            self.slow_ma = AdaptiveMovingAverage(
+                config.slow_period, config.ama_alpha_fast, config.ama_alpha_slow,
+            )
+        else:
+            self.fast_ma = MovingAverageFactory.create(config.fast_period, ma_enum)
+            self.slow_ma = MovingAverageFactory.create(config.slow_period, ma_enum)
+
         self.atr = AverageTrueRange(config.atr_period)
 
         # Order/position state for lifecycle management
@@ -182,11 +220,11 @@ class EMACrossStopEntry(Strategy):
             self.stop()
             return
 
-        self.register_indicator_for_bars(self.config.bar_type, self.fast_ema)
-        self.register_indicator_for_bars(self.config.bar_type, self.slow_ema)
+        self.register_indicator_for_bars(self.config.bar_type, self.fast_ma)
+        self.register_indicator_for_bars(self.config.bar_type, self.slow_ma)
         self.register_indicator_for_bars(self.config.bar_type, self.atr)
 
-        lookback_bars = max(self.config.slow_ema_period, self.config.atr_period) + 10
+        lookback_bars = max(self.config.slow_period, self.config.atr_period) + 10
         self.request_bars(
             self.config.bar_type,
             start=self._clock.utc_now() - timedelta(hours=lookback_bars),
@@ -230,7 +268,7 @@ class EMACrossStopEntry(Strategy):
 
         offset = self.atr.value * self.config.entry_offset_atr
 
-        if self.fast_ema.value >= self.slow_ema.value:
+        if self.fast_ma.value >= self.slow_ma.value:
             self._pending_side = OrderSide.BUY
             self._pending_trigger = self.instrument.make_price(bar.high + offset)
         else:
@@ -336,8 +374,8 @@ class EMACrossStopEntry(Strategy):
 
     def on_reset(self) -> None:
         """Reset indicators and state for engine reuse (parameter sweeps)."""
-        self.fast_ema.reset()
-        self.slow_ema.reset()
+        self.fast_ma.reset()
+        self.slow_ma.reset()
         self.atr.reset()
         self.entry = None
         self.trailing_stop = None

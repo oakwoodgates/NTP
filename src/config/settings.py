@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     # Trading
     trader_id: str = "TRADER-001"
-    strategy: str = "MACross"  # MACross | EMACrossATR | MACDRSI | …
+    strategy: str = "MACross"  # MACross | …Cross | MACrossLongOnly | …CrossLongOnly | MACrossATR | MACDRSI
     instrument_id: str = "BTC-USD-PERP.HYPERLIQUID"
     bar_interval: str = "1-HOUR-LAST-EXTERNAL"
     trade_notional: str = "100"  # USD notional per trade

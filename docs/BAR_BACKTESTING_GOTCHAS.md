@@ -100,7 +100,7 @@ Unlike MIT orders, `TrailingStopMarketOrder` with `emulation_trigger="NO_TRIGGER
 - These synthetic ticks (O, H, L, C) are fed to the matching core directly, which updates the trailing offset and evaluates the stop trigger
 - The key difference: MIT trigger evaluation requires initialized bid/ask; stop trigger evaluation uses the internal trade tick stream
 
-Proven by `ema_cross_trailing_stop.py` which uses `TrailingStopMarketOrder` with `NO_TRIGGER` and produces correct fills in bar backtests.
+Proven by `ma_cross_trailing_stop.py` which uses `TrailingStopMarketOrder` with `NO_TRIGGER` and produces correct fills in bar backtests.
 
 ---
 
@@ -142,13 +142,13 @@ def on_event(self, event):
             self._submit_trailing_stop(...)
 ```
 
-NT's own example (`ema_cross_stop_entry.py`) handles both entry and trailing stop fills in a single `OrderFilled` block — but it submits the trailing stop in `OrderFilled` too, so the ordering doesn't matter. Our pattern (submitting in `PositionOpened`) is safer because the position is guaranteed to exist at that point.
+NT's own example (`ma_cross_stop_entry.py`) handles both entry and trailing stop fills in a single `OrderFilled` block — but it submits the trailing stop in `OrderFilled` too, so the ordering doesn't matter. Our pattern (submitting in `PositionOpened`) is safer because the position is guaranteed to exist at that point.
 
 ---
 
 ## 5. Quote tick guard blocks trailing stop submission
 
-NT's example `ema_cross_trailing_stop.py` checks `cache.quote_tick()` before submitting trailing stops:
+NT's example trailing stop strategy checks `cache.quote_tick()` before submitting trailing stops:
 
 ```python
 last_quote = self.cache.quote_tick(self.config.instrument_id)
@@ -159,7 +159,7 @@ if not last_quote:
 
 In bar-only backtests, no `QuoteTick` data exists in the cache (quotes come from `subscribe_quote_ticks`, but synthetic quotes from bar decomposition are processed internally — same issue as section 2). The guard silently returns and the trailing stop is **never submitted**. The position stays open with no exit mechanism.
 
-**Fix:** Remove the quote check. The trailing stop only needs ATR for its offset calculation, not a current quote price. See `ema_cross_trailing_stop.py` lines 236-239 (commented out) for the fix applied to our codebase.
+**Fix:** Remove the quote check. The trailing stop only needs ATR for its offset calculation, not a current quote price. See `ma_cross_trailing_stop.py` for the fix applied to our codebase (quote check removed entirely).
 
 ---
 

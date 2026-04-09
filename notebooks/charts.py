@@ -36,13 +36,16 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from nautilus_trader.model.currencies import USDC
 from nautilus_trader.indicators import (
+    AdaptiveMovingAverage,
     BollingerBands,
     DonchianChannel,
+    DoubleExponentialMovingAverage,
     ExponentialMovingAverage,
     HullMovingAverage,
     MovingAverageConvergenceDivergence,
     RelativeStrengthIndex,
     SimpleMovingAverage,
+    VariableIndexDynamicAverage,
 )
 from nautilus_trader.model.data import Bar
 
@@ -65,7 +68,17 @@ _FLAG_TEXT = "#777777"
 
 # ── MA class dispatch ────────────────────────────────────────────────────────
 
-_MA_CLASSES = {"EMA": ExponentialMovingAverage, "SMA": SimpleMovingAverage, "HMA": HullMovingAverage}
+_MA_CLASSES: dict[str, type] = {
+    "EMA": ExponentialMovingAverage, "SMA": SimpleMovingAverage, "HMA": HullMovingAverage,
+    "DEMA": DoubleExponentialMovingAverage, "VIDYA": VariableIndexDynamicAverage,
+}
+
+
+def _make_nt_ma(ma_type: str, period: int) -> Any:
+    """Construct an NT moving-average indicator, with AMA special-casing."""
+    if ma_type == "AMA":
+        return AdaptiveMovingAverage(period, 2, 30)
+    return _MA_CLASSES[ma_type](period)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -137,9 +150,8 @@ def _bars_to_ma_ohlcv(
     ma_type: str = "EMA",
 ) -> pd.DataFrame:
     """Convert NT Bar list to OHLCV DataFrame with MA columns appended."""
-    ma_cls = _MA_CLASSES[ma_type]
-    fast_ma = ma_cls(fast_period)
-    slow_ma = ma_cls(slow_period)
+    fast_ma = _make_nt_ma(ma_type, fast_period)
+    slow_ma = _make_nt_ma(ma_type, slow_period)
 
     rows = []
     for bar in bars:
@@ -1146,7 +1158,7 @@ def _bars_to_df(bars: list) -> pd.DataFrame:
 
 
 def _ma_series(close: pd.Series, period: int, ma_type: str = "EMA") -> pd.Series:
-    """MA using pandas — EMA (ewm), SMA (rolling), or HMA (Hull)."""
+    """MA using pandas — EMA, SMA, HMA, DEMA, AMA (KAMA), or VIDYA."""
     if ma_type == "SMA":
         return close.rolling(window=period).mean()
     if ma_type == "HMA":
@@ -1160,6 +1172,15 @@ def _ma_series(close: pd.Series, period: int, ma_type: str = "EMA") -> pd.Series
             )
 
         return _wma(2 * _wma(close, half) - _wma(close, period), sqrt_p)
+    if ma_type == "DEMA":
+        import pandas_ta
+        return pandas_ta.dema(close, length=period)
+    if ma_type == "AMA":
+        import pandas_ta
+        return pandas_ta.kama(close, length=period, fast=2, slow=30)
+    if ma_type == "VIDYA":
+        import pandas_ta
+        return pandas_ta.vidya(close, length=period)
     return close.ewm(span=period, adjust=False).mean()
 
 
