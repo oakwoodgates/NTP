@@ -10,7 +10,7 @@ Waiting for an upstream fix in NautilusTrader before 2.0.
 
 The `analyzer.get_performance_stats_returns()` methodology changed between versions. Discovered during the v1.224.0 to v1.225.0 upgrade when comparing saved notebook outputs.
 
-### Concrete example: EMACrossTP on BTCUSDT-PERP.BINANCE 1d
+### Concrete example: MACrossTP on BTCUSDT-PERP.BINANCE 1d
 
 Trade-level stats are identical across versions:
 

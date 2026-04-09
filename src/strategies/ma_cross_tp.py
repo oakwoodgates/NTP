@@ -1,11 +1,11 @@
-"""EMA crossover strategy with percentage-based take-profit exit.
+"""MA crossover strategy with percentage-based take-profit exit (EMA / SMA / HMA / DEMA / AMA / VIDYA).
 
-Uses EMA crossover for entries (fires once per cross, not every bar in
-regime).  Exits via bar-close take-profit check or EMA cross reversal —
+Uses MA crossover for entries (fires once per cross, not every bar in
+regime).  Exits via bar-close take-profit check or MA cross reversal —
 whichever comes first.
 
 After a TP exit the strategy goes flat and waits for the next fresh
-crossover before re-entering.  EMA reversal while in position closes
+crossover before re-entering.  MA reversal while in position closes
 the current position and immediately enters the opposite direction.
 
 Take-profit is evaluated on bar close: for longs, ``bar.close >= entry
@@ -23,7 +23,11 @@ from typing import TYPE_CHECKING
 from nautilus_trader.config import PositiveFloat, PositiveInt
 from nautilus_trader.core.correctness import PyCondition
 from nautilus_trader.core.message import Event
-from nautilus_trader.indicators import ExponentialMovingAverage
+from nautilus_trader.indicators import (
+    AdaptiveMovingAverage,
+    MovingAverageFactory,
+    MovingAverageType,
+)
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.events import OrderFilled
@@ -35,9 +39,18 @@ from nautilus_trader.trading.strategy import Strategy
 if TYPE_CHECKING:
     from nautilus_trader.model.instruments import Instrument
 
+_MA_TYPE_LOOKUP: dict[str, MovingAverageType] = {
+    "SMA":   MovingAverageType.SIMPLE,
+    "EMA":   MovingAverageType.EXPONENTIAL,
+    "HMA":   MovingAverageType.HULL,
+    "DEMA":  MovingAverageType.DOUBLE_EXPONENTIAL,
+    "AMA":   MovingAverageType.ADAPTIVE,
+    "VIDYA": MovingAverageType.VARIABLE_INDEX_DYNAMIC,
+}
 
-class EMACrossTPConfig(StrategyConfig, frozen=True):
-    """Configuration for EMACrossTP strategy.
+
+class MACrossTPConfig(StrategyConfig, frozen=True):
+    """Configuration for MACrossTP strategy.
 
     Parameters
     ----------
@@ -48,13 +61,22 @@ class EMACrossTPConfig(StrategyConfig, frozen=True):
     trade_notional : Decimal
         The USD notional size per trade.  Quantity is computed at entry
         time as ``trade_notional / current_price``.
-    fast_ema_period : int, default 10
-        The fast EMA period.
-    slow_ema_period : int, default 20
-        The slow EMA period.
+    ma_type : str, default "EMA"
+        Moving average type: ``"EMA"`` | ``"SMA"`` | ``"HMA"`` |
+        ``"DEMA"`` | ``"AMA"`` | ``"VIDYA"``.
+    fast_period : int, default 10
+        The fast MA period.
+    slow_period : int, default 20
+        The slow MA period.
     tp_pct : float, default 5.0
         Take-profit percentage.  A value of 5.0 means the position is
         closed when bar close reaches 5% profit from the entry price.
+    ama_alpha_fast : int, default 2
+        Fast smoothing constant period for AMA (Kaufman).
+        Only used when ``ma_type="AMA"``.
+    ama_alpha_slow : int, default 30
+        Slow smoothing constant period for AMA (Kaufman).
+        Only used when ``ma_type="AMA"``.
     close_positions_on_stop : bool, default True
         If all open positions should be closed on strategy stop.
 
@@ -63,47 +85,60 @@ class EMACrossTPConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
     bar_type: BarType
     trade_notional: Decimal
-    fast_ema_period: PositiveInt = 10
-    slow_ema_period: PositiveInt = 20
+    ma_type: str = "EMA"
+    fast_period: PositiveInt = 10
+    slow_period: PositiveInt = 20
     tp_pct: PositiveFloat = 5.0
+    ama_alpha_fast: PositiveInt = 2
+    ama_alpha_slow: PositiveInt = 30
     close_positions_on_stop: bool = True
 
 
-class EMACrossTP(Strategy):
-    """EMA crossover strategy with percentage take-profit exit.
+class MACrossTP(Strategy):
+    """MA crossover strategy with percentage take-profit exit.
 
-    Enters long on bullish EMA crossover, enters short on bearish
+    Enters long on bullish MA crossover, enters short on bearish
     crossover.  Exits when bar close reaches the take-profit target or
-    when the EMA crosses in the opposite direction.
+    when the MA crosses in the opposite direction.
 
     After a TP exit the strategy goes flat and waits for the next fresh
-    crossover.  On EMA reversal while in position, the strategy closes
+    crossover.  On MA reversal while in position, the strategy closes
     and immediately enters the opposite direction.
 
     Parameters
     ----------
-    config : EMACrossTPConfig
+    config : MACrossTPConfig
         The configuration for the instance.
 
     Raises
     ------
     ValueError
-        If ``config.fast_ema_period`` is not less than
-        ``config.slow_ema_period``.
+        If ``config.fast_period`` is not less than ``config.slow_period``.
+        If ``config.ma_type`` is not a recognised type.
 
     """
 
-    def __init__(self, config: EMACrossTPConfig) -> None:
+    def __init__(self, config: MACrossTPConfig) -> None:
         PyCondition.is_true(
-            config.fast_ema_period < config.slow_ema_period,
-            f"{config.fast_ema_period=} must be less than {config.slow_ema_period=}",
+            config.fast_period < config.slow_period,
+            f"{config.fast_period=} must be less than {config.slow_period=}",
         )
+        PyCondition.is_in(config.ma_type, _MA_TYPE_LOOKUP, "config.ma_type", "_MA_TYPE_LOOKUP")
         super().__init__(config)
 
         self.instrument: Instrument | None = None
 
-        self.fast_ema = ExponentialMovingAverage(config.fast_ema_period)
-        self.slow_ema = ExponentialMovingAverage(config.slow_ema_period)
+        ma_enum = _MA_TYPE_LOOKUP[config.ma_type]
+        if config.ma_type == "AMA":
+            self.fast_ma = AdaptiveMovingAverage(
+                config.fast_period, config.ama_alpha_fast, config.ama_alpha_slow,
+            )
+            self.slow_ma = AdaptiveMovingAverage(
+                config.slow_period, config.ama_alpha_fast, config.ama_alpha_slow,
+            )
+        else:
+            self.fast_ma = MovingAverageFactory.create(config.fast_period, ma_enum)
+            self.slow_ma = MovingAverageFactory.create(config.slow_period, ma_enum)
 
         # Previous bar values for crossover detection.
         self._prev_fast: float = 0.0
@@ -121,10 +156,10 @@ class EMACrossTP(Strategy):
             self.stop()
             return
 
-        self.register_indicator_for_bars(self.config.bar_type, self.fast_ema)
-        self.register_indicator_for_bars(self.config.bar_type, self.slow_ema)
+        self.register_indicator_for_bars(self.config.bar_type, self.fast_ma)
+        self.register_indicator_for_bars(self.config.bar_type, self.slow_ma)
 
-        lookback_bars = self.config.slow_ema_period + 10
+        lookback_bars = self.config.slow_period + 10
         self.request_bars(
             self.config.bar_type,
             start=self._clock.utc_now() - timedelta(hours=lookback_bars),
@@ -135,19 +170,19 @@ class EMACrossTP(Strategy):
         self.subscribe_quote_ticks(self.config.instrument_id)
 
     def on_bar(self, bar: Bar) -> None:
-        """Evaluate EMA crossover and take-profit on each bar."""
+        """Evaluate MA crossover and take-profit on each bar."""
         # Update prev values during warmup so the first post-warmup bar
         # has valid crossover detection state.
         if not self.indicators_initialized():
-            self._prev_fast = self.fast_ema.value
-            self._prev_slow = self.slow_ema.value
+            self._prev_fast = self.fast_ma.value
+            self._prev_slow = self.slow_ma.value
             return
 
         if bar.is_single_price():
             return
 
-        fast = self.fast_ema.value
-        slow = self.slow_ema.value
+        fast = self.fast_ma.value
+        slow = self.slow_ma.value
 
         # True crossover detection — fires once per cross.
         crossed_above = self._prev_fast <= self._prev_slow and fast > slow
@@ -178,7 +213,7 @@ class EMACrossTP(Strategy):
                     return  # Go flat, wait for next crossover
             if crossed_below:
                 self.log.info(
-                    f"EMA reversal while LONG: closing + entering SHORT at {price}"
+                    f"MA reversal while LONG: closing + entering SHORT at {price}"
                 )
                 self.close_all_positions(self.config.instrument_id)
                 self._enter(OrderSide.SELL, price)
@@ -198,7 +233,7 @@ class EMACrossTP(Strategy):
                     return  # Go flat, wait for next crossover
             if crossed_above:
                 self.log.info(
-                    f"EMA reversal while SHORT: closing + entering BUY at {price}"
+                    f"MA reversal while SHORT: closing + entering BUY at {price}"
                 )
                 self.close_all_positions(self.config.instrument_id)
                 self._enter(OrderSide.BUY, price)
@@ -260,8 +295,8 @@ class EMACrossTP(Strategy):
 
     def on_reset(self) -> None:
         """Reset indicators and state for engine reuse (parameter sweeps)."""
-        self.fast_ema.reset()
-        self.slow_ema.reset()
+        self.fast_ma.reset()
+        self.slow_ma.reset()
         self._prev_fast = 0.0
         self._prev_slow = 0.0
         self._entry_order = None
