@@ -8,7 +8,7 @@ Requires HL_TESTNET=false in .env for mainnet. Defaults to true (testnet).
 Do NOT run this until paper trading (run_sandbox.py) has been stable for 2+ weeks.
 
 Configure via .env or environment variables:
-    STRATEGY=MACross          # MACross | EMACross | SMACross | HMACross | DEMACross | AMACross | VIDYACross | EMACrossATR | MACDRSI
+    STRATEGY=MACross          # MACross | …Cross | MACrossLongOnly | …CrossLongOnly | EMACrossATR | MACDRSI
     INSTRUMENT_ID=BTC-USD-PERP.HYPERLIQUID
     BAR_INTERVAL=1-HOUR-LAST-EXTERNAL
     TRADE_NOTIONAL=100        # USD notional per trade (all strategies)
@@ -81,6 +81,27 @@ def _build_strategy(
             "ma_type": ma_type, "fast": fast, "slow": slow, "notional": str(trade_notional),
         }
 
+    _ma_cross_lo_types = {
+        "MACrossLongOnly": "EMA", "EMACrossLongOnly": "EMA",
+        "SMACrossLongOnly": "SMA", "HMACrossLongOnly": "HMA",
+        "DEMACrossLongOnly": "DEMA", "AMACrossLongOnly": "AMA",
+        "VIDYACrossLongOnly": "VIDYA",
+    }
+    if strategy_name in _ma_cross_lo_types:
+        from src.strategies.ma_cross_long_only import MACrossLongOnly, MACrossLongOnlyConfig
+        ma_type = _ma_cross_lo_types[strategy_name]
+        fast, slow = 10, 20
+        return MACrossLongOnly(MACrossLongOnlyConfig(
+            instrument_id=instrument_id,
+            bar_type=bar_type,
+            trade_notional=trade_notional,
+            ma_type=ma_type,
+            fast_period=fast,
+            slow_period=slow,
+        )), f"MACrossLongOnly-{ma_type}-{fast}-{slow}", {
+            "ma_type": ma_type, "fast": fast, "slow": slow, "notional": str(trade_notional),
+        }
+
     if strategy_name == "EMACrossATR":
         from src.strategies.ema_cross_atr import EMACrossATR, EMACrossATRConfig
         fast, slow, atr = 20, 50, 14
@@ -117,7 +138,10 @@ def _build_strategy(
 
     valid = [
         "MACross", "EMACross", "SMACross", "HMACross",
-        "DEMACross", "AMACross", "VIDYACross", "EMACrossATR", "MACDRSI",
+        "DEMACross", "AMACross", "VIDYACross",
+        "MACrossLongOnly", "EMACrossLongOnly", "SMACrossLongOnly", "HMACrossLongOnly",
+        "DEMACrossLongOnly", "AMACrossLongOnly", "VIDYACrossLongOnly",
+        "EMACrossATR", "MACDRSI",
     ]
     msg = f"Unknown strategy: {strategy_name!r}. Valid: {valid}"
     raise ValueError(msg)
