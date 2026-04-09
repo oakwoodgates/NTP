@@ -65,13 +65,16 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 ```
 ├── src/
 │   ├── strategies/          # NT Strategy subclasses
+│   │   ├── ma_cross.py         # Unified MA crossover (EMA/SMA/HMA/DEMA/AMA/VIDYA)
 │   │   ├── bb_meanrev.py
-│   │   ├── ema_cross.py
+│   │   ├── donchian_breakout.py
 │   │   ├── ema_cross_atr.py
+│   │   ├── ema_cross_bracket.py
 │   │   ├── ema_cross_long_only.py
+│   │   ├── ema_cross_stop_entry.py
+│   │   ├── ema_cross_tp.py
 │   │   ├── ema_cross_trailing_stop.py
 │   │   ├── macd_rsi.py
-│   │   ├── sma_cross.py
 │   │   └── ...
 │   ├── actors/              # Custom NT Actors
 │   │   ├── persistence.py   # PersistenceActor — writes fills/positions to PostgreSQL
@@ -92,10 +95,18 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │   ├── provisioning/        # Declarative datasource + dashboard config
 │   └── dashboards/          # Dashboard JSON (committed)
 ├── notebooks/               # Jupyter research + validation
-│   ├── backtest_ema_cross.ipynb
+│   ├── backtest_ema_cross.ipynb       # EMA crossover backtest + sweep
+│   ├── backtest_sma_cross.ipynb       # SMA crossover backtest + sweep
+│   ├── backtest_hma_cross.ipynb       # HMA (Hull) crossover backtest + sweep
+│   ├── backtest_dema_cross.ipynb      # DEMA (Double EMA) crossover backtest + sweep
+│   ├── backtest_ama_cross.ipynb       # AMA (Kaufman Adaptive) crossover backtest + sweep
+│   ├── backtest_vidya_cross.ipynb     # VIDYA crossover backtest + sweep
 │   ├── backtest_ema_cross_atr.ipynb
+│   ├── backtest_ema_cross_bracket.ipynb
+│   ├── backtest_ema_cross_long_only.ipynb
+│   ├── backtest_bb_meanrev.ipynb
 │   ├── backtest_macd_rsi.ipynb
-│   ├── backtest_sma_cross.ipynb
+│   ├── backtest_donchian_breakout.ipynb
 │   ├── compare_sweeps.ipynb       # Cross-instrument/timeframe comparison
 │   ├── validate_strategy.ipynb    # Walk-forward, plateau, bootstrap
 │   ├── review_live_run.ipynb      # Post-run analysis of live/paper trades
