@@ -45,7 +45,7 @@ def save_notebook(
     Parameters
     ----------
     notebook_filename
-        Source notebook filename (e.g., ``"backtest_sma_cross.ipynb"``).
+        Source notebook filename (e.g., ``"sma_cross.ipynb"``).
     result_filename
         Descriptive name without extension or timestamp
         (e.g., ``"SMACross_BTCUSDT-PERP.BINANCE_4h_f15_s25"``).
@@ -89,7 +89,7 @@ def save_notebook_html(
     Parameters
     ----------
     notebook_filename
-        Source notebook filename (e.g., ``"backtest_sma_cross.ipynb"``).
+        Source notebook filename (e.g., ``"sma_cross.ipynb"``).
     result_filename
         Descriptive name without extension or timestamp
         (e.g., ``"SMACross_BTCUSDT-PERP.BINANCE_4h_f15_s25"``).
