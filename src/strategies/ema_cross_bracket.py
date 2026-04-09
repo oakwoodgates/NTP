@@ -9,12 +9,12 @@ After a TP or SL fill the strategy re-enters on the next bar if the EMA
 regime still holds.  This is **regime-based** entry: multiple trades per
 EMA regime, more aggressive trend participation.
 
-Behavioral differences from EMACrossATR:
+Behavioral differences from MACrossATR:
 - Entry fires every bar while flat + in regime, not just on the crossover bar.
   After a TP or SL fill the strategy is flat and re-enters immediately if the
-  regime holds — EMACrossATR waits for the next fresh crossover.
+  regime holds — MACrossATR waits for the next fresh crossover.
 - Symmetric bracket (same ATR distance for both SL and TP → 1:1 R:R).
-  EMACrossATR has separate SL/TP multipliers for asymmetric R:R.
+  MACrossATR has separate SL/TP multipliers for asymmetric R:R.
 - On EMA reversal while in position: cancel bracket, close position, and
   enter the opposite direction immediately on the same bar.
 - Long AND short for perpetual futures (MARGIN account).

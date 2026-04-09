@@ -68,7 +68,7 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │   │   ├── ma_cross.py         # Unified MA crossover (EMA/SMA/HMA/DEMA/AMA/VIDYA)
 │   │   ├── bb_meanrev.py
 │   │   ├── donchian_breakout.py
-│   │   ├── ema_cross_atr.py
+│   │   ├── ma_cross_atr.py            # MA crossover + ATR bracket TP/SL (all MA types)
 │   │   ├── ema_cross_bracket.py
 │   │   ├── ma_cross_long_only.py       # Long-only MA crossover (all MA types)
 │   │   ├── ema_cross_stop_entry.py
@@ -101,7 +101,7 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │   ├── backtest_dema_cross.ipynb      # DEMA (Double EMA) crossover backtest + sweep
 │   ├── backtest_ama_cross.ipynb       # AMA (Kaufman Adaptive) crossover backtest + sweep
 │   ├── backtest_vidya_cross.ipynb     # VIDYA crossover backtest + sweep
-│   ├── backtest_ema_cross_atr.ipynb
+│   ├── backtest_ema_cross_atr.ipynb   # MA crossover + ATR bracket (all MA types)
 │   ├── backtest_ema_cross_bracket.ipynb
 │   ├── backtest_ema_cross_long_only.ipynb
 │   ├── backtest_bb_meanrev.ipynb

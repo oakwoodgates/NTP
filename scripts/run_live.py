@@ -8,7 +8,7 @@ Requires HL_TESTNET=false in .env for mainnet. Defaults to true (testnet).
 Do NOT run this until paper trading (run_sandbox.py) has been stable for 2+ weeks.
 
 Configure via .env or environment variables:
-    STRATEGY=MACross          # MACross | …Cross | MACrossLongOnly | …CrossLongOnly | EMACrossATR | MACDRSI
+    STRATEGY=MACross          # MACross | …Cross | MACrossLongOnly | …CrossLongOnly | MACrossATR | MACDRSI
     INSTRUMENT_ID=BTC-USD-PERP.HYPERLIQUID
     BAR_INTERVAL=1-HOUR-LAST-EXTERNAL
     TRADE_NOTIONAL=100        # USD notional per trade (all strategies)
@@ -102,20 +102,20 @@ def _build_strategy(
             "ma_type": ma_type, "fast": fast, "slow": slow, "notional": str(trade_notional),
         }
 
-    if strategy_name == "EMACrossATR":
-        from src.strategies.ema_cross_atr import EMACrossATR, EMACrossATRConfig
+    if strategy_name == "MACrossATR":
+        from src.strategies.ma_cross_atr import MACrossATR, MACrossATRConfig
         fast, slow, atr = 20, 50, 14
         sl_mult, tp_mult = 1.5, 3.0
-        return EMACrossATR(EMACrossATRConfig(
+        return MACrossATR(MACrossATRConfig(
             instrument_id=instrument_id,
             bar_type=bar_type,
             trade_notional=trade_notional,
-            fast_ema_period=fast,
-            slow_ema_period=slow,
+            fast_period=fast,
+            slow_period=slow,
             atr_period=atr,
             atr_sl_multiplier=sl_mult,
             atr_tp_multiplier=tp_mult,
-        )), f"EMACrossATR-{fast}-{slow}-{atr}", {
+        )), f"MACrossATR-{fast}-{slow}-{atr}", {
             "fast": fast, "slow": slow, "atr": atr,
             "sl_mult": sl_mult, "tp_mult": tp_mult, "notional": str(trade_notional),
         }
@@ -141,7 +141,7 @@ def _build_strategy(
         "DEMACross", "AMACross", "VIDYACross",
         "MACrossLongOnly", "EMACrossLongOnly", "SMACrossLongOnly", "HMACrossLongOnly",
         "DEMACrossLongOnly", "AMACrossLongOnly", "VIDYACrossLongOnly",
-        "EMACrossATR", "MACDRSI",
+        "MACrossATR", "MACDRSI",
     ]
     msg = f"Unknown strategy: {strategy_name!r}. Valid: {valid}"
     raise ValueError(msg)

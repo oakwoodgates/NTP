@@ -1,14 +1,14 @@
-"""EMA crossover strategy with ATR-based take-profit and stop-loss.
+"""MA crossover strategy with ATR-based take-profit and stop-loss (EMA / SMA / HMA / DEMA / AMA / VIDYA).
 
-Uses EMA crossover for entries with ATR-sized bracket orders for exits.
+Uses MA crossover for entries with ATR-sized bracket orders for exits.
 Bracket orders (market entry + limit TP + stop-market SL) are submitted
 as a linked OrderList — NT cancels the remaining leg automatically when
 either TP or SL fills.
 
-Behavioral differences from EMACross:
+Behavioral differences from MACross:
 - Entry fires only on the crossover bar, not on every bar in the regime.
   After a TP or SL fill the strategy is flat and waits for the next cross.
-- No immediate reversal: EMA flip while in position cancels the bracket
+- No immediate reversal: MA flip while in position cancels the bracket
   and closes the position. Re-entry requires the next fresh crossover.
 - Long AND short for perpetual futures (MARGIN account).
 
@@ -32,7 +32,12 @@ from typing import TYPE_CHECKING
 
 from nautilus_trader.config import PositiveInt
 from nautilus_trader.core.correctness import PyCondition
-from nautilus_trader.indicators import AverageTrueRange, ExponentialMovingAverage
+from nautilus_trader.indicators import (
+    AdaptiveMovingAverage,
+    AverageTrueRange,
+    MovingAverageFactory,
+    MovingAverageType,
+)
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import OrderSide, OrderType
 from nautilus_trader.model.identifiers import InstrumentId
@@ -42,9 +47,18 @@ from nautilus_trader.trading.strategy import Strategy
 if TYPE_CHECKING:
     from nautilus_trader.model.instruments import Instrument
 
+_MA_TYPE_LOOKUP: dict[str, MovingAverageType] = {
+    "SMA":   MovingAverageType.SIMPLE,
+    "EMA":   MovingAverageType.EXPONENTIAL,
+    "HMA":   MovingAverageType.HULL,
+    "DEMA":  MovingAverageType.DOUBLE_EXPONENTIAL,
+    "AMA":   MovingAverageType.ADAPTIVE,
+    "VIDYA": MovingAverageType.VARIABLE_INDEX_DYNAMIC,
+}
 
-class EMACrossATRConfig(StrategyConfig, frozen=True):
-    """Configuration for EMACrossATR strategy.
+
+class MACrossATRConfig(StrategyConfig, frozen=True):
+    """Configuration for MACrossATR strategy.
 
     Parameters
     ----------
@@ -55,10 +69,13 @@ class EMACrossATRConfig(StrategyConfig, frozen=True):
     trade_notional : Decimal
         The USD notional amount per trade. Quantity is computed dynamically
         from trade_notional / entry_price at each entry.
-    fast_ema_period : int, default 20
-        The fast EMA period.
-    slow_ema_period : int, default 50
-        The slow EMA period.
+    ma_type : str, default "EMA"
+        Moving average type: ``"EMA"`` | ``"SMA"`` | ``"HMA"`` |
+        ``"DEMA"`` | ``"AMA"`` | ``"VIDYA"``.
+    fast_period : int, default 20
+        The fast MA period.
+    slow_period : int, default 50
+        The slow MA period.
     atr_period : int, default 14
         The ATR period for TP/SL sizing.
     atr_sl_multiplier : float, default 1.5
@@ -66,6 +83,12 @@ class EMACrossATRConfig(StrategyConfig, frozen=True):
     atr_tp_multiplier : float, default 3.0
         Take-profit distance = ATR × this multiplier.
         Default ratio is 2:1 reward-to-risk (3.0 / 1.5).
+    ama_alpha_fast : int, default 2
+        Fast smoothing constant period for AMA (Kaufman).
+        Only used when ``ma_type="AMA"``.
+    ama_alpha_slow : int, default 30
+        Slow smoothing constant period for AMA (Kaufman).
+        Only used when ``ma_type="AMA"``.
     close_positions_on_stop : bool, default True
         If all open positions should be closed on strategy stop.
 
@@ -74,43 +97,48 @@ class EMACrossATRConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
     bar_type: BarType
     trade_notional: Decimal
-    fast_ema_period: PositiveInt = 20
-    slow_ema_period: PositiveInt = 50
+    ma_type: str = "EMA"
+    fast_period: PositiveInt = 20
+    slow_period: PositiveInt = 50
     atr_period: PositiveInt = 14
     atr_sl_multiplier: float = 1.5
     atr_tp_multiplier: float = 3.0
+    ama_alpha_fast: PositiveInt = 2
+    ama_alpha_slow: PositiveInt = 30
     close_positions_on_stop: bool = True
 
 
-class EMACrossATR(Strategy):
-    """EMA crossover strategy with ATR-based bracket TP/SL.
+class MACrossATR(Strategy):
+    """MA crossover strategy with ATR-based bracket TP/SL.
 
-    Enters on EMA crossover bars only. After a TP or SL fill the strategy
+    Enters on MA crossover bars only. After a TP or SL fill the strategy
     goes flat and waits for the next fresh crossover before re-entering.
 
-    EMA reversal while in position cancels the bracket (both legs) and
+    MA reversal while in position cancels the bracket (both legs) and
     closes the position via market order. No immediate reversal entry —
     the next crossover is required.
 
     Parameters
     ----------
-    config : EMACrossATRConfig
+    config : MACrossATRConfig
         The configuration for the instance.
 
     Raises
     ------
     ValueError
-        If fast_ema_period >= slow_ema_period.
-    ValueError
-        If atr_sl_multiplier <= 0 or atr_tp_multiplier <= atr_sl_multiplier.
+        If `config.fast_period` >= `config.slow_period`.
+        If `config.ma_type` is not a recognised type.
+        If `config.atr_sl_multiplier` <= 0.
+        If `config.atr_tp_multiplier` <= `config.atr_sl_multiplier`.
 
     """
 
-    def __init__(self, config: EMACrossATRConfig) -> None:
+    def __init__(self, config: MACrossATRConfig) -> None:
         PyCondition.is_true(
-            config.fast_ema_period < config.slow_ema_period,
-            f"{config.fast_ema_period=} must be less than {config.slow_ema_period=}",
+            config.fast_period < config.slow_period,
+            f"{config.fast_period=} must be less than {config.slow_period=}",
         )
+        PyCondition.is_in(config.ma_type, _MA_TYPE_LOOKUP, "config.ma_type", "_MA_TYPE_LOOKUP")
         PyCondition.is_true(
             config.atr_sl_multiplier > 0,
             f"{config.atr_sl_multiplier=} must be positive",
@@ -124,8 +152,18 @@ class EMACrossATR(Strategy):
 
         self.instrument: Instrument | None = None
 
-        self.fast_ema = ExponentialMovingAverage(config.fast_ema_period)
-        self.slow_ema = ExponentialMovingAverage(config.slow_ema_period)
+        ma_enum = _MA_TYPE_LOOKUP[config.ma_type]
+        if config.ma_type == "AMA":
+            self.fast_ma = AdaptiveMovingAverage(
+                config.fast_period, config.ama_alpha_fast, config.ama_alpha_slow,
+            )
+            self.slow_ma = AdaptiveMovingAverage(
+                config.slow_period, config.ama_alpha_fast, config.ama_alpha_slow,
+            )
+        else:
+            self.fast_ma = MovingAverageFactory.create(config.fast_period, ma_enum)
+            self.slow_ma = MovingAverageFactory.create(config.slow_period, ma_enum)
+
         # ATR sizes the bracket legs dynamically per volatility regime.
         # Registered for bars — NT updates it automatically.
         self.atr = AverageTrueRange(config.atr_period)
@@ -143,13 +181,13 @@ class EMACrossATR(Strategy):
             self.stop()
             return
 
-        self.register_indicator_for_bars(self.config.bar_type, self.fast_ema)
-        self.register_indicator_for_bars(self.config.bar_type, self.slow_ema)
+        self.register_indicator_for_bars(self.config.bar_type, self.fast_ma)
+        self.register_indicator_for_bars(self.config.bar_type, self.slow_ma)
         self.register_indicator_for_bars(self.config.bar_type, self.atr)
 
-        # Warm up all three indicators. Slow EMA is the binding constraint
+        # Warm up all three indicators. Slow MA is the binding constraint
         # unless ATR period exceeds it.
-        lookback_bars = max(self.config.slow_ema_period, self.config.atr_period) + 10
+        lookback_bars = max(self.config.slow_period, self.config.atr_period) + 10
         self.request_bars(
             self.config.bar_type,
             # Assumes 1h bars. For other timeframes, scale timedelta accordingly.
@@ -158,19 +196,19 @@ class EMACrossATR(Strategy):
         self.subscribe_bars(self.config.bar_type)
 
     def on_bar(self, bar: Bar) -> None:
-        """Evaluate EMA crossover on each bar and manage bracket exits."""
+        """Evaluate MA crossover on each bar and manage bracket exits."""
         # Always update prev values during warm-up so the first post-warmup
         # bar has valid crossover detection state.
         if not self.indicators_initialized():
-            self._prev_fast = self.fast_ema.value
-            self._prev_slow = self.slow_ema.value
+            self._prev_fast = self.fast_ma.value
+            self._prev_slow = self.slow_ma.value
             return
 
         if bar.is_single_price():
             return
 
-        fast = self.fast_ema.value
-        slow = self.slow_ema.value
+        fast = self.fast_ma.value
+        slow = self.slow_ma.value
         atr = self.atr.value
 
         # True crossover detection — fires once per cross, not every bar in regime.
@@ -181,7 +219,7 @@ class EMACrossATR(Strategy):
         self._prev_fast = fast
         self._prev_slow = slow
 
-        # Exit: EMA reversal while in position.
+        # Exit: MA reversal while in position.
         # Cancel bracket legs first, then close. Going flat here — re-entry
         # requires the next fresh crossover, not an immediate reversal.
         if self.portfolio.is_net_long(self.config.instrument_id) and crossed_below:
@@ -279,8 +317,8 @@ class EMACrossATR(Strategy):
 
     def on_reset(self) -> None:
         """Reset indicators and state for engine reuse (parameter sweeps)."""
-        self.fast_ema.reset()
-        self.slow_ema.reset()
+        self.fast_ma.reset()
+        self.slow_ma.reset()
         self.atr.reset()
         self._prev_fast = 0.0
         self._prev_slow = 0.0

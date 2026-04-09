@@ -128,7 +128,7 @@ You should receive messages for fills, position closes (WIN/LOSS with PnL), and 
 Change these in `.env`:
 
 ```bash
-# Strategy: MACross | …Cross | MACrossLongOnly | …CrossLongOnly | EMACrossATR | MACDRSI
+# Strategy: MACross | …Cross | MACrossLongOnly | …CrossLongOnly | MACrossATR | MACDRSI
 STRATEGY=MACross
 
 # Instrument: BTC | ETH | SOL
@@ -171,7 +171,7 @@ Then restart: Ctrl+C the running node, `python scripts/run_sandbox.py`.
 
 | Strategy | Description | Key params (edit in `_build_strategy()`) |
 |----------|-------------|------------------------------------------|
-| EMACrossATR | EMA cross + ATR bracket TP/SL | fast=20, slow=50, atr=14, sl=1.5x, tp=3.0x |
+| MACrossATR | EMA cross + ATR bracket TP/SL | fast=20, slow=50, atr=14, sl=1.5x, tp=3.0x |
 | MACDRSI | MACD + RSI confluence | macd 12/26/9, rsi=14 |
 
 ### Available instruments

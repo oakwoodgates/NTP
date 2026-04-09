@@ -7,7 +7,7 @@ automatically as the market moves favorably.
 
 After a trailing stop exit the strategy re-enters immediately on the next
 bar if the MA regime still holds.  This is regime-based entry (like
-``ma_cross.py``), not crossover-based (like ``ema_cross_atr.py``).
+``ma_cross.py``), not crossover-based (like ``ma_cross_atr.py``).
 
 Trailing offset = ATR × ``trailing_atr_multiple``.  NT's SimulatedExchange
 handles trailing stops natively in backtesting (no emulation needed).
