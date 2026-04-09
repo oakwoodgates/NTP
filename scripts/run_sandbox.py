@@ -51,27 +51,21 @@ def _build_strategy(
 
     To customize strategy-specific parameters, edit the defaults below.
     """
-    if strategy_name == "EMACross":
-        from src.strategies.ema_cross import EMACross, EMACrossConfig
+    _ma_cross_types = {"MACross": "EMA", "EMACross": "EMA", "SMACross": "SMA", "HMACross": "HMA"}
+    if strategy_name in _ma_cross_types:
+        from src.strategies.ma_cross import MACross, MACrossConfig
+        ma_type = _ma_cross_types[strategy_name]
         fast, slow = 5, 45
-        return EMACross(EMACrossConfig(
+        return MACross(MACrossConfig(
             instrument_id=instrument_id,
             bar_type=bar_type,
             trade_notional=trade_notional,
-            fast_ema_period=fast,
-            slow_ema_period=slow,
-        )), f"EMACross-{fast}-{slow}", {"fast": fast, "slow": slow, "notional": str(trade_notional)}
-
-    if strategy_name == "SMACross":
-        from src.strategies.sma_cross import SMACross, SMACrossConfig
-        fast, slow = 10, 20
-        return SMACross(SMACrossConfig(
-            instrument_id=instrument_id,
-            bar_type=bar_type,
-            trade_notional=trade_notional,
-            fast_sma_period=fast,
-            slow_sma_period=slow,
-        )), f"SMACross-{fast}-{slow}", {"fast": fast, "slow": slow, "notional": str(trade_notional)}
+            ma_type=ma_type,
+            fast_period=fast,
+            slow_period=slow,
+        )), f"MACross-{ma_type}-{fast}-{slow}", {
+            "ma_type": ma_type, "fast": fast, "slow": slow, "notional": str(trade_notional),
+        }
 
     if strategy_name == "EMACrossATR":
         from src.strategies.ema_cross_atr import EMACrossATR, EMACrossATRConfig
@@ -107,7 +101,7 @@ def _build_strategy(
             "signal": signal, "rsi": rsi, "notional": str(trade_notional),
         }
 
-    valid = ["EMACross", "SMACross", "EMACrossATR", "MACDRSI"]
+    valid = ["MACross", "EMACross", "SMACross", "HMACross", "EMACrossATR", "MACDRSI"]
     msg = f"Unknown strategy: {strategy_name!r}. Valid: {valid}"
     raise ValueError(msg)
 
