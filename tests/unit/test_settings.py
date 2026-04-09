@@ -15,7 +15,7 @@ class TestSettings:
         assert s.redis_port == 6379
         assert s.hl_testnet is True
         assert s.trader_id == "TRADER-001"
-        assert s.strategy == "EMACross"
+        assert s.strategy == "MACross"
         assert s.instrument_id == "BTC-USD-PERP.HYPERLIQUID"
         assert s.bar_interval == "1-HOUR-LAST-EXTERNAL"
         assert s.trade_notional == "100"

@@ -1,4 +1,4 @@
-"""SMA crossover strategy for pipeline validation."""
+"""Moving-average crossover strategy (EMA / SMA / HMA via MovingAverageFactory)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 
 from nautilus_trader.config import PositiveInt
 from nautilus_trader.core.correctness import PyCondition
-from nautilus_trader.indicators import SimpleMovingAverage
+from nautilus_trader.indicators import MovingAverageFactory, MovingAverageType
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import InstrumentId
@@ -18,9 +18,15 @@ from nautilus_trader.trading.strategy import Strategy
 if TYPE_CHECKING:
     from nautilus_trader.model.instruments import Instrument
 
+_MA_TYPE_LOOKUP: dict[str, MovingAverageType] = {
+    "SMA": MovingAverageType.SIMPLE,
+    "EMA": MovingAverageType.EXPONENTIAL,
+    "HMA": MovingAverageType.HULL,
+}
 
-class SMACrossConfig(StrategyConfig, frozen=True):
-    """Configuration for SMACross strategy.
+
+class MACrossConfig(StrategyConfig, frozen=True):
+    """Configuration for MACross strategy.
 
     Parameters
     ----------
@@ -32,10 +38,13 @@ class SMACrossConfig(StrategyConfig, frozen=True):
         The USD notional size per trade.  Quantity is computed at entry
         time as ``trade_notional / current_price``, so each trade risks
         approximately the same dollar amount regardless of asset price.
-    fast_sma_period : int, default 10
-        The fast SMA period.
-    slow_sma_period : int, default 20
-        The slow SMA period.
+    ma_type : str, default "EMA"
+        Moving average type: ``"EMA"`` | ``"SMA"`` | ``"HMA"``.
+        Passed to :class:`MovingAverageFactory` internally.
+    fast_period : int, default 10
+        The fast MA period.
+    slow_period : int, default 20
+        The slow MA period.
     close_positions_on_stop : bool, default True
         If all open positions should be closed on strategy stop.
         Set to False to stop the strategy without liquidating (e.g., during
@@ -46,42 +55,44 @@ class SMACrossConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
     bar_type: BarType
     trade_notional: Decimal
-    fast_sma_period: PositiveInt = 10
-    slow_sma_period: PositiveInt = 20
+    ma_type: str = "EMA"
+    fast_period: PositiveInt = 10
+    slow_period: PositiveInt = 20
     close_positions_on_stop: bool = True
 
 
-class SMACross(Strategy):
-    """Simple SMA crossover strategy for pipeline validation.
+class MACross(Strategy):
+    """Moving-average crossover strategy using MovingAverageFactory.
 
-    Goes long when fast SMA crosses above slow SMA.
-    Goes short when fast SMA crosses below slow SMA.
+    Goes long when fast MA crosses above slow MA.
+    Goes short when fast MA crosses below slow MA.
     Designed for perpetual futures (supports both directions).
-
-    THIS IS A PIPELINE VALIDATION STRATEGY WITH NO ALPHA ADVANTAGE.
 
     Parameters
     ----------
-    config : SMACrossConfig
+    config : MACrossConfig
         The configuration for the instance.
 
     Raises
     ------
     ValueError
-        If `config.fast_sma_period` is not less than `config.slow_sma_period`.
+        If `config.fast_period` is not less than `config.slow_period`.
+        If `config.ma_type` is not a recognised type.
 
     """
 
-    def __init__(self, config: SMACrossConfig) -> None:
+    def __init__(self, config: MACrossConfig) -> None:
         PyCondition.is_true(
-            config.fast_sma_period < config.slow_sma_period,
-            f"{config.fast_sma_period=} must be less than {config.slow_sma_period=}",
+            config.fast_period < config.slow_period,
+            f"{config.fast_period=} must be less than {config.slow_period=}",
         )
+        PyCondition.is_in(config.ma_type, _MA_TYPE_LOOKUP, "config.ma_type", "_MA_TYPE_LOOKUP")
         super().__init__(config)
 
         self.instrument: Instrument | None = None
-        self.fast_sma = SimpleMovingAverage(config.fast_sma_period)
-        self.slow_sma = SimpleMovingAverage(config.slow_sma_period)
+        ma_enum = _MA_TYPE_LOOKUP[config.ma_type]
+        self.fast_ma = MovingAverageFactory.create(config.fast_period, ma_enum)
+        self.slow_ma = MovingAverageFactory.create(config.slow_period, ma_enum)
 
     def on_start(self) -> None:
         """Register indicators, request historical bars, subscribe to bars."""
@@ -91,23 +102,27 @@ class SMACross(Strategy):
             self.stop()
             return
 
-        self.register_indicator_for_bars(self.config.bar_type, self.fast_sma)
-        self.register_indicator_for_bars(self.config.bar_type, self.slow_sma)
+        self.register_indicator_for_bars(self.config.bar_type, self.fast_ma)
+        self.register_indicator_for_bars(self.config.bar_type, self.slow_ma)
 
         # Request enough historical bars to fully hydrate the slowest indicator.
         # In backtesting this is redundant (bars feed sequentially), but in live
         # trading this determines how many bars NT fetches from the exchange on
         # startup. Under-requesting means indicators stay uninitialized for the
         # first N bars of a live session.
-        lookback_bars = self.config.slow_sma_period + 10
+        lookback_bars = self.config.slow_period + 10
         self.request_bars(
             self.config.bar_type,
             start=self._clock.utc_now() - timedelta(hours=lookback_bars),
         )
         self.subscribe_bars(self.config.bar_type)
 
+        # Sandbox's SimulatedExchange needs quote ticks to maintain a market
+        # for order fills. Without this, orders are rejected with "no market".
+        self.subscribe_quote_ticks(self.config.instrument_id)
+
     def on_bar(self, bar: Bar) -> None:
-        """Evaluate SMA crossover on each bar."""
+        """Evaluate MA crossover on each bar."""
         if not self.indicators_initialized():
             return
 
@@ -115,20 +130,23 @@ class SMACross(Strategy):
             return
 
         price = Decimal(str(bar.close))
+        is_flat = self.portfolio.is_flat(self.config.instrument_id)
+        is_net_long = self.portfolio.is_net_long(self.config.instrument_id)
+        is_net_short = self.portfolio.is_net_short(self.config.instrument_id)
 
-        # BUY signal: fast SMA >= slow SMA
-        if self.fast_sma.value >= self.slow_sma.value:
-            if self.portfolio.is_flat(self.config.instrument_id):
+        # BUY signal: fast MA >= slow MA
+        if self.fast_ma.value >= self.slow_ma.value:
+            if is_flat:
                 self._enter(OrderSide.BUY, price)
-            elif self.portfolio.is_net_short(self.config.instrument_id):
+            elif is_net_short:
                 self.close_all_positions(self.config.instrument_id)
                 self._enter(OrderSide.BUY, price)
 
-        # SELL signal: fast SMA < slow SMA
-        elif self.fast_sma.value < self.slow_sma.value:
-            if self.portfolio.is_flat(self.config.instrument_id):
+        # SELL signal: fast MA < slow MA
+        elif self.fast_ma.value < self.slow_ma.value:
+            if is_flat:
                 self._enter(OrderSide.SELL, price)
-            elif self.portfolio.is_net_long(self.config.instrument_id):
+            elif is_net_long:
                 self.close_all_positions(self.config.instrument_id)
                 self._enter(OrderSide.SELL, price)
 
@@ -165,5 +183,5 @@ class SMACross(Strategy):
 
     def on_reset(self) -> None:
         """Reset indicators for engine reuse (parameter sweeps)."""
-        self.fast_sma.reset()
-        self.slow_sma.reset()
+        self.fast_ma.reset()
+        self.slow_ma.reset()

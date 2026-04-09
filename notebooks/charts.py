@@ -70,73 +70,62 @@ _MA_CLASSES = {"EMA": ExponentialMovingAverage, "SMA": SimpleMovingAverage, "HMA
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def plot_ema_cross(
+def plot_ma_cross(
     bars: list[Bar],
     fills_report: pd.DataFrame,
+    fast_period: int,
+    slow_period: int,
     *,
-    fast_period: int = 20,
-    slow_period: int = 50,
+    ma_type: str = "EMA",
     instrument_label: str = "",
     bar_label: str = "1h",
     height: int = 600,
 ) -> go.Figure:
-    """Candlestick chart with EMA overlays and trade entry markers."""
-    ohlcv = _bars_to_ma_ohlcv(bars, fast_period, slow_period, ma_type="EMA")
+    """Candlestick chart with MA overlays and trade entry markers."""
+    ohlcv = _bars_to_ma_ohlcv(bars, fast_period, slow_period, ma_type=ma_type)
     buys, sells = _parse_fills(fills_report)
 
     fig = go.Figure()
     _add_candlesticks(fig, ohlcv)
-    _add_ma_lines(fig, ohlcv, fast_period, slow_period, ma_type="EMA")
+    _add_ma_lines(fig, ohlcv, fast_period, slow_period, ma_type=ma_type)
     _add_trade_markers(fig, buys, sells, ohlcv)
-    title = f"{instrument_label} · {bar_label} · EMACross({fast_period}/{slow_period})"
+    title = f"{instrument_label} · {bar_label} · {ma_type}Cross({fast_period}/{slow_period})"
     _apply_base_layout(fig, title, height)
     return fig
+
+
+# Aliases — kept for notebooks that import the old names.
+def plot_ema_cross(
+    bars: list[Bar], fills_report: pd.DataFrame, *,
+    fast_period: int = 20, slow_period: int = 50,
+    instrument_label: str = "", bar_label: str = "1h", height: int = 600,
+) -> go.Figure:
+    """Alias for ``plot_ma_cross(..., ma_type="EMA")``."""
+    return plot_ma_cross(bars, fills_report, fast_period, slow_period,
+                         ma_type="EMA", instrument_label=instrument_label,
+                         bar_label=bar_label, height=height)
 
 
 def plot_sma_cross(
-    bars: list[Bar],
-    fills_report: pd.DataFrame,
-    fast_period: int,
-    slow_period: int,
-    *,
-    instrument_label: str = "BTC-USD-PERP",
-    bar_label: str = "1h",
-    height: int = 600,
+    bars: list[Bar], fills_report: pd.DataFrame,
+    fast_period: int, slow_period: int, *,
+    instrument_label: str = "", bar_label: str = "1h", height: int = 600,
 ) -> go.Figure:
-    """Candlestick chart with SMA overlays and trade entry markers."""
-    ohlcv = _bars_to_ma_ohlcv(bars, fast_period, slow_period, ma_type="SMA")
-    buys, sells = _parse_fills(fills_report)
-
-    fig = go.Figure()
-    _add_candlesticks(fig, ohlcv)
-    _add_ma_lines(fig, ohlcv, fast_period, slow_period, ma_type="SMA")
-    _add_trade_markers(fig, buys, sells, ohlcv)
-    title = f"{instrument_label} · {bar_label} · SMACross({fast_period}/{slow_period})"
-    _apply_base_layout(fig, title, height)
-    return fig
+    """Alias for ``plot_ma_cross(..., ma_type="SMA")``."""
+    return plot_ma_cross(bars, fills_report, fast_period, slow_period,
+                         ma_type="SMA", instrument_label=instrument_label,
+                         bar_label=bar_label, height=height)
 
 
 def plot_hma_cross(
-    bars: list[Bar],
-    fills_report: pd.DataFrame,
-    fast_period: int,
-    slow_period: int,
-    *,
-    instrument_label: str = "",
-    bar_label: str = "1h",
-    height: int = 600,
+    bars: list[Bar], fills_report: pd.DataFrame,
+    fast_period: int, slow_period: int, *,
+    instrument_label: str = "", bar_label: str = "1h", height: int = 600,
 ) -> go.Figure:
-    """Candlestick chart with HMA overlays and trade entry markers."""
-    ohlcv = _bars_to_ma_ohlcv(bars, fast_period, slow_period, ma_type="HMA")
-    buys, sells = _parse_fills(fills_report)
-
-    fig = go.Figure()
-    _add_candlesticks(fig, ohlcv)
-    _add_ma_lines(fig, ohlcv, fast_period, slow_period, ma_type="HMA")
-    _add_trade_markers(fig, buys, sells, ohlcv)
-    title = f"{instrument_label} · {bar_label} · HMACross({fast_period}/{slow_period})"
-    _apply_base_layout(fig, title, height)
-    return fig
+    """Alias for ``plot_ma_cross(..., ma_type="HMA")``."""
+    return plot_ma_cross(bars, fills_report, fast_period, slow_period,
+                         ma_type="HMA", instrument_label=instrument_label,
+                         bar_label=bar_label, height=height)
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────
