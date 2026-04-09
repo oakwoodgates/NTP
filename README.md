@@ -73,7 +73,7 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │   │   ├── ma_cross_long_only.py       # Long-only MA crossover (all MA types)
 │   │   ├── ema_cross_stop_entry.py
 │   │   ├── ema_cross_tp.py
-│   │   ├── ema_cross_trailing_stop.py
+│   │   ├── ma_cross_trailing_stop.py    # MA crossover + ATR trailing stop (all MA types)
 │   │   ├── macd_rsi.py
 │   │   └── ...
 │   ├── actors/              # Custom NT Actors
