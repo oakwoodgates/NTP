@@ -142,7 +142,7 @@ def on_event(self, event):
             self._submit_trailing_stop(...)
 ```
 
-NT's own example (`ema_cross_stop_entry.py`) handles both entry and trailing stop fills in a single `OrderFilled` block — but it submits the trailing stop in `OrderFilled` too, so the ordering doesn't matter. Our pattern (submitting in `PositionOpened`) is safer because the position is guaranteed to exist at that point.
+NT's own example (`ma_cross_stop_entry.py`) handles both entry and trailing stop fills in a single `OrderFilled` block — but it submits the trailing stop in `OrderFilled` too, so the ordering doesn't matter. Our pattern (submitting in `PositionOpened`) is safer because the position is guaranteed to exist at that point.
 
 ---
 

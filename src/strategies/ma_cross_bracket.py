@@ -1,25 +1,25 @@
-"""EMA regime-based strategy with symmetric ATR bracket exits.
+"""MA regime-based strategy with symmetric ATR bracket exits (EMA / SMA / HMA / DEMA / AMA / VIDYA).
 
-Adapted from NautilusTrader's example ``ema_cross_bracket.py``.  Uses EMA
-regime alignment for entries (enters when flat and fast EMA >= slow for longs,
-fast < slow for shorts).  Exits via symmetric ATR-sized bracket orders —
+Adapted from NautilusTrader's example ``ema_cross_bracket.py`` (NT repo).  Uses MA
+regime alignment for entries (enters when flat and fast MA >= slow for longs,
+fast < slow for shorts).  Exits via symmetric ATR-sized bracket orders --
 market entry + limit TP + stop-market SL at the same distance from entry.
 
-After a TP or SL fill the strategy re-enters on the next bar if the EMA
+After a TP or SL fill the strategy re-enters on the next bar if the MA
 regime still holds.  This is **regime-based** entry: multiple trades per
-EMA regime, more aggressive trend participation.
+MA regime, more aggressive trend participation.
 
 Behavioral differences from MACrossATR:
 - Entry fires every bar while flat + in regime, not just on the crossover bar.
   After a TP or SL fill the strategy is flat and re-enters immediately if the
-  regime holds — MACrossATR waits for the next fresh crossover.
-- Symmetric bracket (same ATR distance for both SL and TP → 1:1 R:R).
+  regime holds -- MACrossATR waits for the next fresh crossover.
+- Symmetric bracket (same ATR distance for both SL and TP -> 1:1 R:R).
   MACrossATR has separate SL/TP multipliers for asymmetric R:R.
-- On EMA reversal while in position: cancel bracket, close position, and
+- On MA reversal while in position: cancel bracket, close position, and
   enter the opposite direction immediately on the same bar.
 - Long AND short for perpetual futures (MARGIN account).
 
-NOTE — Hyperliquid live trading:
+NOTE -- Hyperliquid live trading:
   Verify the HL adapter supports contingent bracket orders before Phase 3.
   If not, swap _enter_bracket() to manual order submission tracked via
   on_order_filled() + cancel_order() on the opposing leg.
@@ -33,7 +33,12 @@ from typing import TYPE_CHECKING
 
 from nautilus_trader.config import PositiveFloat, PositiveInt
 from nautilus_trader.core.correctness import PyCondition
-from nautilus_trader.indicators import AverageTrueRange, ExponentialMovingAverage
+from nautilus_trader.indicators import (
+    AdaptiveMovingAverage,
+    AverageTrueRange,
+    MovingAverageFactory,
+    MovingAverageType,
+)
 from nautilus_trader.model.data import Bar, BarType
 from nautilus_trader.model.enums import OrderSide, OrderType
 from nautilus_trader.model.identifiers import InstrumentId
@@ -43,9 +48,18 @@ from nautilus_trader.trading.strategy import Strategy
 if TYPE_CHECKING:
     from nautilus_trader.model.instruments import Instrument
 
+_MA_TYPE_LOOKUP: dict[str, MovingAverageType] = {
+    "SMA":   MovingAverageType.SIMPLE,
+    "EMA":   MovingAverageType.EXPONENTIAL,
+    "HMA":   MovingAverageType.HULL,
+    "DEMA":  MovingAverageType.DOUBLE_EXPONENTIAL,
+    "AMA":   MovingAverageType.ADAPTIVE,
+    "VIDYA": MovingAverageType.VARIABLE_INDEX_DYNAMIC,
+}
 
-class EMACrossBracketConfig(StrategyConfig, frozen=True):
-    """Configuration for EMACrossBracket strategy.
+
+class MACrossBracketConfig(StrategyConfig, frozen=True):
+    """Configuration for MACrossBracket strategy.
 
     Parameters
     ----------
@@ -56,15 +70,24 @@ class EMACrossBracketConfig(StrategyConfig, frozen=True):
     trade_notional : Decimal
         The USD notional amount per trade. Quantity is computed dynamically
         from trade_notional / entry_price at each entry.
-    fast_ema_period : int, default 10
-        The fast EMA period.
-    slow_ema_period : int, default 20
-        The slow EMA period.
+    ma_type : str, default "EMA"
+        Moving average type: ``"EMA"`` | ``"SMA"`` | ``"HMA"`` |
+        ``"DEMA"`` | ``"AMA"`` | ``"VIDYA"``.
+    fast_period : int, default 10
+        The fast MA period.
+    slow_period : int, default 20
+        The slow MA period.
     atr_period : int, default 20
         The ATR period for bracket distance sizing.
     bracket_distance_atr : float, default 3.0
         SL and TP distance from entry = ATR x this multiplier.
         Symmetric: same distance for both stop-loss and take-profit (1:1 R:R).
+    ama_alpha_fast : int, default 2
+        Fast smoothing constant period for AMA (Kaufman).
+        Only used when ``ma_type="AMA"``.
+    ama_alpha_slow : int, default 30
+        Slow smoothing constant period for AMA (Kaufman).
+        Only used when ``ma_type="AMA"``.
     close_positions_on_stop : bool, default True
         If all open positions should be closed on strategy stop.
 
@@ -73,46 +96,61 @@ class EMACrossBracketConfig(StrategyConfig, frozen=True):
     instrument_id: InstrumentId
     bar_type: BarType
     trade_notional: Decimal
-    fast_ema_period: PositiveInt = 10
-    slow_ema_period: PositiveInt = 20
+    ma_type: str = "EMA"
+    fast_period: PositiveInt = 10
+    slow_period: PositiveInt = 20
     atr_period: PositiveInt = 20
     bracket_distance_atr: PositiveFloat = 3.0
+    ama_alpha_fast: PositiveInt = 2
+    ama_alpha_slow: PositiveInt = 30
     close_positions_on_stop: bool = True
 
 
-class EMACrossBracket(Strategy):
-    """EMA regime-based strategy with symmetric ATR bracket exits.
+class MACrossBracket(Strategy):
+    """MA regime-based strategy with symmetric ATR bracket exits.
 
-    Enters long when flat and fast EMA >= slow EMA.
-    Enters short when flat and fast EMA < slow EMA.
+    Enters long when flat and fast MA >= slow MA.
+    Enters short when flat and fast MA < slow MA.
     Exits via symmetric bracket orders (SL and TP at the same ATR distance).
 
-    After a TP or SL fill, re-enters on the next bar if the EMA regime still
+    After a TP or SL fill, re-enters on the next bar if the MA regime still
     holds (regime-based, not crossover-based).
 
     Parameters
     ----------
-    config : EMACrossBracketConfig
+    config : MACrossBracketConfig
         The configuration for the instance.
 
     Raises
     ------
     ValueError
-        If fast_ema_period >= slow_ema_period.
+        If ``config.fast_period`` is not less than ``config.slow_period``.
+        If ``config.ma_type`` is not a recognised type.
 
     """
 
-    def __init__(self, config: EMACrossBracketConfig) -> None:
+    def __init__(self, config: MACrossBracketConfig) -> None:
         PyCondition.is_true(
-            config.fast_ema_period < config.slow_ema_period,
-            f"{config.fast_ema_period=} must be less than {config.slow_ema_period=}",
+            config.fast_period < config.slow_period,
+            f"{config.fast_period=} must be less than {config.slow_period=}",
         )
+        PyCondition.is_in(config.ma_type, _MA_TYPE_LOOKUP, "config.ma_type", "_MA_TYPE_LOOKUP")
         super().__init__(config)
 
         self.instrument: Instrument | None = None
 
-        self.fast_ema = ExponentialMovingAverage(config.fast_ema_period)
-        self.slow_ema = ExponentialMovingAverage(config.slow_ema_period)
+        ma_enum = _MA_TYPE_LOOKUP[config.ma_type]
+        if config.ma_type == "AMA":
+            self.fast_ma = AdaptiveMovingAverage(
+                config.fast_period, config.ama_alpha_fast, config.ama_alpha_slow,
+            )
+            self.slow_ma = AdaptiveMovingAverage(
+                config.slow_period, config.ama_alpha_fast, config.ama_alpha_slow,
+            )
+        else:
+            self.fast_ma = MovingAverageFactory.create(config.fast_period, ma_enum)
+            self.slow_ma = MovingAverageFactory.create(config.slow_period, ma_enum)
+
         self.atr = AverageTrueRange(config.atr_period)
 
     def on_start(self) -> None:
@@ -123,11 +161,11 @@ class EMACrossBracket(Strategy):
             self.stop()
             return
 
-        self.register_indicator_for_bars(self.config.bar_type, self.fast_ema)
-        self.register_indicator_for_bars(self.config.bar_type, self.slow_ema)
+        self.register_indicator_for_bars(self.config.bar_type, self.fast_ma)
+        self.register_indicator_for_bars(self.config.bar_type, self.slow_ma)
         self.register_indicator_for_bars(self.config.bar_type, self.atr)
 
-        lookback_bars = max(self.config.slow_ema_period, self.config.atr_period) + 10
+        lookback_bars = max(self.config.slow_period, self.config.atr_period) + 10
         self.request_bars(
             self.config.bar_type,
             start=self._clock.utc_now() - timedelta(hours=lookback_bars),
@@ -135,18 +173,18 @@ class EMACrossBracket(Strategy):
         self.subscribe_bars(self.config.bar_type)
 
     def on_bar(self, bar: Bar) -> None:
-        """Evaluate EMA regime on each bar and manage bracket entries."""
+        """Evaluate MA regime on each bar and manage bracket entries."""
         if not self.indicators_initialized():
             return
 
         if bar.is_single_price():
             return
 
-        fast = self.fast_ema.value
-        slow = self.slow_ema.value
+        fast = self.fast_ma.value
+        slow = self.slow_ma.value
         atr = self.atr.value
 
-        # BUY regime: fast EMA >= slow EMA
+        # BUY regime: fast MA >= slow MA
         if fast >= slow:
             if self.portfolio.is_flat(self.config.instrument_id):
                 self.cancel_all_orders(self.config.instrument_id)
@@ -156,7 +194,7 @@ class EMACrossBracket(Strategy):
                 self.close_all_positions(self.config.instrument_id)
                 self._enter_bracket(OrderSide.BUY, bar, atr)
 
-        # SELL regime: fast EMA < slow EMA
+        # SELL regime: fast MA < slow MA
         elif fast < slow:
             if self.portfolio.is_flat(self.config.instrument_id):
                 self.cancel_all_orders(self.config.instrument_id)
@@ -186,7 +224,7 @@ class EMACrossBracket(Strategy):
 
         """
         if self.instrument is None:
-            self.log.error("Instrument not loaded — cannot enter position")
+            self.log.error("Instrument not loaded -- cannot enter position")
             return
 
         entry_price = float(bar.close)
@@ -201,7 +239,7 @@ class EMACrossBracket(Strategy):
 
         price_dec = Decimal(str(entry_price))
         if price_dec <= 0:
-            self.log.warning("Invalid price — cannot compute quantity")
+            self.log.warning("Invalid price -- cannot compute quantity")
             return
 
         qty = self.instrument.make_qty(self.config.trade_notional / price_dec)
@@ -238,6 +276,6 @@ class EMACrossBracket(Strategy):
 
     def on_reset(self) -> None:
         """Reset indicators for engine reuse (parameter sweeps)."""
-        self.fast_ema.reset()
-        self.slow_ema.reset()
+        self.fast_ma.reset()
+        self.slow_ma.reset()
         self.atr.reset()
