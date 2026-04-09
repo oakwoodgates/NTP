@@ -39,6 +39,7 @@ from nautilus_trader.indicators import (
     BollingerBands,
     DonchianChannel,
     ExponentialMovingAverage,
+    HullMovingAverage,
     MovingAverageConvergenceDivergence,
     RelativeStrengthIndex,
     SimpleMovingAverage,
@@ -64,7 +65,7 @@ _FLAG_TEXT = "#777777"
 
 # ── MA class dispatch ────────────────────────────────────────────────────────
 
-_MA_CLASSES = {"EMA": ExponentialMovingAverage, "SMA": SimpleMovingAverage}
+_MA_CLASSES = {"EMA": ExponentialMovingAverage, "SMA": SimpleMovingAverage, "HMA": HullMovingAverage}
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -111,6 +112,29 @@ def plot_sma_cross(
     _add_ma_lines(fig, ohlcv, fast_period, slow_period, ma_type="SMA")
     _add_trade_markers(fig, buys, sells, ohlcv)
     title = f"{instrument_label} · {bar_label} · SMACross({fast_period}/{slow_period})"
+    _apply_base_layout(fig, title, height)
+    return fig
+
+
+def plot_hma_cross(
+    bars: list[Bar],
+    fills_report: pd.DataFrame,
+    fast_period: int,
+    slow_period: int,
+    *,
+    instrument_label: str = "",
+    bar_label: str = "1h",
+    height: int = 600,
+) -> go.Figure:
+    """Candlestick chart with HMA overlays and trade entry markers."""
+    ohlcv = _bars_to_ma_ohlcv(bars, fast_period, slow_period, ma_type="HMA")
+    buys, sells = _parse_fills(fills_report)
+
+    fig = go.Figure()
+    _add_candlesticks(fig, ohlcv)
+    _add_ma_lines(fig, ohlcv, fast_period, slow_period, ma_type="HMA")
+    _add_trade_markers(fig, buys, sells, ohlcv)
+    title = f"{instrument_label} · {bar_label} · HMACross({fast_period}/{slow_period})"
     _apply_base_layout(fig, title, height)
     return fig
 
@@ -1133,9 +1157,20 @@ def _bars_to_df(bars: list) -> pd.DataFrame:
 
 
 def _ma_series(close: pd.Series, period: int, ma_type: str = "EMA") -> pd.Series:
-    """MA using pandas — EMA (ewm) or SMA (rolling)."""
+    """MA using pandas — EMA (ewm), SMA (rolling), or HMA (Hull)."""
     if ma_type == "SMA":
         return close.rolling(window=period).mean()
+    if ma_type == "HMA":
+        half = max(period // 2, 1)
+        sqrt_p = max(int(math.sqrt(period)), 1)
+
+        def _wma(s: pd.Series, w: int) -> pd.Series:
+            weights = list(range(1, w + 1))
+            return s.rolling(window=w).apply(
+                lambda x: np.average(x, weights=weights), raw=True,
+            )
+
+        return _wma(2 * _wma(close, half) - _wma(close, period), sqrt_p)
     return close.ewm(span=period, adjust=False).mean()
 
 
