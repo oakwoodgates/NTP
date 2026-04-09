@@ -128,7 +128,7 @@ You should receive messages for fills, position closes (WIN/LOSS with PnL), and 
 Change these in `.env`:
 
 ```bash
-# Strategy: MACross | EMACross | SMACross | HMACross | DEMACross | AMACross | VIDYACross | EMACrossATR | MACDRSI
+# Strategy: MACross | …Cross | MACrossLongOnly | …CrossLongOnly | EMACrossATR | MACDRSI
 STRATEGY=MACross
 
 # Instrument: BTC | ETH | SOL
@@ -155,6 +155,17 @@ Then restart: Ctrl+C the running node, `python scripts/run_sandbox.py`.
 | DEMACross | DEMA | Double Exponential MA crossover (smoother) | fast=10, slow=20 |
 | AMACross | AMA | Kaufman Adaptive MA crossover (volatility-adaptive) | fast=10, slow=20 |
 | VIDYACross | VIDYA | Variable Index Dynamic Average crossover (CMO-adaptive) | fast=10, slow=20 |
+
+**MA crossover long-only variants** (all use unified `ma_cross_long_only.py` — never opens short positions):
+
+| Strategy | MA Type | Description | Default params |
+|----------|---------|-------------|----------------|
+| MACrossLongOnly / EMACrossLongOnly | EMA | Exponential MA long-only | fast=10, slow=20 |
+| SMACrossLongOnly | SMA | Simple MA long-only | fast=10, slow=20 |
+| HMACrossLongOnly | HMA | Hull MA long-only | fast=10, slow=20 |
+| DEMACrossLongOnly | DEMA | Double Exponential MA long-only | fast=10, slow=20 |
+| AMACrossLongOnly | AMA | Kaufman Adaptive MA long-only | fast=10, slow=20 |
+| VIDYACrossLongOnly | VIDYA | Variable Index Dynamic Average long-only | fast=10, slow=20 |
 
 **Other strategies:**
 
