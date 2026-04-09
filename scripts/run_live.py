@@ -8,7 +8,7 @@ Requires HL_TESTNET=false in .env for mainnet. Defaults to true (testnet).
 Do NOT run this until paper trading (run_sandbox.py) has been stable for 2+ weeks.
 
 Configure via .env or environment variables:
-    STRATEGY=EMACross         # EMACross | SMACross | EMACrossATR | MACDRSI
+    STRATEGY=MACross          # MACross | EMACross | SMACross | HMACross | DEMACross | AMACross | VIDYACross | EMACrossATR | MACDRSI
     INSTRUMENT_ID=BTC-USD-PERP.HYPERLIQUID
     BAR_INTERVAL=1-HOUR-LAST-EXTERNAL
     TRADE_NOTIONAL=100        # USD notional per trade (all strategies)
@@ -62,7 +62,10 @@ def _build_strategy(
 
     To customize strategy-specific parameters, edit the defaults below.
     """
-    _ma_cross_types = {"MACross": "EMA", "EMACross": "EMA", "SMACross": "SMA", "HMACross": "HMA"}
+    _ma_cross_types = {
+        "MACross": "EMA", "EMACross": "EMA", "SMACross": "SMA", "HMACross": "HMA",
+        "DEMACross": "DEMA", "AMACross": "AMA", "VIDYACross": "VIDYA",
+    }
     if strategy_name in _ma_cross_types:
         from src.strategies.ma_cross import MACross, MACrossConfig
         ma_type = _ma_cross_types[strategy_name]
@@ -112,7 +115,10 @@ def _build_strategy(
             "signal": signal, "rsi": rsi, "notional": str(trade_notional),
         }
 
-    valid = ["MACross", "EMACross", "SMACross", "HMACross", "EMACrossATR", "MACDRSI"]
+    valid = [
+        "MACross", "EMACross", "SMACross", "HMACross",
+        "DEMACross", "AMACross", "VIDYACross", "EMACrossATR", "MACDRSI",
+    ]
     msg = f"Unknown strategy: {strategy_name!r}. Valid: {valid}"
     raise ValueError(msg)
 

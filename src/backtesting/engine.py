@@ -293,18 +293,19 @@ def run_sweep(
         Callback ``(engine, params) -> None`` that adds a strategy to the
         engine using the given params.  Example::
 
-            def ema_factory(eng, params):
-                cfg = EMACrossConfig(
+            def ma_factory(eng, params):
+                cfg = MACrossConfig(
                     instrument_id=instrument.id,
                     bar_type=BarType.from_str(BAR_TYPE_STR),
                     trade_notional=TRADE_NOTIONAL,
-                    fast_ema_period=params["fast"],
-                    slow_ema_period=params["slow"],
+                    ma_type="EMA",
+                    fast_period=params["fast"],
+                    slow_period=params["slow"],
                 )
-                eng.add_strategy(EMACross(cfg))
+                eng.add_strategy(MACross(cfg))
 
     strategy_name
-        Human-readable strategy label, e.g. ``"EMACross"``.
+        Human-readable strategy label, e.g. ``"MACross-EMA"``.
     instrument_id
         Instrument string, e.g. ``"BTC-USD-PERP.HYPERLIQUID"``.
     bar_interval
@@ -414,7 +415,7 @@ def load_sweeps(
     -------
     dict[str, pd.DataFrame]
         Keys are human-readable labels derived from filename,
-        e.g. ``"EMACross · BTC-USD-PERP.HYPERLIQUID · 5m"``.
+        e.g. ``"MACross-EMA · BTC-USD-PERP.HYPERLIQUID · 5m"``.
 
     """
     sweep_path = Path(sweep_dir)
