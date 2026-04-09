@@ -95,25 +95,30 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │   ├── provisioning/        # Declarative datasource + dashboard config
 │   └── dashboards/          # Dashboard JSON (committed)
 ├── notebooks/               # Jupyter research + validation
-│   ├── backtest_ema_cross.ipynb       # EMA crossover backtest + sweep
-│   ├── backtest_sma_cross.ipynb       # SMA crossover backtest + sweep
-│   ├── backtest_hma_cross.ipynb       # HMA (Hull) crossover backtest + sweep
-│   ├── backtest_dema_cross.ipynb      # DEMA (Double EMA) crossover backtest + sweep
-│   ├── backtest_ama_cross.ipynb       # AMA (Kaufman Adaptive) crossover backtest + sweep
-│   ├── backtest_vidya_cross.ipynb     # VIDYA crossover backtest + sweep
-│   ├── backtest_ema_cross_atr.ipynb   # MA crossover + ATR bracket (all MA types)
-│   ├── backtest_ema_cross_bracket.ipynb   # MA regime + ATR bracket (all MA types)
-│   ├── backtest_ema_cross_long_only.ipynb
-│   ├── backtest_bb_meanrev.ipynb
-│   ├── backtest_macd_rsi.ipynb
-│   ├── backtest_donchian_breakout.ipynb
+│   ├── backtest/             # Per-strategy backtest + sweep notebooks
+│   │   ├── ema_cross.ipynb          # EMA crossover backtest + sweep
+│   │   ├── sma_cross.ipynb          # SMA crossover
+│   │   ├── hma_cross.ipynb          # HMA (Hull) crossover
+│   │   ├── dema_cross.ipynb         # DEMA (Double EMA) crossover
+│   │   ├── ama_cross.ipynb          # AMA (Kaufman Adaptive) crossover
+│   │   ├── vidya_cross.ipynb        # VIDYA crossover
+│   │   ├── ema_cross_atr.ipynb      # MA crossover + ATR bracket (all MA types)
+│   │   ├── ema_cross_bracket.ipynb  # MA regime + ATR bracket (all MA types)
+│   │   ├── ema_cross_long_only.ipynb
+│   │   ├── ema_cross_stop_entry.ipynb
+│   │   ├── ema_cross_tp.ipynb
+│   │   ├── ema_cross_trailing_stop.ipynb
+│   │   ├── bb_meanrev.ipynb
+│   │   ├── macd_rsi.ipynb
+│   │   └── donchian_breakout.ipynb
+│   ├── verify/               # Data pipeline + signal verification
+│   │   ├── 01_pipeline.ipynb        # Data pipeline verification
+│   │   ├── 02_data.ipynb            # Catalog vs exchange spot-checks
+│   │   ├── 03_signals.ipynb         # Indicator / signal verification
+│   │   └── 04_persistence.ipynb     # DB persistence verification
 │   ├── compare_sweeps.ipynb       # Cross-instrument/timeframe comparison
 │   ├── validate_strategy.ipynb    # Walk-forward, plateau, bootstrap
 │   ├── review_live_run.ipynb      # Post-run analysis of live/paper trades
-│   ├── verify_01_pipeline.ipynb   # Data pipeline verification
-│   ├── verify_02_data.ipynb       # Catalog vs exchange spot-checks
-│   ├── verify_03_signals.ipynb    # Indicator / signal verification
-│   ├── verify_04_persistence.ipynb # DB persistence verification
 │   ├── charts.py                  # Plotting helpers (plotly, matplotlib, TVLC reports)
 │   └── utils.py                   # Shared notebook helpers (make_instrument_id, save_tearsheet,
 │                                  #   save_notebook, save_notebook_html)

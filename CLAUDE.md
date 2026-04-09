@@ -170,7 +170,7 @@ React Frontend ←WebSocket/REST→ FastAPI Gateway        ← Phase 3b (future)
 
 ### Notebook conventions
 
-- **Category-prefix naming, not sequential numbers.** `backtest_ema_cross.ipynb`, not `02_backtest_ema_cross.ipynb`. Prefixes group by purpose: `backtest_*`, `compare_*`, `validate_*`, `verify_*`.
+- **Subdirectory grouping.** Backtest notebooks live in `notebooks/backtest/`, verification notebooks in `notebooks/verify/`. Workflow notebooks (`compare_sweeps`, `validate_strategy`, `review_live_run`) and shared helpers (`charts.py`, `utils.py`) stay in the `notebooks/` root. Subdirectory notebooks add `sys.path.insert(0, str(__import__("pathlib").Path("..").resolve()))` in Cell 1 so `charts` and `utils` imports resolve.
 - **Sweep results auto-persist to Parquet.** Use `run_sweep()` instead of manual `run_single_backtest` loops. Results land in `data/sweeps/` with deterministic filenames.
 - **Strategy factory pattern.** Each backtest notebook defines a `strategy_factory(engine, params)` callable that `run_sweep` and `run_walk_forward` use. This keeps sweep/validation code strategy-agnostic.
 - **Shared config in Cell 1.** All tuneable values live in Cell 1: `EXCHANGE`, `ASSET`, `INSTRUMENT_ID` (via `make_instrument_id(ASSET, EXCHANGE)`), `BAR_INTERVAL`, `SAVE_TEARSHEET`, `RESULT_NAME`, etc. `RESULT_NAME` is the canonical filename stem used by tearsheet save, TradingView HTML export, and notebook snapshot save.
@@ -211,14 +211,15 @@ scripts/
 ├── run_sandbox.py        # Paper trading runner (SandboxExecutionClient)
 └── run_live.py           # Live trading runner (HyperliquidExecClient)
 notebooks/            # Jupyter research + charts.py plotting helpers
-├── backtest_*.ipynb      # Per-strategy backtest + sweep notebooks
+├── backtest/             # Per-strategy backtest + sweep notebooks
+│   ├── ema_cross.ipynb, sma_cross.ipynb, hma_cross.ipynb, ...
+│   ├── bb_meanrev.ipynb, macd_rsi.ipynb, donchian_breakout.ipynb
+│   └── ...
+├── verify/               # Data pipeline + signal verification
+│   ├── 01_pipeline.ipynb, 02_data.ipynb, 03_signals.ipynb, 04_persistence.ipynb
 ├── compare_sweeps.ipynb       # Cross-instrument, cross-timeframe comparison
 ├── validate_strategy.ipynb    # Walk-forward, plateau, bootstrap validation
 ├── review_live_run.ipynb      # Post-run analysis of live/paper trades
-├── verify_01_pipeline.ipynb   # Data pipeline verification
-├── verify_02_data.ipynb       # Catalog vs exchange spot-checks
-├── verify_03_signals.ipynb    # Indicator / signal verification
-├── verify_04_persistence.ipynb # DB persistence verification
 ├── charts.py                  # Plotly, matplotlib, TVLC HTML report generation
 └── utils.py                   # Shared notebook helpers (make_instrument_id, save_tearsheet,
 │                              #   save_notebook, save_notebook_html)
@@ -228,10 +229,10 @@ data/
 reports/              # Generated reports (gitignored)
 ├── charts/           # TradingView Lightweight Charts HTML reports
 ├── html/
-│   ├── backtest/     # Notebook HTML exports from backtest_*.ipynb
+│   ├── backtest/     # Notebook HTML exports from notebooks/backtest/
 │   └── validate/     # Notebook HTML exports from validate_strategy.ipynb
 ├── notebooks/
-│   ├── backtest/     # Notebook snapshots from backtest_*.ipynb
+│   ├── backtest/     # Notebook snapshots from notebooks/backtest/
 │   └── validate/     # Notebook snapshots from validate_strategy.ipynb
 └── tearsheets/       # NT tearsheet HTML (saved when SAVE_TEARSHEET=True)
 tests/                # unit/ and integration/
@@ -319,19 +320,19 @@ python scripts/fetch_binance_candles.py --update
 **For quick iteration/debugging:** `docker compose up -d postgres redis grafana` then `python scripts/run_sandbox.py` natively.
 
 ### Phase 3a workflow (research + validation)
-1. Create or open a `backtest_*.ipynb` notebook for the strategy.
+1. Create or open a notebook in `notebooks/backtest/` for the strategy.
 2. Define a `strategy_factory(engine, params)` function and a list of `param_combos`.
 3. Call `run_sweep()` — results auto-save to `data/sweeps/{strategy}_{instrument}_{interval}.parquet`.
 4. Inspect heatmaps in the backtest notebook. For multi-stage sweeps (e.g. MACD periods → RSI thresholds), use a different `strategy_name` for the sensitivity sweep.
-5. Compare across instruments/timeframes: open `compare_sweeps.ipynb`, call `load_sweeps()` (optionally filtered by strategy/instrument/interval). Review the best-params table and parameter stability analysis.
-6. Validate before paper trading: open `validate_strategy.ipynb`, point it at the sweep file and strategy factory. Run plateau detection, walk-forward, and bootstrap. Check the go/no-go assessment.
+5. Compare across instruments/timeframes: open `notebooks/compare_sweeps.ipynb`, call `load_sweeps()` (optionally filtered by strategy/instrument/interval). Review the best-params table and parameter stability analysis.
+6. Validate before paper trading: open `notebooks/validate_strategy.ipynb`, point it at the sweep file and strategy factory. Run plateau detection, walk-forward, and bootstrap. Check the go/no-go assessment.
 7. Only proceed to paper trading (Phase 2 workflow) if validation passes.
 
 ### Adding a new strategy
 1. Create a new file in `src/strategies/`.
 2. Subclass `nautilus_trader.trading.strategy.Strategy`.
 3. Implement `on_start()`, `on_bar()` (or `on_quote_tick()`), and order management callbacks.
-4. Create a `backtest_*.ipynb` notebook. Define a `strategy_factory` and `param_combos`.
+4. Create a notebook in `notebooks/backtest/`. Define a `strategy_factory` and `param_combos`.
 5. Run sweep → validate → paper trade → live.
 
 ### Adding a new API endpoint (Phase 3b+)
