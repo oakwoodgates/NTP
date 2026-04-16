@@ -36,6 +36,7 @@ from src.core.instruments import (
     with_venue_config,
 )
 from src.core.utils import bar_type_str
+from src.core.venues import VENUE_CONFIGS, VenueConfig, get_venue_config
 
 __all__ = [
     "BINANCE_CANDLE_LIMIT",
@@ -54,7 +55,10 @@ __all__ = [
     "SETTLEMENT_CURRENCY",
     "TAKER_FEE",
     "TS_INIT_DELTAS",
+    "VENUE_CONFIGS",
+    "VenueConfig",
     "bar_type_str",
+    "get_venue_config",
     "make_binance_perp",
     "make_binance_spot",
     "make_hyperliquid_perp",
