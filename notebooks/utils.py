@@ -12,15 +12,27 @@ from nbconvert import HTMLExporter
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
-def make_instrument_id(asset: str, exchange: str) -> str:
-    """Build a perp instrument ID string for the given exchange.
+def make_instrument_id(asset: str, data_source: str) -> str:
+    """Build an instrument ID string for the given data source.
 
-    Hyperliquid uses ``BTC-USD-PERP.HYPERLIQUID`` format.
-    Binance (and others) use ``BTCUSDT-PERP.BINANCE`` format.
+    Accepts both qualified names (``"BINANCE_PERP"``) and legacy
+    unqualified names (``"BINANCE"``) for backward compatibility
+    with un-migrated notebooks.
+
+    Examples::
+
+        HYPERLIQUID_PERP → BTC-USD-PERP.HYPERLIQUID
+        BINANCE_PERP     → BTCUSDT-PERP.BINANCE
+        BINANCE_SPOT     → BTCUSDT.BINANCE
+
     """
-    if exchange == "HYPERLIQUID":
-        return f"{asset}-USD-PERP.{exchange}"
-    return f"{asset}USDT-PERP.{exchange}"
+    if data_source in ("HYPERLIQUID", "HYPERLIQUID_PERP"):
+        return f"{asset}-USD-PERP.HYPERLIQUID"
+    if data_source in ("BINANCE", "BINANCE_PERP"):
+        return f"{asset}USDT-PERP.BINANCE"
+    if data_source == "BINANCE_SPOT":
+        return f"{asset}USDT.BINANCE"
+    raise ValueError(f"Unknown data source: {data_source!r}")
 
 def save_tearsheet(html: str, result_name: str) -> Path:
     """Save a tearsheet HTML string to reports/tearsheets/."""
