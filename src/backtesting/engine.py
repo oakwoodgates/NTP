@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -63,6 +64,7 @@ def make_engine(
     instrument: Instrument,
     bars: list[Bar],
     starting_capital: int | float,
+    leverage: int = 1,
     log_level: str = "ERROR",
 ) -> BacktestEngine:
     """Create a configured BacktestEngine with venue, instrument, and data.
@@ -77,6 +79,9 @@ def make_engine(
         Bar data to feed.
     starting_capital
         Starting balance in the instrument's settlement currency.
+    leverage
+        Account leverage (e.g. 20 for 20x). Passed as default_leverage
+        to the simulated venue.
     log_level
         NT log level. Default ``"ERROR"`` to avoid stdout flooding.
 
@@ -89,6 +94,7 @@ def make_engine(
         account_type=AccountType.MARGIN,
         base_currency=None,
         starting_balances=[Money(starting_capital, instrument.settlement_currency)],
+        default_leverage=Decimal(leverage),
     )
     engine.add_instrument(instrument)
     engine.add_data(bars)
@@ -103,6 +109,7 @@ def run_single_backtest(
     params: dict[str, Any],
     add_strategy: Callable[[BacktestEngine], None],
     score_from_ns: int | None = None,
+    leverage: int = 1,
     log_level: str = "ERROR",
 ) -> dict[str, Any]:
     """Run one backtest and return a flat dict of results.
@@ -132,6 +139,8 @@ def run_single_backtest(
         analysis to exclude trades that fire during the warmup period
         (bars prepended for indicator initialization).  When ``None``
         (the default), all positions are scored.
+    leverage
+        Account leverage (e.g. 20 for 20x).
     log_level
         NT log level.
 
@@ -143,7 +152,7 @@ def run_single_backtest(
         ``min_balance``, ``error``, and analyzer performance stats.
 
     """
-    eng = make_engine(venue, instrument, bars, starting_capital, log_level)
+    eng = make_engine(venue, instrument, bars, starting_capital, leverage, log_level)
     add_strategy(eng)
 
     row: dict[str, Any] = {**params}
@@ -266,6 +275,7 @@ def run_sweep(
     sweep_name: str | None = None,
     save_sweep: bool = True,
     sweep_dir: str | Path = _DEFAULT_SWEEP_DIR,
+    leverage: int = 1,
     log_level: str = "ERROR",
     verbose: bool = True,
 ) -> pd.DataFrame:
@@ -345,6 +355,7 @@ def run_sweep(
             starting_capital=starting_capital,
             params=params,
             add_strategy=lambda eng, p=params: strategy_factory(eng, p),  # type: ignore[misc]
+            leverage=leverage,
             log_level=log_level,
         )
         results.append(row)
@@ -475,6 +486,7 @@ def run_walk_forward(
     test_pct: float = 0.125,
     select_by: str = "total_pnl",
     warmup_bars: int = 200,
+    leverage: int = 1,
     log_level: str = "ERROR",
     verbose: bool = True,
 ) -> pd.DataFrame:
@@ -615,6 +627,7 @@ def run_walk_forward(
                 params=params,
                 add_strategy=lambda eng, p=params: strategy_factory(eng, p),  # type: ignore[misc]
                 score_from_ns=train_score_from_ns,
+                leverage=leverage,
                 log_level=log_level,
             )
             train_results.append(row)
@@ -652,6 +665,7 @@ def run_walk_forward(
             params=best_params,
             add_strategy=lambda eng, p=best_params: strategy_factory(eng, p),  # type: ignore[misc]
             score_from_ns=test_score_from_ns,
+            leverage=leverage,
             log_level=log_level,
         )
 
