@@ -379,6 +379,7 @@ def run_fee_sweep(
     strategy_factory: Callable[[BacktestEngine, dict[str, Any]], None],
     *,
     fee_levels_bps: list[float] | None = None,
+    leverage: int = 1,
     log_level: str = "ERROR",
     verbose: bool = True,
 ) -> pd.DataFrame:
@@ -433,19 +434,13 @@ def run_fee_sweep(
     levels = fee_levels_bps if fee_levels_bps is not None else _DEFAULT_FEE_LEVELS_BPS
     total = len(levels)
 
-    # Derive leverage from instrument's margin_init
-    max_leverage = int(Decimal(1) / instrument.margin_init)
-    if max_leverage <= 1 and instrument.margin_init >= Decimal(1):
-        msg = "Instrument appears unconfigured — apply with_venue_config() before run_fee_sweep()"
-        raise ValueError(msg)
-
     results: list[dict[str, Any]] = []
     t0 = time.monotonic()
 
     for i, fee_bps in enumerate(levels, 1):
         fee_rate = Decimal(str(fee_bps)) / Decimal("10000")
         modified = with_venue_config(
-            instrument, max_leverage,
+            instrument,
             maker_fee=fee_rate, taker_fee=fee_rate,
         )
 
@@ -456,6 +451,7 @@ def run_fee_sweep(
             starting_capital=starting_capital,
             params=params,
             add_strategy=lambda eng, p=params: strategy_factory(eng, p),  # type: ignore[misc]
+            leverage=leverage,
             log_level=log_level,
         )
 
