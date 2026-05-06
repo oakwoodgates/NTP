@@ -324,7 +324,8 @@ class TestFilenameBehavior:
         assert "EMACross" in out.name
         assert "/" not in out.name
 
-    def test_custom_filename_used_verbatim(self, tmp_path: Path) -> None:
+    def test_custom_stem_appends_timestamp(self, tmp_path: Path) -> None:
+        # Stem (no .html) → snapshot mode: appends "_{ts}.html".
         out = generate_v2_tearsheet(
             positions=_make_positions(),
             account_report=_make_account_report(),
@@ -333,4 +334,22 @@ class TestFilenameBehavior:
             output_dir=tmp_path,
             filename="my_custom_name",
         )
-        assert out.name == "my_custom_name.html"
+        # File name should start with "my_custom_name_" and end ".html".
+        assert out.name.startswith("my_custom_name_")
+        assert out.name.endswith(".html")
+        # Roughly the timestamp shape "YYYYMMDD_HHMMSS"
+        ts_part = out.name[len("my_custom_name_") : -len(".html")]
+        assert len(ts_part) == 15
+        assert ts_part[8] == "_"
+
+    def test_custom_full_filename_used_verbatim(self, tmp_path: Path) -> None:
+        # Full filename ending in .html → deterministic mode (overwrites).
+        out = generate_v2_tearsheet(
+            positions=_make_positions(),
+            account_report=_make_account_report(),
+            bars=_make_bars(),
+            starting_capital=10000,
+            output_dir=tmp_path,
+            filename="my_exact_name.html",
+        )
+        assert out.name == "my_exact_name.html"

@@ -3818,6 +3818,13 @@ def generate_v2_tearsheet(
     )
 
     # ── Resolve output path ──────────────────────────────────────────────
+    # Naming convention (matches generate_backtest_html):
+    #   • If user passes a stem (no .html), append "_{ts}.html" — snapshot
+    #     mode, accumulates across runs of the same config.
+    #   • If user passes a full filename ending in ".html", use verbatim —
+    #     deterministic mode, overwrites on re-run.
+    #   • If filename is None, fall back to a derived stem from
+    #     ``strategy_label`` plus timestamp.
     from datetime import datetime, timezone
     if output_dir is None:
         proj_root = Path(__file__).resolve().parent.parent
@@ -3825,15 +3832,16 @@ def generate_v2_tearsheet(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
     if filename is None:
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
         safe_label = (
             (strategy_label or "tearsheet")
             .replace(" ", "_").replace("/", "-").replace("|", "-")
         )
-        filename = f"v2_tearsheet_{safe_label}_{ts}"
-    if not filename.endswith(".html"):
-        filename = f"{filename}.html"
+        filename = f"v2_tearsheet_{safe_label}_{ts}.html"
+    elif not filename.endswith(".html"):
+        # User-supplied stem → append timestamp + extension.
+        filename = f"{filename}_{ts}.html"
     out_path = output_dir / filename
 
     # ── Render charts to base64 PNGs ─────────────────────────────────────
