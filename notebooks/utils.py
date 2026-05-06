@@ -5,9 +5,13 @@ from __future__ import annotations
 import shutil
 from datetime import datetime
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import nbformat
 from nbconvert import HTMLExporter
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -148,3 +152,551 @@ def save_notebook_html(
     dest.write_text(body, encoding="utf-8")
     print(f"Saved -> {dest}")
     return dest
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Backtest setup helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def load_backtest_data(
+    catalog_path: str | Path,
+    instrument_id: str,
+    bar_type_str: str,
+    *,
+    venue_config: Any = None,
+    date_start: str | None = None,
+    date_end: str | None = None,
+) -> tuple[Any, list]:
+    """Load instrument + bars from a NT ParquetDataCatalog.
+
+    Standard "load data and override fees" boilerplate used at the top of
+    every backtest notebook.
+
+    Parameters
+    ----------
+    catalog_path
+        Path to the catalog root.
+    instrument_id
+        Instrument string, e.g. ``"BTC-USD-PERP.HYPERLIQUID"``.
+    bar_type_str
+        Bar type string, e.g. ``"BTC-USD-PERP.HYPERLIQUID-1-DAY-LAST-EXTERNAL"``.
+    venue_config
+        Optional ``VenueConfig`` whose ``maker_fee`` and ``taker_fee`` will
+        override the loaded instrument's fees.  Useful for cross-venue
+        simulation (e.g. Binance data with Hyperliquid fees).  When
+        ``None``, the instrument's stored fees are used as-is.
+    date_start, date_end
+        Optional ISO date strings to filter bars (inclusive).  Each may be
+        ``None``.
+
+    Returns
+    -------
+    tuple[Instrument, list[Bar]]
+        The configured instrument and the (possibly filtered) bar list.
+
+    """
+    import pandas as pd
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+    from src.core import with_venue_config
+
+    catalog = ParquetDataCatalog(str(catalog_path))
+    instrument = catalog.instruments(instrument_ids=[instrument_id])[0]
+    bars = catalog.bars(bar_types=[bar_type_str])
+
+    if date_start or date_end:
+        start_ns = pd.Timestamp(date_start, tz="UTC").value if date_start else None
+        end_ns = pd.Timestamp(date_end, tz="UTC").value if date_end else None
+        bars = [
+            b for b in bars
+            if (start_ns is None or b.ts_event >= start_ns)
+            and (end_ns is None or b.ts_event <= end_ns)
+        ]
+
+    if venue_config is not None:
+        instrument = with_venue_config(
+            instrument,
+            maker_fee=venue_config.maker_fee,
+            taker_fee=venue_config.taker_fee,
+        )
+
+    return instrument, bars
+
+
+def print_setup_summary(
+    instrument: Any,
+    bars: list,
+    *,
+    data_source: str,
+    exec_venue: str,
+    leverage: int | float,
+) -> None:
+    """Print the standard "data + fees" summary block.
+
+    Companion to :func:`load_backtest_data`.  Surfaces the data
+    provenance (which catalog file, which venue's fees) and a
+    cross-venue warning when applicable.
+    """
+    import pandas as pd
+
+    print(f"Data source : {data_source}")
+    print(f"Venue       : {instrument.venue}")
+    print(f"Exec venue  : {exec_venue} (simulated)")
+    print(f"Instrument  : {instrument.id}")
+    print(f"Currency    : {instrument.settlement_currency}")
+    print(f"Leverage    : {leverage}x")
+    print(f"Maker fee   : {instrument.maker_fee}  (from {exec_venue})")
+    print(f"Taker fee   : {instrument.taker_fee}  (from {exec_venue})")
+    print(f"Bar count   : {len(bars):,}")
+    if bars:
+        print(f"First bar   : {pd.Timestamp(bars[0].ts_event, unit='ns', tz='UTC')}")
+        print(f"Last bar    : {pd.Timestamp(bars[-1].ts_event, unit='ns', tz='UTC')}")
+    if data_source != exec_venue:
+        print(f"⚠ Cross-venue simulation: {data_source} data → {exec_venue} fees")
+
+
+def print_liquidation_resolution(
+    liq_resolved: Any,
+    leverage: int | float,
+) -> None:
+    """Print the resolved liquidation config.
+
+    Companion to ``resolve_strategy_liquidation_config``.  Surfaces the
+    final values the simulator will use plus the derived "alive
+    threshold" (IM + fee buffer) so the user can sanity-check that
+    threshold against their starting capital.
+    """
+    if liq_resolved is None or not liq_resolved.enabled:
+        print()
+        print("Liquidation        : disabled "
+              "(set LIQUIDATION.enabled=True in Cell 1)")
+        return
+
+    floor_im = float(liq_resolved.min_trade_notional) / float(leverage)
+    fee_buffer = (
+        float(liq_resolved.min_trade_notional)
+        * float(liq_resolved.fee_rate)
+        * 2
+        * liq_resolved.alive_trades_buffer
+    )
+    threshold = floor_im + fee_buffer
+    print()
+    print("Liquidation        : ENABLED")
+    print(f"  mm_rate           : {liq_resolved.mm_rate}")
+    print(f"  fee_rate          : {liq_resolved.fee_rate}")
+    print(f"  min_trade_notional: {liq_resolved.min_trade_notional}")
+    print(f"  alive_buffer      : {liq_resolved.alive_trades_buffer}")
+    print(f"  halt on dead acct : {liq_resolved.halt_on_account_liquidation}")
+    print(
+        f"  alive threshold   : equity ≥ ${threshold:.4f}  "
+        f"(IM=${floor_im:.4f} + fees=${fee_buffer:.4f})",
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Run-time diagnostics
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def print_run_diagnostics(
+    engine: Any,
+    venue: Any,
+    instrument: Any,
+    *,
+    trade_notional: Any | None = None,
+    leverage: int | float | None = None,
+    show_lowest_n: int = 5,
+) -> None:
+    """Print order-status and account-balance diagnostics for a finished run.
+
+    Surfaces the things you'd typically eyeball after a backtest:
+
+    * Order-status counts (FILLED / CANCELED / DENIED / REJECTED).
+    * A warning if any orders were denied or rejected.
+    * Account-balance summary (first / min / max / final) with a
+      liquidated flag.
+    * Lowest-N balance rows (for spotting the deepest drawdown).
+    * Margin-field interpretation block (only when ``trade_notional`` and
+      ``leverage`` are provided) — shows IM/MM under the two competing
+      formulas in NT's docstrings vs source so you can see which the
+      account actually uses.
+
+    All output is printed.  No return value.
+    """
+    orders_report = engine.trader.generate_orders_report()
+    account_report = engine.trader.generate_account_report(venue)
+
+    # ── Orders ────────────────────────────────────────────────────────
+    n_orders = len(orders_report)
+    print(f"Total orders: {n_orders}")
+    if n_orders > 0:
+        status_counts = orders_report["status"].value_counts()
+        print(status_counts)
+        denied = orders_report[
+            orders_report["status"].isin(["DENIED", "REJECTED"])
+        ]
+        n_denied = len(denied)
+        if n_denied > 0:
+            print(f"\n⚠ {n_denied} orders were denied or rejected:")
+            try:
+                from IPython.display import display
+                display(denied[["ts_init", "side", "quantity", "status"]])
+            except ImportError:
+                print(denied[["ts_init", "side", "quantity", "status"]].to_string())
+        else:
+            print(f"✓ All {n_orders} orders filled or are open")
+
+    # ── Account balances ──────────────────────────────────────────────
+    if account_report.empty:
+        print("\n(No account report rows — engine may have failed to start.)")
+        return
+
+    totals = account_report["total"].astype(float)
+    min_bal = float(totals.min())
+    max_bal = float(totals.max())
+    first_bal = float(totals.iloc[0])
+    final_bal = float(totals.iloc[-1])
+
+    print(f"\nAccount report rows: {len(account_report)}")
+    print(f"First balance: {first_bal:,.4f}")
+    print(f"Min balance:   {min_bal:,.4f}")
+    print(f"Max balance:   {max_bal:,.4f}")
+    print(f"Final balance: {final_bal:,.4f}")
+    if min_bal <= 0:
+        print(f"\n⚠ LIQUIDATED — min balance was {min_bal:.2f}")
+        print("PnL results after liquidation are meaningless.")
+    else:
+        print("Would flag liquidated: False")
+
+    # Lowest-N rows
+    if show_lowest_n > 0:
+        tmp = account_report.copy()
+        tmp["_total_float"] = totals
+        cols = [c for c in ("total", "free", "locked") if c in account_report.columns]
+        print(f"\n{show_lowest_n} lowest balance rows:")
+        try:
+            from IPython.display import display
+            display(tmp.nsmallest(show_lowest_n, "_total_float")[cols])
+        except ImportError:
+            print(tmp.nsmallest(show_lowest_n, "_total_float")[cols].to_string())
+
+    # ── Margin field interpretation ──────────────────────────────────
+    if trade_notional is not None and leverage is not None:
+        try:
+            mi = float(instrument.margin_init)
+            mm = float(instrument.margin_maint)
+            n = float(trade_notional)
+            lev = float(leverage)
+
+            im_pct = mi * n
+            mm_pct = mm * n
+            im_formula = (n / lev) * mi
+            mm_formula = (n / lev) * mm
+
+            print(f"\nmargin_init field:  {instrument.margin_init}")
+            print(f"margin_maint field: {instrument.margin_maint}")
+            print(
+                f"  If 'pct of order value':   IM=${im_pct:.2f}  MM=${mm_pct:.2f}",
+            )
+            print(
+                f"  If 'notional/lev × field': "
+                f"IM=${im_formula:.2f}  MM=${mm_formula:.2f}",
+            )
+        except (AttributeError, TypeError, ValueError):
+            pass
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Baselines orchestrator
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def baselines_for_strategy(
+    positions: list,
+    bars: list,
+    *,
+    starting_capital: float,
+    notional_per_trade: float,
+    fee_rate: float,
+    leverage: float = 1.0,
+    n_simulations: int = 1000,
+    random_seed: int = 42,
+) -> dict[str, Any]:
+    """Compute spot B&H, leveraged B&H, and a random-entry distribution.
+
+    Wraps the position-introspection (extract trade count, average
+    duration in bars) and the three calls to
+    ``src.backtesting.baselines`` in one notebook helper.
+
+    Returns
+    -------
+    dict[str, Any]
+        ``{"buy_and_hold": dict, "buy_and_hold_leveraged": dict,
+        "random_entry": dict | None, "n_trades": int,
+        "avg_duration_bars": float}``.
+        ``random_entry`` is ``None`` when there are no closed trades.
+
+    """
+    from src.backtesting.baselines import buy_and_hold, random_entry_baseline
+
+    bh_spot = buy_and_hold(
+        bars,
+        starting_capital=starting_capital,
+        fee_rate=fee_rate,
+        leverage=1.0,
+    )
+    bh_lev = buy_and_hold(
+        bars,
+        starting_capital=starting_capital,
+        fee_rate=fee_rate,
+        leverage=leverage,
+    )
+
+    closed = [p for p in positions if getattr(p, "is_closed", False)]
+    if not closed or len(bars) < 2:
+        return {
+            "buy_and_hold": bh_spot,
+            "buy_and_hold_leveraged": bh_lev,
+            "random_entry": None,
+            "n_trades": 0,
+            "avg_duration_bars": float("nan"),
+        }
+
+    n_trades = len(closed)
+    bar_ns = int(bars[1].ts_event - bars[0].ts_event)
+    avg_dur_ns = (
+        sum(int(p.ts_closed) - int(p.ts_opened) for p in closed) / n_trades
+    )
+    avg_dur_bars = avg_dur_ns / bar_ns
+
+    random_dist = random_entry_baseline(
+        bars,
+        n_trades=n_trades,
+        avg_duration_bars=avg_dur_bars,
+        starting_capital=starting_capital,
+        notional_per_trade=notional_per_trade,
+        fee_rate=fee_rate,
+        n_simulations=n_simulations,
+        seed=random_seed,
+    )
+
+    return {
+        "buy_and_hold": bh_spot,
+        "buy_and_hold_leveraged": bh_lev,
+        "random_entry": random_dist,
+        "n_trades": n_trades,
+        "avg_duration_bars": avg_dur_bars,
+    }
+
+
+def print_baselines_verdict(
+    baselines: dict[str, Any],
+    strategy_pnl: float,
+    *,
+    leverage: int | float,
+    currency: str = "USDC",
+) -> None:
+    """Print the spot-B&H verdict + random-entry summary + leveraged caveat.
+
+    Companion to :func:`baselines_for_strategy`.  Pure print, no return.
+    """
+    bh_spot = baselines["buy_and_hold"]
+    bh_lev = baselines["buy_and_hold_leveraged"]
+    random_dist = baselines["random_entry"]
+    n_trades = baselines["n_trades"]
+    avg_dur_bars = baselines["avg_duration_bars"]
+
+    print(
+        f"=== Buy & Hold (SPOT — held "
+        f"{bh_spot['years_in_sample']:.1f} years) ===",
+    )
+    print(f"  PnL    : {bh_spot['pnl']:>10,.2f}  ({bh_spot['pnl_pct']:>+7.2f}%)")
+    print(f"  MaxDD% : {bh_spot['max_drawdown_pct']:>7.2%}")
+    print(f"  CAGR   : {bh_spot['cagr']:>+7.2%}")
+
+    print("=== Strategy ===")
+    print(f"  PnL    : {strategy_pnl:>10,.2f}")
+
+    print("=== Verdict ===")
+    diff_abs = strategy_pnl - bh_spot["pnl"]
+    diff_pct = (
+        (strategy_pnl - bh_spot["pnl"]) / abs(bh_spot["pnl"]) * 100
+        if bh_spot["pnl"] else float("nan")
+    )
+    verdict = "BEATS" if diff_abs > 0 else "LOSES TO"
+    print(
+        f"  Strategy {verdict} spot buy-and-hold by "
+        f"{diff_abs:>+10,.2f} ({diff_pct:>+6.1f}%)",
+    )
+    print(
+        f"  (Leveraged B&H counterfactual at {int(leverage)}x: "
+        f"PnL={bh_lev['pnl']:,.2f}, "
+        f"MaxDD%={bh_lev['max_drawdown_pct']:.0%} "
+        f"— IGNORES LIQUIDATION; not a realistic benchmark.)",
+    )
+
+    if random_dist is not None:
+        print(
+            f"=== Random entry (1000 sims, n={n_trades}, "
+            f"avg_dur={avg_dur_bars:.1f} bars) ===",
+        )
+        print(f"  median PnL : {random_dist['median_pnl']:>10,.2f}")
+        print(
+            f"  5/95 pct   : {random_dist['pct_5']:>10,.2f} "
+            f"/ {random_dist['pct_95']:,.2f}",
+        )
+    else:
+        print("No closed trades — skipping random-entry baseline.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sweep diagnostics
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def print_sweep_liquidation_diagnostics(
+    results_df: pd.DataFrame,
+    *,
+    liq_resolved: Any,
+    trade_notional: Any | None = None,
+    show_top_n: int = 10,
+) -> None:
+    """Trustworthiness checks for the sweep's liquidation simulator output.
+
+    Surfaces:
+
+    1. Schema completeness — every row has populated liq columns.
+    2. ``min_balance`` / ``liquidated_account`` consistency — if equity
+       went sub-zero but the actor didn't fire, the actor missed a breach.
+    3. Halt enforcement — for combos with ``liquidated_account=True``,
+       we expect ``denied_post_halt > 0`` (strategy keeps signaling
+       but RiskEngine HALTED rejects the submits).
+    4. Fee model cross-check — ``total_fees / num_positions`` should be
+       roughly ``2 × notional × taker_fee`` (round-trip per position).
+    5. Liquidation slippage — fill price vs trigger price.  Positive %
+       = worse than trigger (gap-risk loss).
+    """
+    if liq_resolved is None or not liq_resolved.enabled:
+        print(
+            "Liquidation simulation off — new columns will be 0/False/None "
+            "for all rows.",
+        )
+        return
+
+    cols = [
+        "fast", "slow",
+        "liquidated_positions", "liquidated_account", "liquidated_at_ts",
+        "denied_post_halt",
+        "liq_slippage_avg_pct", "liq_slippage_max_pct",
+        "min_balance", "final_balance", "total_pnl",
+        "total_fees",
+    ]
+    available = [c for c in cols if c in results_df.columns]
+
+    n_pos_liq = int((results_df["liquidated_positions"] > 0).sum())
+    n_acct_liq = int(results_df["liquidated_account"].sum())
+    n_negbal = int((results_df["min_balance"] < 0).sum())
+    n_denied = int((results_df["denied_post_halt"] > 0).sum())
+
+    print("=== Liquidation summary ===")
+    print(f"Total combos          : {len(results_df)}")
+    print(f"With position liq     : {n_pos_liq}")
+    print(f"With account liq      : {n_acct_liq}")
+    print(f"With denied post-halt : {n_denied}")
+    print(f"Sub-zero min_balance  : {n_negbal}")
+
+    try:
+        from IPython.display import display
+    except ImportError:
+        display = print  # fallback for non-notebook environments
+
+    if n_pos_liq > 0:
+        print(f"\nTop {show_top_n} by liquidated_positions:")
+        display(results_df.nlargest(show_top_n, "liquidated_positions")[available])
+
+    # Sanity check 1: min_balance ≤ 0 ⇒ liquidated_account=True
+    inconsistent = results_df[
+        (results_df["min_balance"] <= 0)
+        & (~results_df["liquidated_account"].astype(bool))
+    ]
+    if len(inconsistent) > 0:
+        print(
+            f"\n⚠ {len(inconsistent)} rows with min_balance ≤ 0 but "
+            f"liquidated_account=False — actor missed equity breach.",
+        )
+        display(inconsistent[available])
+    else:
+        print("\n✓ min_balance / liquidated_account consistent across all rows")
+
+    # Sanity check 2: dead combos with no post-halt denials
+    halt_no_denials = results_df[
+        results_df["liquidated_account"].astype(bool)
+        & (results_df["denied_post_halt"] == 0)
+    ]
+    if len(halt_no_denials) > 0:
+        print(
+            f"\nℹ {len(halt_no_denials)} dead combos with no post-halt "
+            f"denials (strategy didn't re-signal — usually fine).",
+        )
+        display(halt_no_denials[available])
+    else:
+        print(
+            "✓ Every dead combo had at least one post-halt denial — "
+            "HALTED state is enforcing.",
+        )
+
+    # Sanity check 3: fee model
+    if trade_notional is not None:
+        survivors = results_df[~results_df["liquidated_account"].astype(bool)]
+        if not survivors.empty:
+            avg_fee_per_position = (
+                (survivors["total_fees"] / survivors["num_positions"])
+                .replace([float("inf"), -float("inf")], float("nan"))
+                .mean()
+            )
+            expected = 2 * float(trade_notional) * float(liq_resolved.fee_rate)
+            ratio = avg_fee_per_position / expected if expected > 0 else float("nan")
+            print("\n=== Fee model cross-check (survivors) ===")
+            print(f"Avg fees per position : ${avg_fee_per_position:.4f}")
+            print(
+                f"Expected round-trip   : ${expected:.4f}  "
+                f"(2 × ${float(trade_notional):.0f} × "
+                f"{float(liq_resolved.fee_rate):.5f})",
+            )
+            tag = "✓ within 10%" if 0.90 <= ratio <= 1.10 else "⚠ outside 10%"
+            print(f"Ratio actual/expected : {ratio:.3f}  ({tag})")
+            if 1.02 <= ratio <= 1.10:
+                print(
+                    "  (Price-drift between qty calc and fill on a trending "
+                    "asset typically pushes ratio 2-8% above 1.0.)",
+                )
+
+    # Sanity check 4: liquidation-stop slippage
+    liq_rows = results_df[results_df["liquidated_positions"] > 0]
+    if not liq_rows.empty:
+        print("\n=== Liquidation slippage (trigger vs fill, % of entry) ===")
+        print(f"Combos with liquidations    : {len(liq_rows)}")
+        print(
+            f"Avg slippage across combos  : "
+            f"{liq_rows['liq_slippage_avg_pct'].mean():.4f}%",
+        )
+        print(
+            f"Worst single-event slippage : "
+            f"{liq_rows['liq_slippage_max_pct'].max():.4f}%",
+        )
+        clean_fills = (liq_rows["liq_slippage_max_pct"].abs() < 0.01).sum()
+        print(
+            f"Combos with clean fills (|slippage|<0.01%) : "
+            f"{clean_fills}/{len(liq_rows)}",
+        )
+        if liq_rows["liq_slippage_max_pct"].max() > 1.0:
+            worst_cols = [
+                c for c in (
+                    "fast", "slow",
+                    "liq_slippage_avg_pct", "liq_slippage_max_pct",
+                    "liquidated_at_ts", "total_pnl",
+                ) if c in results_df.columns
+            ]
+            print("\nTop 5 worst slippage events (gap risk surfaced):")
+            display(liq_rows.nlargest(5, "liq_slippage_max_pct")[worst_cols])
