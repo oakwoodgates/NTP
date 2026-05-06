@@ -2886,6 +2886,42 @@ def _fmt_sweep_cell(value: Any, kind: str) -> str:
             if bool(value)
             else ""
         )
+    # "raw" / fallback: round numerics to ≤2dp, preserve everything else.
+    return _fmt_sweep_auto(value)
+
+
+def _fmt_sweep_auto(value: Any) -> str:
+    """Smart fallback formatter — rounds numerics to ≤2dp.
+
+    Keeps integers as integers (no trailing zeros), formats floats and
+    Decimals to at most 2 decimal places (whole numbers strip the ``.00``
+    suffix), passes through strings / bools / other types unchanged.
+    Used for strategy parameter columns and any user-supplied
+    ``extra_columns`` whose units we don't know.
+    """
+    import math as _math
+    from decimal import Decimal
+
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if _math.isnan(value):
+            return "—"
+        if _math.isinf(value):
+            return "∞"
+        # Strip trailing .00 for whole numbers
+        if value.is_integer():
+            return str(int(value))
+        return f"{value:.2f}"
+    if isinstance(value, Decimal):
+        f = float(value)
+        if f.is_integer():
+            return str(int(f))
+        return f"{f:.2f}"
     return str(value)
 
 
@@ -3085,7 +3121,9 @@ def generate_sweep_html(
             else:
                 cells.append("<td></td>")
         for col in param_cols:
-            cells.append(f"<td>{html.escape(str(row.get(col, '')))}</td>")
+            cells.append(
+                f"<td>{html.escape(_fmt_sweep_auto(row.get(col)))}</td>",
+            )
         for col, _label, kind, css in metric_specs:
             formatted = _fmt_sweep_cell(row.get(col), kind)
             cells.append(f'<td class="{css}">{formatted}</td>')
