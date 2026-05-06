@@ -3397,3 +3397,864 @@ _SWEEP_HTML_TEMPLATE = r"""<!DOCTYPE html>
 </body>
 </html>
 """
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public: self-contained v2 tearsheet (replaces the broken NT tearsheet)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _fig_to_base64_png(fig, *, dpi: int = 110, transparent: bool = False) -> str:
+    """Convert a matplotlib figure to a base64-encoded PNG data URI.
+
+    Designed for embedding charts inline in self-contained HTML reports —
+    no external image files, no relative-path issues across viewers.
+    Uses a moderate DPI (110) to keep file sizes reasonable while staying
+    crisp on retina displays.
+    """
+    import base64
+    import io
+
+    buf = io.BytesIO()
+    fig.savefig(
+        buf, format="png", dpi=dpi, bbox_inches="tight",
+        facecolor="none" if transparent else fig.get_facecolor(),
+    )
+    plt.close(fig)
+    encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
+
+
+def _render_equity_curve_png(
+    account_report: pd.DataFrame, currency: str,
+) -> str:
+    """Event-time balance + drawdown chart as a base64 PNG."""
+    if account_report is None or account_report.empty:
+        return ""
+    equity = account_report["total"].astype(float).copy()
+    equity = equity.groupby(equity.index).last().sort_index()
+    peak = equity.cummax()
+    drawdown_abs = peak - equity
+
+    fig, ax = plt.subplots(figsize=(12, 4.5))
+    fig.patch.set_facecolor("#1a1d24")
+    ax.set_facecolor("#1a1d24")
+    equity.plot(ax=ax, color="#26a69a", linewidth=1.5, label="Equity")
+    peak.plot(
+        ax=ax, color="#888", linestyle="--", linewidth=1.0, label="Running peak",
+    )
+    ax.set_ylabel(f"Balance ({currency})", color="#d1d4dc")
+    ax.tick_params(colors="#d1d4dc")
+    ax.grid(True, alpha=0.15, color="#d1d4dc")
+    for spine in ax.spines.values():
+        spine.set_color("#383b45")
+
+    ax2 = ax.twinx()
+    ax2.fill_between(
+        drawdown_abs.index, 0, drawdown_abs.values,
+        color="#ef5350", alpha=0.30,
+    )
+    ax2.set_ylabel(f"Drawdown ({currency})", color="#ef5350")
+    ax2.tick_params(axis="y", labelcolor="#ef5350")
+    ax2.invert_yaxis()
+    for spine in ax2.spines.values():
+        spine.set_color("#383b45")
+
+    ax.legend(loc="upper left", facecolor="#1a1d24", edgecolor="#383b45",
+              labelcolor="#d1d4dc")
+    ax.set_title(
+        "Equity & drawdown (event-time, NOT daily MTM)",
+        color="#d1d4dc", fontsize=11,
+    )
+    fig.tight_layout()
+    return _fig_to_base64_png(fig)
+
+
+def _render_trade_distributions_png(
+    positions: list, currency: str, bar_interval_ns: int | None,
+) -> str:
+    """Three-panel PnL/duration/concentration chart as a base64 PNG."""
+    closed = [
+        p for p in positions
+        if getattr(p, "is_closed", False)
+        and getattr(p, "realized_pnl", None) is not None
+    ]
+    if not closed:
+        return ""
+    pnls = np.array(
+        [float(p.realized_pnl.as_decimal()) for p in closed], dtype=float,
+    )
+    durations_ns = np.array(
+        [int(p.ts_closed) - int(p.ts_opened) for p in closed], dtype=float,
+    )
+    if bar_interval_ns:
+        durations = durations_ns / bar_interval_ns
+        dur_unit = "bars"
+    else:
+        durations = durations_ns / 1e9 / 86400
+        dur_unit = "days"
+
+    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+    fig.patch.set_facecolor("#1a1d24")
+
+    # Panel 1: PnL distribution
+    ax = axes[0]
+    ax.set_facecolor("#1a1d24")
+    wins = pnls[pnls > 0]
+    losses = pnls[pnls < 0]
+    bins = max(20, min(60, len(pnls) // 3))
+    if len(wins):
+        ax.hist(wins, bins=bins, color="#26a69a", alpha=0.7,
+                edgecolor="#1a6e1a", label=f"Wins ({len(wins)})")
+    if len(losses):
+        ax.hist(losses, bins=bins, color="#ef5350", alpha=0.7,
+                edgecolor="#891a1b", label=f"Losses ({len(losses)})")
+    ax.axvline(pnls.mean(), color="#fff", linestyle="-", linewidth=1.0,
+               label=f"Mean = {pnls.mean():,.0f}")
+    ax.axvline(np.median(pnls), color="#fff", linestyle="--", linewidth=0.8,
+               label=f"Median = {np.median(pnls):,.0f}")
+    ax.axvline(0, color="#888", linestyle=":", linewidth=0.5)
+    ax.set_xlabel(f"Trade PnL ({currency})", color="#d1d4dc")
+    ax.set_ylabel("# trades", color="#d1d4dc")
+    ax.set_title("PnL distribution", color="#d1d4dc", fontsize=11)
+    ax.legend(fontsize=8, facecolor="#1a1d24", edgecolor="#383b45",
+              labelcolor="#d1d4dc")
+    ax.tick_params(colors="#d1d4dc")
+    ax.grid(True, alpha=0.15, color="#d1d4dc")
+    for s in ax.spines.values():
+        s.set_color("#383b45")
+
+    # Panel 2: Duration distribution
+    ax = axes[1]
+    ax.set_facecolor("#1a1d24")
+    bins = max(20, min(60, len(durations) // 3))
+    ax.hist(durations, bins=bins, color="#2962ff", alpha=0.7, edgecolor="#0f4c81")
+    ax.axvline(durations.mean(), color="#fff", linestyle="-", linewidth=1.0,
+               label=f"Mean = {durations.mean():.1f} {dur_unit}")
+    ax.axvline(np.median(durations), color="#fff", linestyle="--", linewidth=0.8,
+               label=f"Median = {np.median(durations):.1f} {dur_unit}")
+    ax.set_xlabel(f"Duration ({dur_unit})", color="#d1d4dc")
+    ax.set_ylabel("# trades", color="#d1d4dc")
+    ax.set_title("Trade duration", color="#d1d4dc", fontsize=11)
+    ax.legend(fontsize=8, facecolor="#1a1d24", edgecolor="#383b45",
+              labelcolor="#d1d4dc")
+    ax.tick_params(colors="#d1d4dc")
+    ax.grid(True, alpha=0.15, color="#d1d4dc")
+    for s in ax.spines.values():
+        s.set_color("#383b45")
+
+    # Panel 3: Concentration
+    ax = axes[2]
+    ax.set_facecolor("#1a1d24")
+    sorted_desc = np.sort(pnls)[::-1]
+    sorted_asc = np.sort(pnls)
+    sum_abs_total = float(np.sum(np.abs(pnls)))
+    if sum_abs_total <= 0:
+        sum_abs_total = 1e-9
+    labels = ["Top 1", "Top 3", "Top 5", "Bot 1", "Bot 3", "Bot 5"]
+    values = []
+    for n in (1, 3, 5):
+        values.append(
+            float(np.sum(sorted_desc[: min(n, len(sorted_desc))]))
+            / sum_abs_total * 100,
+        )
+    for n in (1, 3, 5):
+        values.append(
+            float(np.sum(sorted_asc[: min(n, len(sorted_asc))]))
+            / sum_abs_total * 100,
+        )
+    colors = ["#26a69a"] * 3 + ["#ef5350"] * 3
+    bars = ax.bar(labels, values, color=colors, alpha=0.75, edgecolor="#383b45")
+    for b, v in zip(bars, values, strict=False):
+        ax.text(
+            b.get_x() + b.get_width() / 2,
+            b.get_height() + (1 if v >= 0 else -1),
+            f"{v:.1f}%",
+            ha="center", va="bottom" if v >= 0 else "top",
+            fontsize=8, color="#d1d4dc",
+        )
+    ax.axhline(0, color="#888", linewidth=0.5)
+    ax.set_ylabel("% of total |PnL|", color="#d1d4dc")
+    ax.set_title("Trade-PnL concentration", color="#d1d4dc", fontsize=11)
+    ax.tick_params(colors="#d1d4dc")
+    ax.grid(True, alpha=0.15, color="#d1d4dc", axis="y")
+    for s in ax.spines.values():
+        s.set_color("#383b45")
+    if values[1] > 50:
+        ax.text(
+            0.5, 0.95, "⚠ top-3 wins > 50% of total |PnL|",
+            transform=ax.transAxes, ha="center", va="top",
+            fontsize=8, color="#000",
+            bbox={"facecolor": "#ffc800", "alpha": 0.9, "edgecolor": "#b35900"},
+        )
+
+    fig.tight_layout()
+    return _fig_to_base64_png(fig)
+
+
+def _render_yearly_bars_png(yearly_df: pd.DataFrame, currency: str) -> str:
+    """Yearly PnL bars chart as a base64 PNG."""
+    if yearly_df is None or yearly_df.empty:
+        return ""
+    years = yearly_df.index.tolist()
+    pnls = yearly_df["pnl"].tolist()
+    n_pos = yearly_df["num_positions"].tolist()
+
+    fig, ax = plt.subplots(figsize=(12, 3.5))
+    fig.patch.set_facecolor("#1a1d24")
+    ax.set_facecolor("#1a1d24")
+    colors = ["#26a69a" if v > 0 else "#ef5350" for v in pnls]
+    bars = ax.bar(
+        [str(y) for y in years], pnls, color=colors,
+        alpha=0.75, edgecolor="#383b45",
+    )
+    for b, v, n in zip(bars, pnls, n_pos, strict=False):
+        ax.text(
+            b.get_x() + b.get_width() / 2,
+            b.get_height() + (max(abs(p) for p in pnls) * 0.02 if v >= 0 else -max(abs(p) for p in pnls) * 0.02),
+            f"{v:,.0f}\n({int(n)})",
+            ha="center", va="bottom" if v >= 0 else "top",
+            fontsize=8, color="#d1d4dc",
+        )
+    ax.axhline(0, color="#888", linewidth=0.6)
+    ax.set_ylabel(f"PnL ({currency})", color="#d1d4dc")
+    ax.set_title("Yearly PnL (trade count in parens)",
+                 color="#d1d4dc", fontsize=11)
+    ax.tick_params(colors="#d1d4dc")
+    ax.grid(True, alpha=0.15, color="#d1d4dc", axis="y")
+    for s in ax.spines.values():
+        s.set_color("#383b45")
+    fig.tight_layout()
+    return _fig_to_base64_png(fig)
+
+
+def _format_metric(value: Any, kind: str = "auto") -> str:
+    """Format a single metric value for the tearsheet stats grid."""
+    import math as _math
+    from decimal import Decimal as _Decimal
+    if value is None:
+        return "—"
+    if isinstance(value, (int, _Decimal)):
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+    elif isinstance(value, float):
+        f = value
+    else:
+        return str(value)
+    if _math.isnan(f):
+        return "—"
+    if _math.isinf(f):
+        return "∞"
+    if kind == "money":
+        return f"{f:,.2f}"
+    if kind == "pct_frac":
+        return f"{f * 100:.2f}%"
+    if kind == "pct":
+        return f"{f:.2f}%"
+    if kind == "ratio":
+        return f"{f:.2f}"
+    if kind == "int":
+        return f"{int(f):,}"
+    # auto: ints stay ints, decimals to 2dp
+    if f == int(f):
+        return f"{int(f):,}"
+    return f"{f:.2f}"
+
+
+def generate_v2_tearsheet(
+    positions: list,
+    account_report: pd.DataFrame,
+    bars: list,
+    *,
+    starting_capital: float,
+    currency: str = "USDC",
+    instrument_label: str = "",
+    bar_interval: str = "",
+    strategy_label: str = "",
+    title: str | None = None,
+    output_dir: str | Path | None = None,
+    filename: str | None = None,
+    open_browser: bool = False,
+    yearly_df: pd.DataFrame | None = None,
+    regime_df: pd.DataFrame | None = None,
+    baselines: dict[str, Any] | None = None,
+    strategy_pnl: float | None = None,
+    liquidated: bool = False,
+    liquidated_at: str | None = None,
+    leverage: int | float = 1,
+    fee_rate: float | None = None,
+) -> Path:
+    """Self-contained HTML tearsheet using only trustworthy v2 metrics.
+
+    Replaces NT's ``create_tearsheet`` (which is built on the
+    upstream-broken returns methodology — see
+    ``docs/ANALYZER_RETURNS_CAVEAT.md``).  Composes the components
+    we already use elsewhere in the strategy notebook into one
+    archivable HTML file.
+
+    All numbers are derived from realized PnL on closed positions and
+    event-time balance snapshots — both faithful to NT's ground truth.
+    No Sharpe / Sortino / Vol / Returns Profit Factor / Risk Return
+    Ratio anywhere on the page.
+
+    Sections:
+
+    1. **Header** — strategy + instrument, time range, run timestamp
+    2. **Key metrics grid** — total PnL, win rate, expectancy, payoff,
+       PnL profit factor, max drawdown ($ and %), MAR, recovery factor,
+       CAGR, total fees, fee-pct-of-PnL
+    3. **Equity & drawdown chart** — event-time, with running peak
+    4. **Trade distributions chart** — PnL / duration / concentration
+    5. **Yearly breakdown table** — per-year PnL, win rate, profit
+       factor, largest win/loss
+    6. **Regime breakdown table** (if provided)
+    7. **Baselines comparison** (if provided)
+    8. **Caveat footer** — what's missing pending upstream fix
+
+    Embeds all charts as base64 PNGs — fully portable, no relative
+    path or CDN issues.
+
+    Parameters
+    ----------
+    positions
+        List of NT Position objects.
+    account_report
+        DataFrame from ``engine.trader.generate_account_report(venue)``.
+    bars
+        List of NT Bar objects.
+    starting_capital, currency
+        Used in the metrics computation and labels.
+    instrument_label, bar_interval, strategy_label
+        Strings shown in the header.
+    title
+        Custom suptitle.  Defaults to a derived label.
+    output_dir
+        Directory to write to.  Default ``reports/tearsheets/``.
+    filename
+        Custom filename stem.  Default derived from labels + timestamp.
+    open_browser
+        If True, opens the generated HTML in the default browser.
+    yearly_df
+        Output of ``performance_by_year``.  Optional.
+    regime_df
+        Output of ``performance_by_regime``.  Optional.
+    baselines
+        Dict with keys ``buy_and_hold`` (output of ``buy_and_hold(...)``)
+        and ``random_entry`` (output of ``random_entry_baseline(...)``).
+        Optional.
+    strategy_pnl
+        Total PnL of the strategy (for baselines comparison).  If not
+        provided, computed from positions.
+    liquidated, liquidated_at
+        If True, render a prominent liquidation banner at the top.
+    leverage
+        Strategy leverage label (header).
+    fee_rate
+        Settlement-currency taker fee rate.  Used to populate
+        fee-pct-of-PnL when ``total_fees`` is computed.
+
+    Returns
+    -------
+    pathlib.Path
+        Absolute path to the generated HTML file.
+
+    """
+    from src.backtesting.metrics import (
+        TradeRecord,
+        compute_all_metrics,
+    )
+
+    # ── Build metrics ────────────────────────────────────────────────────
+    closed = [
+        p for p in positions
+        if getattr(p, "is_closed", False)
+        and getattr(p, "realized_pnl", None) is not None
+    ]
+    trades = [
+        TradeRecord(
+            pnl=float(p.realized_pnl.as_decimal()),
+            ts_opened_ns=int(p.ts_opened),
+            ts_closed_ns=int(p.ts_closed),
+            side="LONG" if p.entry.name == "BUY" else "SHORT",
+        )
+        for p in closed
+    ]
+    bar_interval_ns = (
+        int(bars[1].ts_event - bars[0].ts_event)
+        if len(bars) > 1 else None
+    )
+    balance = (
+        account_report["total"].astype(float)
+        if account_report is not None and not account_report.empty
+        else pd.Series(dtype=float)
+    )
+
+    # Sum PnL from realized trades for the activity metrics input
+    total_pnl_calc = sum(t.pnl for t in trades) if trades else 0.0
+    if strategy_pnl is None:
+        strategy_pnl = total_pnl_calc
+
+    # Compute fees from positions (sum of all commissions in settlement currency)
+    total_fees: float = 0.0
+    for p in positions:
+        for comm in (p.commissions() if callable(getattr(p, "commissions", None)) else []):
+            try:
+                if str(comm.currency) == currency:
+                    total_fees += float(comm.as_decimal())
+            except Exception:
+                continue
+
+    metrics = compute_all_metrics(
+        trades, balance,
+        starting_capital=float(starting_capital),
+        total_bars=len(bars) if bars else None,
+        bar_interval_ns=bar_interval_ns,
+        first_bar_ts_ns=int(bars[0].ts_event) if bars else None,
+        last_bar_ts_ns=int(bars[-1].ts_event) if bars else None,
+        total_fees=total_fees,
+        total_pnl=float(strategy_pnl),
+    )
+
+    # ── Resolve output path ──────────────────────────────────────────────
+    from datetime import datetime, timezone
+    if output_dir is None:
+        proj_root = Path(__file__).resolve().parent.parent
+        output_dir = proj_root / "reports" / "tearsheets"
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if filename is None:
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        safe_label = (
+            (strategy_label or "tearsheet")
+            .replace(" ", "_").replace("/", "-").replace("|", "-")
+        )
+        filename = f"v2_tearsheet_{safe_label}_{ts}"
+    if not filename.endswith(".html"):
+        filename = f"{filename}.html"
+    out_path = output_dir / filename
+
+    # ── Render charts to base64 PNGs ─────────────────────────────────────
+    equity_png = _render_equity_curve_png(account_report, currency)
+    trade_dist_png = _render_trade_distributions_png(
+        positions, currency, bar_interval_ns,
+    )
+    yearly_png = _render_yearly_bars_png(yearly_df, currency) if yearly_df is not None else ""
+
+    # ── Build header info ────────────────────────────────────────────────
+    if title is None:
+        title = (
+            f"{strategy_label} — {instrument_label} {bar_interval}"
+            if strategy_label
+            else "v2 Tearsheet"
+        )
+
+    bar_start = (
+        pd.Timestamp(bars[0].ts_event, unit="ns", tz="UTC").strftime("%Y-%m-%d")
+        if bars else "—"
+    )
+    bar_end = (
+        pd.Timestamp(bars[-1].ts_event, unit="ns", tz="UTC").strftime("%Y-%m-%d")
+        if bars else "—"
+    )
+    n_bars = len(bars) if bars else 0
+    n_trades = len(trades)
+    final_balance = float(balance.iloc[-1]) if not balance.empty else float("nan")
+    ending_str = _format_metric(final_balance, "money")
+
+    # ── Build metric grid HTML ───────────────────────────────────────────
+    def metric_card(label: str, value: str, sublabel: str = "",
+                    color_class: str = "") -> str:
+        sub_html = f'<div class="card-sub">{sublabel}</div>' if sublabel else ""
+        return (
+            f'<div class="card {color_class}">'
+            f'<div class="card-label">{label}</div>'
+            f'<div class="card-value">{value}</div>'
+            f'{sub_html}</div>'
+        )
+
+    pnl_color = "good" if total_pnl_calc > 0 else ("bad" if total_pnl_calc < 0 else "")
+    drawdown_color = (
+        "bad" if metrics.get("max_drawdown_pct", 0) > 0.30 else
+        "warn" if metrics.get("max_drawdown_pct", 0) > 0.15 else ""
+    )
+    metrics_grid = "\n".join([
+        metric_card(
+            "Total PnL", _format_metric(total_pnl_calc, "money"),
+            f"{currency}", pnl_color,
+        ),
+        metric_card(
+            "Trades", _format_metric(n_trades, "int"),
+            f"{_format_metric(metrics.get('win_rate'), 'pct_frac')} win rate",
+        ),
+        metric_card(
+            "Avg PnL/trade",
+            _format_metric(metrics.get("avg_pnl_per_trade"), "money"),
+            f"Expectancy = {_format_metric(metrics.get('expectancy'), 'money')}",
+        ),
+        metric_card(
+            "Profit Factor",
+            _format_metric(metrics.get("pnl_profit_factor"), "ratio"),
+            "gross_wins / |gross_losses|",
+        ),
+        metric_card(
+            "Payoff",
+            _format_metric(metrics.get("payoff_ratio"), "ratio"),
+            "avg_win / |avg_loss|",
+        ),
+        metric_card(
+            "Max DD %",
+            _format_metric(metrics.get("max_drawdown_pct"), "pct_frac"),
+            f"{_format_metric(metrics.get('max_drawdown_abs'), 'money')} {currency}",
+            drawdown_color,
+        ),
+        metric_card(
+            "MAR ratio",
+            _format_metric(metrics.get("mar_ratio"), "ratio"),
+            "CAGR / MaxDD%",
+        ),
+        metric_card(
+            "Recovery",
+            _format_metric(metrics.get("recovery_factor"), "ratio"),
+            "PnL / MaxDD$",
+        ),
+        metric_card(
+            "CAGR",
+            _format_metric(metrics.get("cagr"), "pct_frac"),
+            f"over {_format_metric(metrics.get('years_in_sample'), 'ratio')} years",
+        ),
+        metric_card(
+            "In market",
+            _format_metric(metrics.get("bars_in_market_pct"), "pct_frac"),
+            "of bars",
+        ),
+        metric_card(
+            "Fees",
+            _format_metric(total_fees, "money"),
+            f"{_format_metric(metrics.get('fee_pct_of_pnl'), 'pct_frac')} of PnL",
+        ),
+        metric_card(
+            "Long / Short PnL",
+            (
+                f"{_format_metric(metrics.get('long_pnl'), 'money')} / "
+                f"{_format_metric(metrics.get('short_pnl'), 'money')}"
+            ),
+            f"{_format_metric(metrics.get('num_long'), 'int')} L / "
+            f"{_format_metric(metrics.get('num_short'), 'int')} S",
+        ),
+        metric_card(
+            "Largest W / L",
+            (
+                f"{_format_metric(metrics.get('largest_win'), 'money')} / "
+                f"{_format_metric(metrics.get('largest_loss'), 'money')}"
+            ),
+            f"max consec L: {_format_metric(metrics.get('max_consec_losers'), 'int')}",
+        ),
+    ])
+
+    # ── Liquidation banner ───────────────────────────────────────────────
+    liq_banner = ""
+    if liquidated:
+        ts_str = (
+            f" at {liquidated_at}" if liquidated_at else ""
+        )
+        liq_banner = (
+            f'<div class="liq-banner">⚠ ACCOUNT LIQUIDATED{ts_str} '
+            f'— equity hit zero or below during the run.</div>'
+        )
+
+    # ── Yearly table ─────────────────────────────────────────────────────
+    yearly_html = ""
+    if yearly_df is not None and not yearly_df.empty:
+        rows: list[str] = []
+        for year in yearly_df.index:
+            row = yearly_df.loc[year]
+            cls = "good" if row.get("pnl", 0) > 0 else "bad"
+            rows.append(
+                f'<tr><td>{int(year)}</td>'
+                f'<td class="num {cls}">{_format_metric(row.get("pnl"), "money")}</td>'
+                f'<td class="num">{_format_metric(row.get("pnl_pct"), "pct")}</td>'
+                f'<td class="num">{_format_metric(row.get("num_positions"), "int")}</td>'
+                f'<td class="num">{_format_metric(row.get("win_rate"), "pct_frac")}</td>'
+                f'<td class="num">{_format_metric(row.get("profit_factor"), "ratio")}</td>'
+                f'<td class="num good">{_format_metric(row.get("largest_win"), "money")}</td>'
+                f'<td class="num bad">{_format_metric(row.get("largest_loss"), "money")}</td>'
+                f'</tr>',
+            )
+        yearly_html = (
+            '<section class="card-section"><h2>Yearly breakdown</h2>'
+            '<table class="data-table"><thead><tr>'
+            '<th>Year</th><th class="r">PnL</th><th class="r">PnL %</th>'
+            '<th class="r">Trades</th><th class="r">Win Rate</th>'
+            '<th class="r">PF</th><th class="r">Largest W</th>'
+            '<th class="r">Largest L</th>'
+            '</tr></thead><tbody>'
+            + "\n".join(rows)
+            + '</tbody></table></section>'
+        )
+
+    # ── Regime table ─────────────────────────────────────────────────────
+    regime_html = ""
+    if regime_df is not None and not regime_df.empty:
+        rows = []
+        for _idx, row in regime_df.iterrows():
+            cls = "good" if row.get("pnl", 0) > 0 else "bad"
+            rows.append(
+                f'<tr><td>{html.escape(str(row.get("regime", "")))}</td>'
+                f'<td class="num">{_format_metric(row.get("num_positions"), "int")}</td>'
+                f'<td class="num {cls}">{_format_metric(row.get("pnl"), "money")}</td>'
+                f'<td class="num">{_format_metric(row.get("win_rate"), "pct_frac")}</td>'
+                f'<td class="num">{_format_metric(row.get("profit_factor"), "ratio")}</td>'
+                f'<td class="num">{_format_metric(row.get("avg_winner"), "money")}</td>'
+                f'<td class="num">{_format_metric(row.get("avg_loser"), "money")}</td>'
+                f'</tr>',
+            )
+        regime_html = (
+            '<section class="card-section"><h2>Regime breakdown</h2>'
+            '<table class="data-table"><thead><tr>'
+            '<th>Regime</th><th class="r">Trades</th><th class="r">PnL</th>'
+            '<th class="r">Win Rate</th><th class="r">PF</th>'
+            '<th class="r">Avg Win</th><th class="r">Avg Loss</th>'
+            '</tr></thead><tbody>'
+            + "\n".join(rows)
+            + '</tbody></table></section>'
+        )
+
+    # ── Baselines section ────────────────────────────────────────────────
+    baselines_html = ""
+    if baselines:
+        bh = baselines.get("buy_and_hold")
+        re_dist = baselines.get("random_entry")
+        rows = []
+        rows.append(
+            f'<tr><td><b>Strategy</b></td>'
+            f'<td class="num {"good" if strategy_pnl > 0 else "bad"}">'
+            f'{_format_metric(strategy_pnl, "money")}</td>'
+            f'<td class="num">—</td><td class="num">—</td></tr>',
+        )
+        if bh:
+            bh_pnl = bh.get("pnl", float("nan"))
+            cls = "good" if bh_pnl and bh_pnl > 0 else "bad"
+            rows.append(
+                f'<tr><td>Buy & Hold (spot)</td>'
+                f'<td class="num {cls}">{_format_metric(bh_pnl, "money")}</td>'
+                f'<td class="num">{_format_metric(bh.get("max_drawdown_pct"), "pct_frac")}</td>'
+                f'<td class="num">{_format_metric(bh.get("cagr"), "pct_frac")}</td></tr>',
+            )
+        if re_dist:
+            rows.append(
+                f'<tr><td>Random entry (median)</td>'
+                f'<td class="num">{_format_metric(re_dist.get("median_pnl"), "money")}</td>'
+                f'<td class="num">5th: {_format_metric(re_dist.get("pct_5"), "money")}</td>'
+                f'<td class="num">95th: {_format_metric(re_dist.get("pct_95"), "money")}</td>'
+                f'</tr>',
+            )
+        baselines_html = (
+            '<section class="card-section"><h2>Baselines comparison</h2>'
+            '<table class="data-table"><thead><tr>'
+            '<th></th><th class="r">PnL</th>'
+            '<th class="r">MaxDD% / 5th pct</th>'
+            '<th class="r">CAGR / 95th pct</th>'
+            '</tr></thead><tbody>'
+            + "\n".join(rows)
+            + '</tbody></table></section>'
+        )
+
+    # Combine yearly chart + table into a single section block.
+    yearly_section = ""
+    if yearly_html:
+        chart_html = (
+            f'<div class="chart"><img src="{yearly_png}" alt="Yearly PnL" /></div>'
+            if yearly_png else ""
+        )
+        yearly_section = f"{chart_html}\n{yearly_html}"
+
+    # ── Build full HTML ──────────────────────────────────────────────────
+    html_doc = _V2_TEARSHEET_TEMPLATE.format(
+        title=html.escape(title),
+        strategy_label=html.escape(strategy_label or "—"),
+        instrument_label=html.escape(instrument_label or "—"),
+        bar_interval=html.escape(str(bar_interval) or "—"),
+        leverage=html.escape(str(leverage)),
+        bar_start=bar_start, bar_end=bar_end,
+        n_bars=f"{n_bars:,}",
+        starting_capital=_format_metric(starting_capital, "money"),
+        ending_balance=ending_str,
+        currency=html.escape(currency),
+        generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
+        liq_banner=liq_banner,
+        metrics_grid=metrics_grid,
+        equity_img=(
+            f'<img src="{equity_png}" alt="Equity & drawdown" />'
+            if equity_png else "<p>No balance data.</p>"
+        ),
+        trade_dist_img=(
+            f'<img src="{trade_dist_png}" alt="Trade distributions" />'
+            if trade_dist_png else "<p>No closed trades.</p>"
+        ),
+        yearly_section=yearly_section,
+        regime_html=regime_html,
+        baselines_html=baselines_html,
+    )
+
+    out_path.write_text(html_doc, encoding="utf-8")
+    print(f"✓ v2 tearsheet written → {out_path}")
+
+    if open_browser:
+        webbrowser.open(out_path.as_uri())
+
+    return out_path
+
+
+_V2_TEARSHEET_TEMPLATE = r"""<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<style>
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    background: #0f1116; color: #d1d4dc; margin: 0; padding: 24px;
+  }}
+  h1 {{ font-size: 20px; margin: 0 0 6px 0; color: #fff; }}
+  h2 {{ font-size: 14px; margin: 24px 0 8px 0; color: #fff;
+        border-bottom: 1px solid #383b45; padding-bottom: 4px; }}
+  .subtitle {{ color: #888; font-size: 12px; margin-bottom: 16px; }}
+  .meta-row {{ display: flex; gap: 24px; flex-wrap: wrap;
+                background: #1a1d24; padding: 12px 16px; border-radius: 6px;
+                font-size: 12px; margin-bottom: 16px; }}
+  .meta-item {{ }}
+  .meta-label {{ color: #888; margin-right: 6px; }}
+  .meta-value {{ color: #fff; font-weight: bold; }}
+
+  .liq-banner {{
+    background: rgba(214, 39, 40, 0.20); color: #ff6b6b;
+    padding: 12px 16px; border-radius: 6px; margin-bottom: 16px;
+    font-weight: bold; border-left: 4px solid #d62728;
+  }}
+
+  .grid {{
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 12px; margin-bottom: 24px;
+  }}
+  .card {{
+    background: #1a1d24; padding: 12px 16px; border-radius: 6px;
+    border-left: 3px solid #2962ff;
+  }}
+  .card.good {{ border-left-color: #26a69a; }}
+  .card.bad {{ border-left-color: #ef5350; }}
+  .card.warn {{ border-left-color: #ffc800; }}
+  .card-label {{ color: #888; font-size: 11px; text-transform: uppercase;
+                  letter-spacing: 0.5px; }}
+  .card-value {{ color: #fff; font-size: 17px; font-weight: bold;
+                  font-variant-numeric: tabular-nums; margin-top: 2px; }}
+  .card-sub {{ color: #888; font-size: 10px; margin-top: 2px; }}
+  .card.good .card-value {{ color: #26a69a; }}
+  .card.bad .card-value {{ color: #ef5350; }}
+  .card.warn .card-value {{ color: #ffc800; }}
+
+  .chart {{ background: #1a1d24; border-radius: 6px; padding: 8px;
+            margin-bottom: 16px; }}
+  .chart img {{ width: 100%; height: auto; display: block; }}
+
+  .data-table {{
+    width: 100%; border-collapse: collapse; font-size: 12px;
+    background: #1a1d24; border-radius: 6px; overflow: hidden;
+    font-variant-numeric: tabular-nums;
+  }}
+  .data-table th {{
+    background: #232730; padding: 10px 12px; text-align: left;
+    font-weight: bold; color: #fff; border-bottom: 1px solid #383b45;
+  }}
+  .data-table th.r {{ text-align: right; }}
+  .data-table td {{ padding: 8px 12px; border-bottom: 1px solid #2a2d36; }}
+  .data-table td.num {{ text-align: right; font-family: "Menlo", "Monaco", monospace; }}
+  .data-table td.good {{ color: #26a69a; }}
+  .data-table td.bad {{ color: #ef5350; }}
+  .data-table tbody tr:hover {{ background: #232730; }}
+
+  footer {{
+    margin-top: 32px; padding: 16px; background: #232730;
+    border-radius: 6px; font-size: 11px; color: #888;
+    border-left: 3px solid #ffc800;
+  }}
+  footer a {{ color: #2962ff; }}
+</style>
+</head>
+<body>
+
+<h1>{title}</h1>
+<div class="subtitle">v2 tearsheet · trustworthy methodology · generated {generated_at}</div>
+
+<div class="meta-row">
+  <div class="meta-item">
+    <span class="meta-label">Strategy:</span><span class="meta-value">{strategy_label}</span>
+  </div>
+  <div class="meta-item">
+    <span class="meta-label">Instrument:</span><span class="meta-value">{instrument_label}</span>
+  </div>
+  <div class="meta-item">
+    <span class="meta-label">Interval:</span><span class="meta-value">{bar_interval}</span>
+  </div>
+  <div class="meta-item">
+    <span class="meta-label">Leverage:</span><span class="meta-value">{leverage}x</span>
+  </div>
+  <div class="meta-item">
+    <span class="meta-label">Bars:</span><span class="meta-value">{n_bars}</span>
+  </div>
+  <div class="meta-item">
+    <span class="meta-label">Range:</span><span class="meta-value">{bar_start} → {bar_end}</span>
+  </div>
+  <div class="meta-item">
+    <span class="meta-label">Starting:</span><span class="meta-value">{starting_capital} {currency}</span>
+  </div>
+  <div class="meta-item">
+    <span class="meta-label">Ending:</span><span class="meta-value">{ending_balance} {currency}</span>
+  </div>
+</div>
+
+{liq_banner}
+
+<h2>Key metrics</h2>
+<div class="grid">
+{metrics_grid}
+</div>
+
+<h2>Equity & drawdown</h2>
+<div class="chart">
+{equity_img}
+</div>
+
+<h2>Trade distributions</h2>
+<div class="chart">
+{trade_dist_img}
+</div>
+
+{yearly_section}
+
+{regime_html}
+
+{baselines_html}
+
+<footer>
+  <strong>About this tearsheet:</strong> only trustworthy stats are
+  shown.  The following are deliberately omitted because NT's
+  <code>_calculate_portfolio_returns</code> uses a zero-padded daily
+  series via <code>.ffill().pct_change()</code> that biases all
+  returns-derived metrics for sparse-trade strategies:<br>
+  <em>Sharpe Ratio · Sortino Ratio · Returns Volatility ·
+  Returns-based Profit Factor · Average Return · Risk Return Ratio ·
+  Monthly Returns heatmap · Returns Distribution histogram ·
+  Rolling Sharpe Ratio</em><br>
+  These will return when upstream lands a daily-MTM equity fix —
+  the project's sweep schema (<code>SWEEP_SCHEMA_VERSION</code>)
+  will bump to v3 at that point.  See
+  <code>docs/ANALYZER_RETURNS_CAVEAT.md</code> for the methodology
+  audit.
+</footer>
+
+</body>
+</html>
+"""
