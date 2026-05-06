@@ -22,7 +22,10 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import asyncpg
-from nautilus_trader.adapters.hyperliquid.config import HyperliquidDataClientConfig
+from nautilus_trader.adapters.hyperliquid.config import (  # type: ignore[attr-defined]
+    HyperliquidDataClientConfig,
+    HyperliquidEnvironment,  # re-exported pyo3 enum, missing from __all__
+)
 from nautilus_trader.adapters.hyperliquid.factories import HyperliquidLiveDataClientFactory
 from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
 from nautilus_trader.adapters.sandbox.factory import SandboxLiveExecClientFactory
@@ -188,7 +191,8 @@ def main() -> None:
                 instrument_provider=InstrumentProviderConfig(
                     load_ids=frozenset((instrument_id,)),
                 ),
-                testnet=False,  # Real market data; simulated execution via Sandbox
+                # Real market data; simulated execution happens via SandboxExecutionClient.
+                environment=HyperliquidEnvironment.MAINNET,
             ),
         },
         exec_clients={
