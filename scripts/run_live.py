@@ -29,8 +29,9 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 import asyncpg
-from nautilus_trader.adapters.hyperliquid.config import (
+from nautilus_trader.adapters.hyperliquid.config import (  # type: ignore[attr-defined]
     HyperliquidDataClientConfig,
+    HyperliquidEnvironment,  # re-exported pyo3 enum, missing from __all__
     HyperliquidExecClientConfig,
 )
 from nautilus_trader.adapters.hyperliquid.factories import (
@@ -221,14 +222,22 @@ def main() -> None:
         ),
         data_clients={
             "HYPERLIQUID": HyperliquidDataClientConfig(
-                testnet=settings.hl_testnet,
+                environment=(
+                    HyperliquidEnvironment.TESTNET
+                    if settings.hl_testnet
+                    else HyperliquidEnvironment.MAINNET
+                ),
             ),
         },
         exec_clients={
             "HYPERLIQUID": HyperliquidExecClientConfig(
                 private_key=settings.hl_private_key,
                 vault_address=settings.hl_wallet_address or None,
-                testnet=settings.hl_testnet,
+                environment=(
+                    HyperliquidEnvironment.TESTNET
+                    if settings.hl_testnet
+                    else HyperliquidEnvironment.MAINNET
+                ),
             ),
         },
     ))
