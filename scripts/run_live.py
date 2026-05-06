@@ -77,6 +77,10 @@ def _build_strategy(
             ma_type=ma_type,
             fast_period=fast,
             slow_period=slow,
+            # Liquidation simulator is backtest-only — disable for live so
+            # the LiquidationAware mixin doesn't place reduce-only stops
+            # on the real venue's order book. See docs/LIQUIDATION_AND_SIZING.md.
+            liquidation=None,
         )), f"MACross-{ma_type}-{fast}-{slow}", {
             "ma_type": ma_type, "fast": fast, "slow": slow, "notional": str(trade_notional),
         }

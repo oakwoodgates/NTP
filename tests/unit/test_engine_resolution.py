@@ -1,8 +1,9 @@
 """Unit tests for liquidation/sizing resolution logic in make_engine.
 
-Covers the public helper ``resolve_strategy_liquidation_config`` which
-notebook callers use to build a fully-resolved ``LiquidationConfig``
-to embed on a strategy config and pass to ``make_engine``.
+Covers the public helpers ``resolve_strategy_liquidation_config`` (used
+by notebook callers to build a fully-resolved ``LiquidationConfig``) and
+``liquidation_for_environment`` (used by live/sandbox runners to gate
+the simulator per environment).
 
 Does not spin up a NT engine — these tests cover the resolution rules
 in isolation.
@@ -12,7 +13,13 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from src.backtesting.engine import resolve_strategy_liquidation_config
+import pytest
+from nautilus_trader.common import Environment
+
+from src.backtesting.engine import (
+    liquidation_for_environment,
+    resolve_strategy_liquidation_config,
+)
 from src.core.liquidation import LiquidationConfig
 from src.core.sizing import SizingConfig
 from src.core.venues import VenueConfig
@@ -242,3 +249,90 @@ class TestPreservesOtherFields:
         assert out.alive_trades_buffer == 3
         assert out.halt_on_account_liquidation is False
         assert out.enabled is True
+
+
+# ── Per-environment gating ─────────────────────────────────────────────────
+
+
+def _full_config() -> LiquidationConfig:
+    return LiquidationConfig(
+        enabled=True,
+        mm_rate=Decimal("0.005"),
+        fee_rate=Decimal("0.00035"),
+        min_trade_notional=Decimal("100"),
+        alive_trades_buffer=1,
+        halt_on_account_liquidation=True,
+    )
+
+
+class TestLiquidationForEnvironment:
+    def test_backtest_passthrough(self) -> None:
+        cfg = _full_config()
+        out = liquidation_for_environment(cfg, Environment.BACKTEST)
+        # Same object returned — no copy needed for backtest.
+        assert out is cfg
+
+    def test_live_returns_none(self) -> None:
+        cfg = _full_config()
+        out = liquidation_for_environment(cfg, Environment.LIVE)
+        assert out is None
+
+    def test_live_with_none_input_stays_none(self) -> None:
+        out = liquidation_for_environment(None, Environment.LIVE)
+        assert out is None
+
+    def test_sandbox_disables_halt(self) -> None:
+        cfg = _full_config()
+        assert cfg.halt_on_account_liquidation is True
+        out = liquidation_for_environment(cfg, Environment.SANDBOX)
+        assert out is not None
+        assert out.halt_on_account_liquidation is False
+        # Other fields preserved.
+        assert out.enabled is True
+        assert out.mm_rate == cfg.mm_rate
+        assert out.min_trade_notional == cfg.min_trade_notional
+
+    def test_sandbox_with_none_input(self) -> None:
+        out = liquidation_for_environment(None, Environment.SANDBOX)
+        assert out is None
+
+    def test_sandbox_with_disabled_input_returns_unchanged(self) -> None:
+        """If user already disabled, no-op — we don't flip enabled to True."""
+        cfg = LiquidationConfig(enabled=False)
+        out = liquidation_for_environment(cfg, Environment.SANDBOX)
+        assert out is cfg
+
+    def test_sandbox_does_not_mutate_original(self) -> None:
+        """msgspec replace returns a new struct; original is frozen."""
+        cfg = _full_config()
+        liquidation_for_environment(cfg, Environment.SANDBOX)
+        assert cfg.halt_on_account_liquidation is True   # unchanged
+
+
+class TestMakeEngineRejectsNonBacktest:
+    """make_engine returns a BacktestEngine; non-BACKTEST env is a config bug."""
+
+    def test_live_raises(self) -> None:
+        from src.backtesting.engine import make_engine
+
+        # We pass minimal junk for everything else — the env check fires first.
+        with pytest.raises(ValueError, match="BacktestEngine"):
+            make_engine(
+                venue=None,
+                instrument=None,
+                bars=[],
+                starting_capital=1000,
+                environment=Environment.LIVE,
+            )
+
+    def test_sandbox_raises(self) -> None:
+        from src.backtesting.engine import make_engine
+
+        with pytest.raises(ValueError, match="BacktestEngine"):
+            make_engine(
+                venue=None,
+                instrument=None,
+                bars=[],
+                starting_capital=1000,
+                environment=Environment.SANDBOX,
+            )

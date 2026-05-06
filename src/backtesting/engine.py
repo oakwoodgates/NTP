@@ -12,10 +12,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import msgspec
 import numpy as np
 import pandas as pd
 from nautilus_trader.backtest.config import BacktestEngineConfig
 from nautilus_trader.backtest.engine import BacktestEngine
+from nautilus_trader.common import Environment
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.core.rust.model import PositionSide, TradingState
 from nautilus_trader.model.enums import AccountType, OmsType
@@ -142,6 +144,7 @@ def make_engine(
     leverage: int = 1,
     log_level: str = "ERROR",
     *,
+    environment: Environment = Environment.BACKTEST,
     liquidation: LiquidationConfig | None = None,
     venue_config: VenueConfig | None = None,
     sizing: SizingConfig | None = None,
@@ -163,6 +166,13 @@ def make_engine(
         to the simulated venue.
     log_level
         NT log level. Default ``"ERROR"`` to avoid stdout flooding.
+    environment
+        Defensive parameter — must be ``Environment.BACKTEST`` (the
+        default).  ``make_engine`` returns a ``BacktestEngine``; live
+        and sandbox runs use ``TradingNode`` directly via
+        ``scripts/run_live.py`` and ``scripts/run_sandbox.py``.
+        Passing ``Environment.LIVE`` or ``Environment.SANDBOX`` here
+        raises ``ValueError`` with a pointer to the right runner script.
     liquidation
         When set, registers the ``AccountAliveMonitor`` actor so the
         engine simulates account-level liquidation (HALTED via
@@ -180,7 +190,22 @@ def make_engine(
         ``min_trade_notional`` resolution order
         (``min_notional`` → ``fixed_notional``).
 
+    Raises
+    ------
+    ValueError
+        If ``environment`` is not ``Environment.BACKTEST``.
+
     """
+    if environment != Environment.BACKTEST:
+        msg = (
+            f"make_engine() builds a BacktestEngine; got environment={environment!r}. "
+            "For live / sandbox use TradingNode directly — see "
+            "scripts/run_live.py and scripts/run_sandbox.py. "
+            "Pass `liquidation=liquidation_for_environment(cfg, env)` to those "
+            "scripts to disable / adjust the simulator per environment."
+        )
+        raise ValueError(msg)
+
     _ensure_log_guard(log_level)
     engine = BacktestEngine(config=BacktestEngineConfig())
     engine.add_venue(
@@ -251,6 +276,53 @@ def resolve_strategy_liquidation_config(
         alive_trades_buffer=user.alive_trades_buffer,
         halt_on_account_liquidation=user.halt_on_account_liquidation,
     )
+
+
+def liquidation_for_environment(
+    config: LiquidationConfig | None,
+    environment: Environment,
+) -> LiquidationConfig | None:
+    """Adjust a LiquidationConfig for the given run environment.
+
+    The simulator is appropriate in some environments and dangerous in
+    others. This helper enforces the right behavior so a notebook config
+    that gets copy-pasted into a live runner doesn't put simulated stops
+    on a real venue's order book.
+
+    Mapping
+    -------
+    - ``BACKTEST`` — return the config as-is. Both per-position
+      liquidation stops and account halts are appropriate.
+    - ``SANDBOX`` — return a copy with ``halt_on_account_liquidation=False``.
+      Sandbox runs ``SimulatedExchange`` against live data (the same
+      no-margin-enforcement bug applies, so simulating liquidation IS
+      appropriate), but you typically don't want a paper-trading
+      session to stop dead on a single liquidation event — the goal is
+      ongoing observation.
+    - ``LIVE`` — return ``None``. The venue handles its own liquidation;
+      our stops on top of the real book would conflict with HL's own
+      forced close.
+
+    Use this in ``scripts/run_live.py`` and ``scripts/run_sandbox.py``::
+
+        strategy_liquidation = liquidation_for_environment(
+            config=USER_LIQUIDATION_CONFIG,
+            environment=Environment.LIVE,   # or SANDBOX
+        )
+        # Pass strategy_liquidation into the strategy config so the
+        # mixin no-ops in live (None) or keeps placing stops without
+        # halting in sandbox.
+    """
+    if environment == Environment.BACKTEST:
+        return config
+    if environment == Environment.LIVE:
+        return None
+    if environment == Environment.SANDBOX:
+        if config is None or not config.enabled:
+            return config
+        return msgspec.structs.replace(config, halt_on_account_liquidation=False)
+    msg = f"Unknown environment: {environment!r}"
+    raise ValueError(msg)
 
 
 def _register_account_alive_monitor(
