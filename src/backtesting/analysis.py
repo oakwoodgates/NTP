@@ -557,3 +557,118 @@ def run_fee_sweep(
             print(f"\n  Fee sweep complete — {total} levels in {elapsed:.1f}s")
 
     return df
+
+
+# ── Tool 4: Alt-instrument sanity check ──────────────────────────────────────
+
+
+def run_alt_instrument_check(
+    instruments: list[dict[str, Any]],
+    params: dict[str, Any],
+    strategy_factory: Callable[[BacktestEngine, dict[str, Any]], None],
+    *,
+    leverage: int = 1,
+    log_level: str = "ERROR",
+    verbose: bool = True,
+    liquidation: Any | None = None,
+    venue_config: Any | None = None,
+    sizing: Any | None = None,
+) -> pd.DataFrame:
+    """Run the same strategy params against multiple instruments.
+
+    Standard quant-shop "does this generalize?" check.  Run after a
+    sweep has identified the best params on the primary instrument:
+    point this at 2-4 alternative instruments (different beta, different
+    liquidity tier) and check whether the strategy at least *doesn't
+    blow up* off-asset.  If it does, the params are overfit to the
+    primary asset's specific structure.
+
+    The chosen params, leverage, and configs are held constant across
+    all alternates — the only thing that varies is the instrument and
+    its bar data.
+
+    Parameters
+    ----------
+    instruments
+        List of dicts, one per alternate instrument, each containing:
+
+        * ``label`` (str) — short name shown in results (e.g. ``"ETH"``)
+        * ``venue`` — NT Venue identifier
+        * ``instrument`` — NT Instrument
+        * ``bars`` — list of NT Bar objects
+        * ``starting_capital`` (int | float) — usually the same as the
+          primary backtest, but can be adjusted per-instrument
+
+    params
+        Strategy parameters to apply to every instrument.
+    strategy_factory
+        Callback ``(engine, params) -> None`` that adds a strategy.
+    leverage, log_level, liquidation, venue_config, sizing
+        Forwarded to ``run_single_backtest`` for each alt run.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per instrument (in the order provided) with the full
+        v2 sweep schema columns plus ``label`` and ``instrument_id``.
+
+    """
+    from src.backtesting.engine import run_single_backtest
+
+    results: list[dict[str, Any]] = []
+    t0 = time.monotonic()
+    total = len(instruments)
+
+    def _add(eng: BacktestEngine, p: dict[str, Any] = params) -> None:
+        strategy_factory(eng, p)
+
+    for i, spec in enumerate(instruments, 1):
+        label = spec["label"]
+        venue = spec["venue"]
+        instrument = spec["instrument"]
+        bars = spec["bars"]
+        starting_capital = spec.get("starting_capital", 10_000)
+
+        row = run_single_backtest(
+            venue=venue,
+            instrument=instrument,
+            bars=bars,
+            starting_capital=starting_capital,
+            params=params,
+            add_strategy=_add,
+            leverage=leverage,
+            log_level=log_level,
+            liquidation=liquidation,
+            venue_config=venue_config,
+            sizing=sizing,
+        )
+        row["label"] = label
+        row["instrument_id"] = str(getattr(instrument, "id", "?"))
+        results.append(row)
+
+        if verbose:
+            pnl = row.get("total_pnl", float("nan"))
+            pnl_pct = row.get("total_pnl_pct", float("nan"))
+            npos = row.get("num_positions", 0)
+            err_str = f"  !! {row['error']}" if row.get("error") else ""
+            print(
+                f"  [{i}/{total}] {label:>10}  "
+                f"PnL={pnl:>10.2f}  PnL%={pnl_pct:>7.2f}%"
+                f"  positions={npos}{err_str}",
+            )
+
+    elapsed = time.monotonic() - t0
+    if verbose:
+        n_pos = sum(1 for r in results if (r.get("total_pnl") or 0) > 0)
+        print(
+            f"\n  Alt-instrument check complete — {total} runs in "
+            f"{elapsed:.1f}s ({n_pos} positive)",
+        )
+
+    df = pd.DataFrame(results)
+    if df.empty:
+        return df
+    # Front-load identity columns when present.
+    leading = [c for c in ("label", "instrument_id") if c in df.columns]
+    rest = [c for c in df.columns if c not in leading]
+    return df[leading + rest]

@@ -17,6 +17,7 @@ from src.backtesting.analysis import (
     performance_by_regime,
     performance_by_year,
     rolling_performance,
+    run_alt_instrument_check,
     run_fee_sweep,
     tag_regimes,
 )
@@ -369,6 +370,89 @@ class TestPerformanceByYear:
 
 
 # ── run_fee_sweep ────────────────────────────────────────────────────────────
+
+
+class TestRunAltInstrumentCheck:
+    """Smoke tests — heavy NT mocking, just checks the loop + frame shape."""
+
+    def _mock_backtest_result(self, **overrides: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "total_pnl": 500.0,
+            "total_pnl_pct": 5.0,
+            "num_positions": 50,
+            "final_balance": 10_500.0,
+            "min_balance": 9_800.0,
+            "error": "",
+            "liquidated": False,
+        }
+        base.update(overrides)
+        return base
+
+    def _stub_instrument(self, instrument_id: str) -> Any:
+        class _Stub:
+            id = instrument_id
+        return _Stub()
+
+    @patch("src.backtesting.engine.run_single_backtest")
+    def test_runs_each_instrument(self, mock_backtest: Any) -> None:
+        # Fresh dict per call so the function can mutate without bleeding
+        # state across rows.
+        mock_backtest.side_effect = lambda **kw: self._mock_backtest_result()
+        instruments = [
+            {"label": "BTC", "venue": "V", "instrument": self._stub_instrument("BTC.X"), "bars": []},
+            {"label": "ETH", "venue": "V", "instrument": self._stub_instrument("ETH.X"), "bars": []},
+            {"label": "SOL", "venue": "V", "instrument": self._stub_instrument("SOL.X"), "bars": []},
+        ]
+        df = run_alt_instrument_check(
+            instruments=instruments,
+            params={"fast": 10, "slow": 40},
+            strategy_factory=lambda eng, p: None,
+            verbose=False,
+        )
+        assert mock_backtest.call_count == 3
+        assert list(df["label"]) == ["BTC", "ETH", "SOL"]
+        assert list(df["instrument_id"]) == ["BTC.X", "ETH.X", "SOL.X"]
+        # Identity columns front-loaded
+        assert df.columns[0] == "label"
+        assert df.columns[1] == "instrument_id"
+
+    @patch("src.backtesting.engine.run_single_backtest")
+    def test_per_instrument_starting_capital(self, mock_backtest: Any) -> None:
+        mock_backtest.side_effect = lambda **kw: self._mock_backtest_result()
+        instruments = [
+            {
+                "label": "BTC", "venue": "V",
+                "instrument": self._stub_instrument("BTC.X"),
+                "bars": [], "starting_capital": 10_000,
+            },
+            {
+                "label": "ETH", "venue": "V",
+                "instrument": self._stub_instrument("ETH.X"),
+                "bars": [], "starting_capital": 5_000,
+            },
+        ]
+        run_alt_instrument_check(
+            instruments=instruments,
+            params={"fast": 10},
+            strategy_factory=lambda eng, p: None,
+            verbose=False,
+        )
+        # Inspect the call args of run_single_backtest
+        call1_kwargs = mock_backtest.call_args_list[0].kwargs
+        call2_kwargs = mock_backtest.call_args_list[1].kwargs
+        assert call1_kwargs["starting_capital"] == 10_000
+        assert call2_kwargs["starting_capital"] == 5_000
+
+    @patch("src.backtesting.engine.run_single_backtest")
+    def test_empty_list(self, mock_backtest: Any) -> None:
+        df = run_alt_instrument_check(
+            instruments=[],
+            params={},
+            strategy_factory=lambda eng, p: None,
+            verbose=False,
+        )
+        assert df.empty
+        mock_backtest.assert_not_called()
 
 
 class TestRunFeeSweep:
