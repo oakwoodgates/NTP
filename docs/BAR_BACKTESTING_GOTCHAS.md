@@ -1,6 +1,6 @@
-# Bar-Only Backtesting Gotchas (NautilusTrader 1.224.0)
+# Bar-Only Backtesting Gotchas (NautilusTrader 1.225.0)
 
-Lessons learned from adapting NT example strategies to work with OHLCV bar data from `ParquetDataCatalog`. NT's example strategies are written for tick data; several order types silently fail in bar-only backtests.
+Lessons learned from adapting NT example strategies to work with OHLCV bar data from `ParquetDataCatalog`. NT's example strategies are written for tick data; several order types silently fail in bar-only backtests, and the engine itself doesn't enforce margin.
 
 ---
 
@@ -177,3 +177,46 @@ When a strategy produces 0 fills, don't trust source code analysis alone. NT's C
 - Orders submitted but all end up `CANCELED` (MIT/LIT trigger never satisfied)
 - Orders in `EMULATED` status that never transition (emulator receiving no data)
 - Trailing stops that never trigger (less common — usually works with `NO_TRIGGER`)
+
+---
+
+## 7. Margin is not enforced on `MARGIN` accounts (and there's no liquidation engine)
+
+**Symptom:** Backtest with `STARTING_CAPITAL=100`, `TRADE_SIZE=500`, `LEVERAGE=20`. Strategy continues opening positions after equity goes negative. Sweep rows show `final_balance > 0` and positive PnL even though `min_balance` was deeply negative — synthetic profits accruing on top of an insolvent account.
+
+**Root cause — three deactivated checks:**
+
+- `risk/engine.pyx:678–679`:
+  ```cython
+  if account.is_margin_account:
+      return True  # TODO: Determine risk controls for margin
+  ```
+  RiskEngine short-circuits the risk check for any margin account. CASH accounts get balance-and-position checks; MARGIN does not.
+- `accounting/manager.pyx:580–586` has a commented-out `AccountMarginExceeded` raise with the comment: *"causes issues in live trading with more complex margin requirements."*
+- `accounting/accounts/margin.pyx:559–566` clamps `free` balance to 0 rather than raising when over-margined: *"We intentionally do not raise as this condition can occur transiently when the venue and client state are out-of-sync."*
+
+Three independent sites chose graceful degradation over enforcement. Exhaustive grep over `liquidat | margin_call | maintenance_margin | force_close | bankrupt | insolven` returns **zero matches** in `backtest/` or `risk/` — confirming no liquidation logic anywhere in the simulator.
+
+This is a deliberate NT policy choice driven by live-trading-fidelity concerns. Unlikely to change before NT 2.0.
+
+### Project-side fix: the liquidation simulator
+
+Built into the project as a strategy mixin + actor + halt callback. Opt in by passing a `LiquidationConfig(enabled=True)` plus the matching `VenueConfig` to `make_engine`. The simulator:
+
+- Places a reduce-only `StopMarketOrder` at the cross-margin liquidation price for every open position (per-strategy via `LiquidationAware` mixin).
+- Watches account equity on `AccountState` events and halts the `RiskEngine` when equity falls below the IM+fee floor for a min-size entry (`AccountAliveMonitor` actor).
+- Adds six telemetry columns to sweep results: `liquidated_positions`, `liquidated_account`, `liquidated_at_ts`, `denied_post_halt`, `liq_slippage_avg/max_pct`, `total_fees`.
+
+See `docs/LIQUIDATION_AND_SIZING.md` for architecture, terminology, and the notebook configuration pattern. The `ema_cross.ipynb` notebook is the canonical example.
+
+### Bar-fill caveat for liquidation stops
+
+NT's bar matching engine fills `StopMarketOrder`s at the **trigger price** during synthetic-tick processing — even when the bar's wick gaps far past the trigger. Real venues fill at "next available price", which on a big-gap day is materially worse. Liquidation losses in the simulator are systematically best-case. The `liq_slippage_*` sweep columns measure this: currently always `0.0%`, confirming NT's optimistic fill behavior.
+
+### Live-mode caveat
+
+The simulator must be **disabled in live trading** (`run_live.py`). Real venues handle liquidation themselves; running our reduce-only stops on top of HL's order book would interact unpredictably with the venue's own forced close.
+
+Use `liquidation_for_environment(config, env)` from `src.backtesting.engine` to map a single user config to the right per-environment value (BACKTEST: unchanged, SANDBOX: `halt_on_account_liquidation=False`, LIVE: `None`). `make_engine` itself rejects non-BACKTEST environments — it physically only constructs a `BacktestEngine`.
+
+`run_live.py` also sets `liquidation=None` explicitly on strategy configs (defensive — even though that's the field default).
