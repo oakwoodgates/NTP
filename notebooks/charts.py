@@ -999,6 +999,140 @@ def plot_equity_curve(
     plt.show()
 
 
+def plot_baselines_comparison(
+    *,
+    strategy_pnl: float,
+    buy_and_hold_pnl: float | None = None,
+    random_entry_dist: dict[str, Any] | None = None,
+    title: str = "Strategy vs baselines",
+    currency: str = "USDC",
+) -> None:
+    """Side-by-side comparison: strategy vs buy-and-hold vs random-entry distribution.
+
+    Renders three visual elements in one figure:
+
+    1. **Bars**: strategy PnL and buy-and-hold PnL.  Sign-coded.
+    2. **Random-entry distribution** as a horizontal whisker plot
+       showing 5/25/50/75/95 percentiles, with the strategy's PnL
+       overlaid as a vertical line.  Tells you "where in the random
+       distribution does my strategy land?"
+    3. **Verdict text**: percentile rank of the strategy within the
+       random-entry distribution, plus a note on B&H comparison.
+
+    Calls ``plt.show()`` directly — designed for inline notebook use.
+
+    Parameters
+    ----------
+    strategy_pnl
+        Your strategy's total PnL.
+    buy_and_hold_pnl
+        Output of ``baselines.buy_and_hold(bars, ...)``'s ``"pnl"`` key.
+        ``None`` skips the B&H bar.
+    random_entry_dist
+        Full output dict of ``baselines.random_entry_baseline(...)``.
+        ``None`` skips the random-entry whisker plot.
+    title
+        Suptitle.
+    currency
+        Currency label for axes.
+
+    """
+    has_bh = buy_and_hold_pnl is not None
+    has_random = (
+        random_entry_dist is not None
+        and not math.isnan(random_entry_dist.get("mean_pnl", float("nan")))
+    )
+
+    fig, ax = plt.subplots(figsize=(12, 4.5))
+    fig.suptitle(title, fontsize=13)
+
+    # Bars: strategy + B&H
+    labels = ["Strategy"]
+    pnls = [strategy_pnl]
+    colors = ["#2ca02c" if strategy_pnl > 0 else "#d62728"]
+    if has_bh:
+        bh = float(buy_and_hold_pnl)  # type: ignore[arg-type]
+        labels.append("Buy & Hold")
+        pnls.append(bh)
+        colors.append("#2ca02c" if bh > 0 else "#d62728")
+
+    bars = ax.barh(labels, pnls, color=colors, alpha=0.75, edgecolor="black")
+    for b, v in zip(bars, pnls, strict=False):
+        x = b.get_width()
+        ax.text(
+            x + (max(abs(p) for p in pnls) * 0.02 * (1 if x >= 0 else -1)),
+            b.get_y() + b.get_height() / 2,
+            f"{v:,.0f}",
+            ha="left" if x >= 0 else "right",
+            va="center",
+            fontsize=10,
+        )
+    ax.axvline(0, color="black", linewidth=0.5)
+    ax.set_xlabel(f"PnL ({currency})")
+    ax.grid(True, alpha=0.2, axis="x")
+
+    # Random-entry whisker overlay
+    if has_random:
+        d = random_entry_dist  # type: ignore[assignment]
+        # Draw whiskers above the bars
+        y = -0.6  # below the bars
+        ax.plot(
+            [d["pct_5"], d["pct_95"]], [y, y],
+            color="#888", linewidth=2, label="Random entry: 5–95 pct",
+        )
+        ax.plot(
+            [d["pct_25"], d["pct_75"]], [y, y],
+            color="#444", linewidth=6, alpha=0.6,
+            label="Random entry: 25–75 pct",
+        )
+        ax.plot(
+            d["median_pnl"], y, "D", color="#fff",
+            markersize=8, markeredgecolor="#444",
+            label=f"Random median ({d['median_pnl']:,.0f})",
+        )
+        # Vertical line at strategy PnL (extends through the random whisker row)
+        ax.axvline(
+            strategy_pnl, color="#2962ff", linestyle="--",
+            linewidth=1.5, alpha=0.8,
+            label=f"Strategy ({strategy_pnl:,.0f})",
+        )
+        ax.set_ylim(-1.0, 1.5)
+
+        # Verdict
+        n = d["n_simulations"]
+        # Approximate percentile of strategy in the simulation distribution
+        # (we don't keep the full sim, so use percentile bands)
+        pct_estimate = "below 5th"
+        if strategy_pnl >= d["pct_95"]:
+            pct_estimate = "above 95th"
+        elif strategy_pnl >= d["pct_75"]:
+            pct_estimate = "75th–95th"
+        elif strategy_pnl >= d["median_pnl"]:
+            pct_estimate = "50th–75th"
+        elif strategy_pnl >= d["pct_25"]:
+            pct_estimate = "25th–50th"
+        elif strategy_pnl >= d["pct_5"]:
+            pct_estimate = "5th–25th"
+        ax.text(
+            0.02, 0.95,
+            f"Random-entry sims: {n}  ·  Strategy ranks: {pct_estimate} pct",
+            transform=ax.transAxes,
+            fontsize=10,
+            verticalalignment="top",
+            bbox={"facecolor": "#f0f0f0", "alpha": 0.8, "edgecolor": "#888"},
+        )
+        ax.legend(loc="lower right", fontsize=8)
+    else:
+        ax.text(
+            0.5, 0.95, "(no random-entry distribution provided)",
+            transform=ax.transAxes, ha="center", va="top",
+            color="#888", fontsize=10,
+        )
+
+    plt.tight_layout()
+    plt.show()
+
+
 def plot_yearly_breakdown(
     yearly_df: pd.DataFrame,
     *,
