@@ -1,0 +1,410 @@
+"""Trustworthy backtest metrics — pure functions, no NT objects.
+
+Sweep schema v2 metrics live here.  Everything in this module operates
+on plain Python / pandas inputs (lists of floats, ints, timestamps,
+``pd.Series`` of balances) so the math is fully testable without
+spinning up a NT engine.
+
+Why not the NT analyzer's Returns section?
+    Because NT 1.226's ``_calculate_portfolio_returns`` zero-pads
+    non-trading days via ``.ffill().pct_change()``, biasing every
+    returns-derived stat for any strategy that doesn't trade daily.
+    See ``docs/ANALYZER_RETURNS_CAVEAT.md``.
+
+The metrics here all derive from PnL realised on closed positions and
+event-time balance snapshots — both of which NT exposes correctly.
+
+Public API
+----------
+
+* :class:`TradeRecord` — minimal closed-trade record, the input to all
+  trade-level metrics.
+* :func:`compute_trade_metrics` — PnL distribution, expectancy, payoff
+  ratio, profit factor, win rate, largest win/loss, avg duration,
+  max consecutive losses, long/short attribution.
+* :func:`compute_balance_metrics` — drawdown anatomy + CAGR + MAR
+  from an event-time balance series.
+* :func:`compute_activity_metrics` — bars in market, fee-as-%-of-PnL.
+* :func:`compute_all_metrics` — convenience wrapper that calls the
+  three above and merges the result dicts.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    import pandas as pd
+
+
+@dataclass(frozen=True)
+class TradeRecord:
+    """A single closed trade.  Currency-agnostic (PnL is a float)."""
+
+    pnl: float
+    """Realized PnL on the position, in the settlement currency."""
+
+    ts_opened_ns: int
+    """Position open timestamp (UTC nanos since epoch)."""
+
+    ts_closed_ns: int
+    """Position close timestamp (UTC nanos since epoch)."""
+
+    side: str
+    """``"LONG"`` or ``"SHORT"``."""
+
+
+def _safe_div(numerator: float, denominator: float, default: float = float("nan")) -> float:
+    """Division that returns *default* on zero/non-finite denominators."""
+    if denominator == 0 or not math.isfinite(denominator):
+        return default
+    return numerator / denominator
+
+
+# ── Trade-level metrics ──────────────────────────────────────────────────────
+
+
+def compute_trade_metrics(
+    trades: list[TradeRecord],
+    *,
+    bar_interval_ns: int | None = None,
+) -> dict[str, float]:
+    """Trade-distribution metrics from a list of closed trades.
+
+    All keys are always present; missing-data cases use ``nan`` rather
+    than raising, so the resulting dict slots cleanly into a sweep row.
+
+    Parameters
+    ----------
+    trades
+        Closed trades.  An empty list yields a dict of nans.
+    bar_interval_ns
+        Bar interval in nanoseconds.  When provided, durations are
+        reported in bars; when ``None``, in seconds.
+
+    Returns
+    -------
+    dict[str, float]
+        Keys: ``avg_pnl_per_trade``, ``win_rate``, ``loss_rate``,
+        ``num_winners``, ``num_losers``, ``num_breakeven``,
+        ``gross_wins``, ``gross_losses``, ``avg_win``, ``avg_loss``,
+        ``largest_win``, ``largest_loss``, ``pnl_profit_factor``,
+        ``expectancy``, ``payoff_ratio``, ``avg_trade_duration_bars``
+        (or ``..._secs``), ``max_consec_losers``, ``max_consec_winners``,
+        ``num_long``, ``num_short``, ``long_pnl``, ``short_pnl``.
+
+    """
+    duration_unit = "bars" if bar_interval_ns is not None else "secs"
+    keys = [
+        "avg_pnl_per_trade", "win_rate", "loss_rate",
+        "num_winners", "num_losers", "num_breakeven",
+        "gross_wins", "gross_losses", "avg_win", "avg_loss",
+        "largest_win", "largest_loss", "pnl_profit_factor",
+        "expectancy", "payoff_ratio",
+        f"avg_trade_duration_{duration_unit}",
+        "max_consec_losers", "max_consec_winners",
+        "num_long", "num_short", "long_pnl", "short_pnl",
+    ]
+    if not trades:
+        return {k: float("nan") for k in keys}
+
+    pnls = [t.pnl for t in trades]
+    n = len(pnls)
+    total_pnl = sum(pnls)
+    winners = [p for p in pnls if p > 0]
+    losers = [p for p in pnls if p < 0]
+    breakevens = [p for p in pnls if p == 0]
+
+    gross_wins = sum(winners)
+    gross_losses = sum(losers)  # negative
+    n_win = len(winners)
+    n_loss = len(losers)
+
+    avg_pnl = total_pnl / n
+    win_rate = n_win / n
+    loss_rate = n_loss / n
+    avg_win = gross_wins / n_win if n_win else float("nan")
+    avg_loss = gross_losses / n_loss if n_loss else float("nan")
+
+    # Profit factor: gross_wins / abs(gross_losses).
+    # When there are zero losses, conventional usage is "infinite" — we
+    # report inf so a downstream sort puts it at the top, but a sweep
+    # consumer should always treat n_losers == 0 specially.
+    if gross_losses == 0:
+        profit_factor = float("inf") if gross_wins > 0 else float("nan")
+    else:
+        profit_factor = gross_wins / abs(gross_losses)
+
+    # Expectancy: average $ per trade.  Algebraically same as avg_pnl,
+    # but the formula is the standard textbook decomposition.
+    expectancy = (
+        win_rate * (avg_win if n_win else 0.0)
+        + loss_rate * (avg_loss if n_loss else 0.0)
+    )
+
+    payoff = (
+        abs(avg_win / avg_loss)
+        if (n_win and n_loss and avg_loss != 0)
+        else float("nan")
+    )
+
+    largest_win = max(pnls) if pnls else float("nan")
+    largest_loss = min(pnls) if pnls else float("nan")
+
+    # Duration
+    durations_ns = [t.ts_closed_ns - t.ts_opened_ns for t in trades]
+    if bar_interval_ns:
+        avg_duration = sum(durations_ns) / (n * bar_interval_ns)
+    else:
+        avg_duration = sum(durations_ns) / (n * 1_000_000_000)  # secs
+
+    # Consecutive runs (sort trades chronologically by close time).
+    sorted_trades = sorted(trades, key=lambda t: t.ts_closed_ns)
+    max_consec_losers = _max_consec(sorted_trades, lambda t: t.pnl < 0)
+    max_consec_winners = _max_consec(sorted_trades, lambda t: t.pnl > 0)
+
+    # Long/short attribution
+    longs = [t for t in trades if t.side == "LONG"]
+    shorts = [t for t in trades if t.side == "SHORT"]
+
+    return {
+        "avg_pnl_per_trade": avg_pnl,
+        "win_rate": win_rate,
+        "loss_rate": loss_rate,
+        "num_winners": float(n_win),
+        "num_losers": float(n_loss),
+        "num_breakeven": float(len(breakevens)),
+        "gross_wins": gross_wins,
+        "gross_losses": gross_losses,
+        "avg_win": avg_win,
+        "avg_loss": avg_loss,
+        "largest_win": largest_win,
+        "largest_loss": largest_loss,
+        "pnl_profit_factor": profit_factor,
+        "expectancy": expectancy,
+        "payoff_ratio": payoff,
+        f"avg_trade_duration_{duration_unit}": avg_duration,
+        "max_consec_losers": float(max_consec_losers),
+        "max_consec_winners": float(max_consec_winners),
+        "num_long": float(len(longs)),
+        "num_short": float(len(shorts)),
+        "long_pnl": sum(t.pnl for t in longs) if longs else 0.0,
+        "short_pnl": sum(t.pnl for t in shorts) if shorts else 0.0,
+    }
+
+
+def _max_consec(
+    trades: list[TradeRecord],
+    predicate: Callable[[TradeRecord], bool],
+) -> int:
+    """Longest run of consecutive trades satisfying *predicate*."""
+    best = 0
+    cur = 0
+    for t in trades:
+        if predicate(t):
+            cur += 1
+            best = max(best, cur)
+        else:
+            cur = 0
+    return best
+
+
+# ── Balance / drawdown metrics ───────────────────────────────────────────────
+
+
+def compute_balance_metrics(
+    balance: pd.Series,
+    starting_capital: float,
+    *,
+    bar_interval_ns: int | None = None,
+) -> dict[str, float]:
+    """Drawdown anatomy + CAGR + MAR from an event-time balance series.
+
+    Parameters
+    ----------
+    balance
+        Series of balance values indexed by ``pd.DatetimeIndex`` (UTC).
+        Must have at least one row.  Multiple rows per timestamp are
+        collapsed to the last balance per timestamp before computing.
+    starting_capital
+        Initial deposit, used as a fallback peak when the series is
+        sparse or as the denominator for percentage drawdowns at t=0.
+    bar_interval_ns
+        Bar interval in nanoseconds.  When provided,
+        ``time_underwater_bars`` is reported; when ``None``, the value
+        is reported in seconds and the key is ``time_underwater_secs``.
+
+    Returns
+    -------
+    dict[str, float]
+        Keys: ``max_drawdown_abs``, ``max_drawdown_pct``,
+        ``recovery_factor``, ``cagr``, ``mar_ratio``,
+        ``time_underwater_bars`` (or ``..._secs``), ``years_in_sample``.
+        All numeric; missing/undefined values are ``nan``.
+
+    """
+    duration_unit = "bars" if bar_interval_ns is not None else "secs"
+    keys = [
+        "max_drawdown_abs", "max_drawdown_pct", "recovery_factor",
+        "cagr", "mar_ratio", f"time_underwater_{duration_unit}",
+        "years_in_sample",
+    ]
+    if balance.empty:
+        return {k: float("nan") for k in keys}
+
+    # Collapse duplicate timestamps to the last value per timestamp.
+    s = balance.astype(float).groupby(balance.index).last().sort_index()
+    if s.empty:
+        return {k: float("nan") for k in keys}
+
+    peak = s.cummax()
+    drawdown_abs = peak - s
+    drawdown_pct = drawdown_abs / peak.where(peak > 0, other=float("nan"))
+
+    max_dd_abs = float(drawdown_abs.max())
+    max_dd_pct = float(drawdown_pct.max()) if drawdown_pct.notna().any() else float("nan")
+
+    final_balance = float(s.iloc[-1])
+    initial = float(starting_capital)
+    total_pnl = final_balance - initial
+
+    # CAGR — only meaningful if we have ≥1 day of data and positive end balance.
+    span_secs = (s.index[-1] - s.index[0]).total_seconds() if len(s) >= 2 else 0.0
+    years_in_sample = span_secs / (365.25 * 24 * 3600) if span_secs > 0 else float("nan")
+    if (
+        math.isfinite(years_in_sample)
+        and years_in_sample > 0
+        and initial > 0
+        and final_balance > 0
+    ):
+        cagr = (final_balance / initial) ** (1.0 / years_in_sample) - 1.0
+    else:
+        cagr = float("nan")
+
+    mar_ratio = (
+        cagr / max_dd_pct
+        if (math.isfinite(cagr) and math.isfinite(max_dd_pct) and max_dd_pct > 0)
+        else float("nan")
+    )
+
+    recovery_factor = _safe_div(total_pnl, max_dd_abs)
+
+    # Time underwater: cumulative duration where balance < running peak.
+    underwater_mask = s < peak
+    if underwater_mask.any():
+        # Sum durations of consecutive underwater stretches.  Each stretch
+        # has duration (next_index - this_index) for points within it,
+        # plus the last point's contribution is implicit (we use diff).
+        idx = s.index
+        gaps = idx.to_series().diff().dt.total_seconds().fillna(0.0)
+        underwater_secs = float(gaps[underwater_mask].sum())
+    else:
+        underwater_secs = 0.0
+
+    if bar_interval_ns:
+        time_underwater = underwater_secs * 1_000_000_000 / bar_interval_ns
+    else:
+        time_underwater = underwater_secs
+
+    return {
+        "max_drawdown_abs": max_dd_abs,
+        "max_drawdown_pct": max_dd_pct,
+        "recovery_factor": recovery_factor,
+        "cagr": cagr,
+        "mar_ratio": mar_ratio,
+        f"time_underwater_{duration_unit}": time_underwater,
+        "years_in_sample": years_in_sample,
+    }
+
+
+# ── Activity / cost metrics ──────────────────────────────────────────────────
+
+
+def compute_activity_metrics(
+    trades: list[TradeRecord],
+    *,
+    total_bars: int | None = None,
+    bar_interval_ns: int | None = None,
+    first_bar_ts_ns: int | None = None,
+    last_bar_ts_ns: int | None = None,
+    total_fees: float | None = None,
+    total_pnl: float | None = None,
+) -> dict[str, float]:
+    """Bars-in-market and fee-as-%-of-PnL.
+
+    Computes ``bars_in_market_pct`` either from ``total_bars`` directly
+    (preferred) or from ``first_bar_ts_ns`` + ``last_bar_ts_ns`` +
+    ``bar_interval_ns``.  Returns ``nan`` for that key when none of the
+    required inputs are available.
+
+    ``fee_pct_of_pnl`` is ``total_fees / abs(total_pnl)``; ``nan`` when
+    ``total_fees`` or ``total_pnl`` is missing or PnL is zero.  Note: a
+    value > 1.0 means fees exceed gross PnL — strategy is fee-killed.
+
+    """
+    out = {
+        "bars_in_market_pct": float("nan"),
+        "fee_pct_of_pnl": float("nan"),
+    }
+
+    # Bars in market — assumes NETTING (non-overlapping positions).
+    if trades:
+        if total_bars is None and (
+            bar_interval_ns and first_bar_ts_ns is not None and last_bar_ts_ns is not None
+        ):
+            span_ns = last_bar_ts_ns - first_bar_ts_ns + bar_interval_ns
+            total_bars = max(int(span_ns / bar_interval_ns), 1)
+        if total_bars and bar_interval_ns:
+            in_market_ns = sum(t.ts_closed_ns - t.ts_opened_ns for t in trades)
+            in_market_bars = in_market_ns / bar_interval_ns
+            out["bars_in_market_pct"] = min(in_market_bars / total_bars, 1.0)
+
+    if total_fees is not None and total_pnl is not None and total_pnl != 0:
+        out["fee_pct_of_pnl"] = total_fees / abs(total_pnl)
+
+    return out
+
+
+# ── Convenience wrapper ──────────────────────────────────────────────────────
+
+
+def compute_all_metrics(
+    trades: list[TradeRecord],
+    balance: pd.Series,
+    *,
+    starting_capital: float,
+    total_bars: int | None = None,
+    bar_interval_ns: int | None = None,
+    first_bar_ts_ns: int | None = None,
+    last_bar_ts_ns: int | None = None,
+    total_fees: float | None = None,
+    total_pnl: float | None = None,
+) -> dict[str, float]:
+    """Run all three metric groups and merge the results.
+
+    Convenience wrapper for ``run_single_backtest``.  All keys from the
+    three sub-functions are returned in one flat dict; no key collisions.
+    """
+    out: dict[str, float] = {}
+    out.update(compute_trade_metrics(trades, bar_interval_ns=bar_interval_ns))
+    out.update(
+        compute_balance_metrics(
+            balance, starting_capital, bar_interval_ns=bar_interval_ns,
+        ),
+    )
+    out.update(
+        compute_activity_metrics(
+            trades,
+            total_bars=total_bars,
+            bar_interval_ns=bar_interval_ns,
+            first_bar_ts_ns=first_bar_ts_ns,
+            last_bar_ts_ns=last_bar_ts_ns,
+            total_fees=total_fees,
+            total_pnl=total_pnl,
+        ),
+    )
+    return out

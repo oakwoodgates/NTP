@@ -1,0 +1,340 @@
+"""Unit tests for ``src.backtesting.metrics``.
+
+The metrics module is pure-Python — no NT engine spin-up here.  Tests
+exercise the math directly by constructing ``TradeRecord`` lists and
+``pd.Series`` balance curves with known properties.
+"""
+
+from __future__ import annotations
+
+import math
+
+import pandas as pd
+import pytest
+
+from src.backtesting.metrics import (
+    TradeRecord,
+    compute_activity_metrics,
+    compute_all_metrics,
+    compute_balance_metrics,
+    compute_trade_metrics,
+)
+
+# 1 day in nanoseconds — used as a canonical bar interval
+NS_PER_DAY = 86_400_000_000_000
+
+
+def _trade(pnl: float, side: str = "LONG", day_open: int = 0, day_close: int = 1) -> TradeRecord:
+    """Build a TradeRecord from day offsets for terseness."""
+    return TradeRecord(
+        pnl=pnl,
+        ts_opened_ns=day_open * NS_PER_DAY,
+        ts_closed_ns=day_close * NS_PER_DAY,
+        side=side,
+    )
+
+
+# ── compute_trade_metrics ─────────────────────────────────────────────────────
+
+
+class TestTradeMetricsEmpty:
+    def test_empty_returns_all_nan(self) -> None:
+        out = compute_trade_metrics([])
+        assert all(math.isnan(v) for v in out.values())
+        # Schema check: all expected keys present.
+        expected_keys = {
+            "avg_pnl_per_trade", "win_rate", "loss_rate",
+            "num_winners", "num_losers", "num_breakeven",
+            "gross_wins", "gross_losses", "avg_win", "avg_loss",
+            "largest_win", "largest_loss", "pnl_profit_factor",
+            "expectancy", "payoff_ratio", "avg_trade_duration_secs",
+            "max_consec_losers", "max_consec_winners",
+            "num_long", "num_short", "long_pnl", "short_pnl",
+        }
+        assert set(out.keys()) == expected_keys
+
+
+class TestTradeMetricsBasic:
+    """Three winners + two losers, hand-checked numbers."""
+
+    @pytest.fixture
+    def out(self) -> dict[str, float]:
+        trades = [
+            _trade(100.0, "LONG"),
+            _trade(50.0, "SHORT"),
+            _trade(-30.0, "LONG"),
+            _trade(200.0, "LONG"),
+            _trade(-20.0, "SHORT"),
+        ]
+        return compute_trade_metrics(trades, bar_interval_ns=NS_PER_DAY)
+
+    def test_avg_pnl(self, out: dict[str, float]) -> None:
+        # Total = 100 + 50 - 30 + 200 - 20 = 300; / 5 = 60
+        assert out["avg_pnl_per_trade"] == 60.0
+
+    def test_win_loss_counts(self, out: dict[str, float]) -> None:
+        assert out["num_winners"] == 3.0
+        assert out["num_losers"] == 2.0
+        assert out["num_breakeven"] == 0.0
+        assert out["win_rate"] == 0.6
+        assert out["loss_rate"] == 0.4
+
+    def test_gross_amounts(self, out: dict[str, float]) -> None:
+        assert out["gross_wins"] == 350.0  # 100 + 50 + 200
+        assert out["gross_losses"] == -50.0  # -30 + -20
+        # Profit factor: 350 / 50 = 7.0
+        assert out["pnl_profit_factor"] == 7.0
+
+    def test_average_win_loss(self, out: dict[str, float]) -> None:
+        assert out["avg_win"] == pytest.approx(350.0 / 3)
+        assert out["avg_loss"] == -25.0
+        # Payoff = avg_win / abs(avg_loss) = (350/3) / 25
+        assert out["payoff_ratio"] == pytest.approx((350.0 / 3) / 25)
+
+    def test_extremes(self, out: dict[str, float]) -> None:
+        assert out["largest_win"] == 200.0
+        assert out["largest_loss"] == -30.0
+
+    def test_expectancy_matches_avg_pnl(self, out: dict[str, float]) -> None:
+        # By construction, expectancy = avg_pnl_per_trade.
+        assert out["expectancy"] == pytest.approx(out["avg_pnl_per_trade"])
+
+    def test_long_short_attribution(self, out: dict[str, float]) -> None:
+        assert out["num_long"] == 3.0
+        assert out["num_short"] == 2.0
+        assert out["long_pnl"] == 270.0  # 100 - 30 + 200
+        assert out["short_pnl"] == 30.0  # 50 - 20
+
+    def test_avg_duration(self, out: dict[str, float]) -> None:
+        # All trades are 1 bar — avg should be 1.
+        assert out["avg_trade_duration_bars"] == pytest.approx(1.0)
+
+
+class TestTradeMetricsConsecutive:
+    def test_max_consecutive_losers(self) -> None:
+        # Win, Loss, Loss, Loss, Win, Loss, Win — max losers = 3
+        trades = [
+            _trade(10.0, day_open=0, day_close=1),
+            _trade(-5.0, day_open=1, day_close=2),
+            _trade(-5.0, day_open=2, day_close=3),
+            _trade(-5.0, day_open=3, day_close=4),
+            _trade(10.0, day_open=4, day_close=5),
+            _trade(-5.0, day_open=5, day_close=6),
+            _trade(10.0, day_open=6, day_close=7),
+        ]
+        out = compute_trade_metrics(trades)
+        assert out["max_consec_losers"] == 3.0
+        assert out["max_consec_winners"] == 1.0
+
+    def test_max_consecutive_winners(self) -> None:
+        trades = [
+            _trade(-1.0, day_open=0, day_close=1),
+            _trade(1.0, day_open=1, day_close=2),
+            _trade(2.0, day_open=2, day_close=3),
+            _trade(3.0, day_open=3, day_close=4),
+            _trade(4.0, day_open=4, day_close=5),
+            _trade(-1.0, day_open=5, day_close=6),
+        ]
+        out = compute_trade_metrics(trades)
+        assert out["max_consec_winners"] == 4.0
+        assert out["max_consec_losers"] == 1.0
+
+
+class TestTradeMetricsEdgeCases:
+    def test_all_winners(self) -> None:
+        trades = [_trade(10.0), _trade(20.0), _trade(30.0)]
+        out = compute_trade_metrics(trades)
+        assert out["num_losers"] == 0.0
+        assert out["pnl_profit_factor"] == float("inf")
+        assert math.isnan(out["payoff_ratio"])
+        assert math.isnan(out["avg_loss"])
+
+    def test_all_losers(self) -> None:
+        trades = [_trade(-10.0), _trade(-5.0), _trade(-15.0)]
+        out = compute_trade_metrics(trades)
+        assert out["num_winners"] == 0.0
+        # gross_wins=0, gross_losses=-30 → PF = 0/30 = 0.
+        assert out["pnl_profit_factor"] == 0.0
+        # No winners, so payoff is undefined.
+        assert math.isnan(out["payoff_ratio"])
+
+    def test_breakeven_only(self) -> None:
+        trades = [_trade(0.0), _trade(0.0)]
+        out = compute_trade_metrics(trades)
+        assert out["num_winners"] == 0.0
+        assert out["num_losers"] == 0.0
+        assert out["num_breakeven"] == 2.0
+        assert math.isnan(out["pnl_profit_factor"])  # 0 wins, 0 losses
+        assert out["avg_pnl_per_trade"] == 0.0
+
+    def test_duration_in_seconds_when_no_bar_interval(self) -> None:
+        trades = [_trade(10.0, day_open=0, day_close=1)]
+        out = compute_trade_metrics(trades, bar_interval_ns=None)
+        # 1 day = 86400 secs
+        assert out["avg_trade_duration_secs"] == pytest.approx(86400.0)
+
+
+# ── compute_balance_metrics ───────────────────────────────────────────────────
+
+
+class TestBalanceMetricsEmpty:
+    def test_empty_returns_all_nan(self) -> None:
+        s = pd.Series(dtype=float)
+        out = compute_balance_metrics(s, 1000.0)
+        assert all(math.isnan(v) for v in out.values())
+
+
+class TestBalanceMetricsDrawdown:
+    def test_simple_drawdown(self) -> None:
+        # Balance: 1000 -> 1100 (peak) -> 900 (trough = -200, -18.18%) -> 1200
+        idx = pd.to_datetime(
+            ["2025-01-01", "2025-01-15", "2025-02-01", "2025-02-15"], utc=True,
+        )
+        s = pd.Series([1000.0, 1100.0, 900.0, 1200.0], index=idx)
+        out = compute_balance_metrics(s, starting_capital=1000.0)
+        assert out["max_drawdown_abs"] == pytest.approx(200.0)
+        # 200 / 1100 = 0.1818...
+        assert out["max_drawdown_pct"] == pytest.approx(200.0 / 1100.0)
+
+    def test_no_drawdown_monotonic(self) -> None:
+        idx = pd.to_datetime(["2025-01-01", "2025-02-01", "2025-03-01"], utc=True)
+        s = pd.Series([1000.0, 1100.0, 1200.0], index=idx)
+        out = compute_balance_metrics(s, starting_capital=1000.0)
+        assert out["max_drawdown_abs"] == 0.0
+        # Pct: drawdown/peak where peak > 0 -> all zeros
+        assert out["max_drawdown_pct"] == 0.0
+
+    def test_recovery_factor(self) -> None:
+        idx = pd.to_datetime(["2025-01-01", "2025-06-01", "2025-12-01"], utc=True)
+        s = pd.Series([1000.0, 800.0, 1300.0], index=idx)  # MaxDD=200, total_pnl=300
+        out = compute_balance_metrics(s, starting_capital=1000.0)
+        # 300 / 200 = 1.5
+        assert out["recovery_factor"] == pytest.approx(1.5)
+
+
+class TestBalanceMetricsCAGR:
+    def test_cagr_one_year(self) -> None:
+        # 1000 -> 1500 over exactly 1 year ≈ 50%
+        idx = pd.to_datetime(["2025-01-01", "2026-01-01"], utc=True)
+        s = pd.Series([1000.0, 1500.0], index=idx)
+        out = compute_balance_metrics(s, starting_capital=1000.0)
+        # Span is exactly 365 days, but years uses 365.25 → slightly different
+        expected_cagr = (1500.0 / 1000.0) ** (365.25 / 365.0) - 1.0
+        assert out["cagr"] == pytest.approx(expected_cagr, rel=1e-3)
+
+    def test_mar_ratio(self) -> None:
+        # 1000 -> 1100 -> 800 -> 1500 over 1 year
+        idx = pd.to_datetime(
+            ["2025-01-01", "2025-04-01", "2025-08-01", "2026-01-01"], utc=True,
+        )
+        s = pd.Series([1000.0, 1100.0, 800.0, 1500.0], index=idx)
+        out = compute_balance_metrics(s, starting_capital=1000.0)
+        # MaxDD%: (1100 - 800) / 1100 = 0.2727
+        # CAGR ≈ 50%
+        # MAR = 0.5 / 0.2727 ≈ 1.83
+        assert out["mar_ratio"] == pytest.approx(out["cagr"] / out["max_drawdown_pct"])
+        assert out["mar_ratio"] > 1.5  # sanity bound
+
+    def test_cagr_negative_final_returns_nan(self) -> None:
+        # Account blown up: final balance ≤ 0 means CAGR is undefined.
+        idx = pd.to_datetime(["2025-01-01", "2026-01-01"], utc=True)
+        s = pd.Series([1000.0, 0.0], index=idx)
+        out = compute_balance_metrics(s, starting_capital=1000.0)
+        assert math.isnan(out["cagr"])
+        assert math.isnan(out["mar_ratio"])
+
+
+class TestBalanceMetricsTimeUnderwater:
+    def test_underwater_in_bars(self) -> None:
+        # Spend 2 days underwater between days 1 and 3.
+        idx = pd.to_datetime(
+            ["2025-01-01", "2025-01-02", "2025-01-03", "2025-01-04"], utc=True,
+        )
+        s = pd.Series([1000.0, 1100.0, 900.0, 1200.0], index=idx)
+        out = compute_balance_metrics(
+            s, starting_capital=1000.0, bar_interval_ns=NS_PER_DAY,
+        )
+        # idx[1]=1100 (peak), idx[2]=900 (underwater), idx[3]=1200 (recovery, peak again)
+        # Underwater point is idx[2]; gap from idx[1] to idx[2] is 1 day = 1 bar
+        assert out["time_underwater_bars"] == pytest.approx(1.0)
+
+    def test_no_underwater_when_monotonic(self) -> None:
+        idx = pd.to_datetime(["2025-01-01", "2025-02-01", "2025-03-01"], utc=True)
+        s = pd.Series([1000.0, 1100.0, 1200.0], index=idx)
+        out = compute_balance_metrics(
+            s, starting_capital=1000.0, bar_interval_ns=NS_PER_DAY,
+        )
+        assert out["time_underwater_bars"] == 0.0
+
+
+# ── compute_activity_metrics ──────────────────────────────────────────────────
+
+
+class TestActivityMetrics:
+    def test_bars_in_market_with_total_bars(self) -> None:
+        # 3 trades each lasting 10 bars, over a 100-bar period.
+        trades = [
+            _trade(10.0, day_open=0, day_close=10),
+            _trade(20.0, day_open=20, day_close=30),
+            _trade(-5.0, day_open=50, day_close=60),
+        ]
+        out = compute_activity_metrics(
+            trades, total_bars=100, bar_interval_ns=NS_PER_DAY,
+        )
+        # 30 bars in market / 100 total = 0.30
+        assert out["bars_in_market_pct"] == pytest.approx(0.30)
+
+    def test_fee_pct_of_pnl(self) -> None:
+        out = compute_activity_metrics(
+            trades=[],
+            total_fees=50.0,
+            total_pnl=1000.0,
+        )
+        # 50 / 1000 = 0.05
+        assert out["fee_pct_of_pnl"] == pytest.approx(0.05)
+
+    def test_fee_pct_when_pnl_is_zero(self) -> None:
+        out = compute_activity_metrics(
+            trades=[], total_fees=50.0, total_pnl=0.0,
+        )
+        assert math.isnan(out["fee_pct_of_pnl"])
+
+    def test_fee_killed_strategy(self) -> None:
+        # Fees > total PnL means strategy is fee-killed.
+        out = compute_activity_metrics(
+            trades=[], total_fees=200.0, total_pnl=100.0,
+        )
+        assert out["fee_pct_of_pnl"] == 2.0
+
+    def test_no_trades_returns_nan_in_market(self) -> None:
+        out = compute_activity_metrics(
+            trades=[], total_bars=100, bar_interval_ns=NS_PER_DAY,
+        )
+        assert math.isnan(out["bars_in_market_pct"])
+
+
+# ── compute_all_metrics integration ───────────────────────────────────────────
+
+
+class TestComputeAllMetrics:
+    def test_all_keys_merge_without_collision(self) -> None:
+        trades = [_trade(10.0), _trade(-5.0)]
+        idx = pd.to_datetime(["2025-01-01", "2025-12-31"], utc=True)
+        balance = pd.Series([1000.0, 1005.0], index=idx)
+
+        out = compute_all_metrics(
+            trades, balance,
+            starting_capital=1000.0,
+            total_bars=365,
+            bar_interval_ns=NS_PER_DAY,
+            total_fees=2.0,
+            total_pnl=5.0,
+        )
+
+        # Spot-check that keys from all three groups landed.
+        assert "avg_pnl_per_trade" in out
+        assert "max_drawdown_abs" in out
+        assert "fee_pct_of_pnl" in out
+        # And trade count check
+        assert out["num_winners"] == 1.0
+        assert out["num_losers"] == 1.0
