@@ -999,6 +999,162 @@ def plot_equity_curve(
     plt.show()
 
 
+def plot_yearly_breakdown(
+    yearly_df: pd.DataFrame,
+    *,
+    title: str = "Performance by year",
+    currency: str = "USDC",
+) -> None:
+    """Plot per-year PnL bars + per-year win-rate / profit-factor lines.
+
+    Two-panel side-by-side:
+
+    1. **PnL bars** — one bar per year, green/red sign-coded.  Shows
+       year-over-year consistency at a glance.  A strategy that's
+       +500% one year and -50% the next is regime-dependent.
+    2. **Trade-quality lines** — win rate and profit factor on twin
+       axes per year.  Diverging direction (rising win rate but
+       falling PF, or vice versa) flags a behavioural shift in the
+       strategy across regimes.
+
+    Calls ``plt.show()`` directly — designed for inline notebook use.
+
+    Parameters
+    ----------
+    yearly_df
+        Output of ``src.backtesting.analysis.performance_by_year``.
+        Must be indexed by year and contain ``pnl``, ``win_rate``,
+        ``profit_factor``, ``num_positions`` columns.
+    title
+        Suptitle.
+    currency
+        Currency label for the PnL axis.
+
+    """
+    if yearly_df.empty:
+        print("No yearly data to plot.")
+        return
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 4.5))
+    fig.suptitle(title, fontsize=13)
+
+    years = yearly_df.index.tolist()
+    pnls = yearly_df["pnl"].tolist()
+    n_pos = yearly_df["num_positions"].tolist()
+
+    # ── Panel 1: yearly PnL bars ─────────────────────────────────────────
+    ax = axes[0]
+    colors = ["#2ca02c" if v > 0 else "#d62728" for v in pnls]
+    bars = ax.bar(
+        [str(y) for y in years], pnls,
+        color=colors, alpha=0.7, edgecolor="black",
+    )
+    for b, v, n in zip(bars, pnls, n_pos, strict=False):
+        label_y = b.get_height()
+        ax.text(
+            b.get_x() + b.get_width() / 2,
+            label_y + (50 if v >= 0 else -50),
+            f"{v:,.0f}\n({n})",
+            ha="center", va="bottom" if v >= 0 else "top",
+            fontsize=9,
+        )
+    ax.axhline(0, color="black", linewidth=0.6)
+    ax.set_ylabel(f"PnL ({currency})")
+    ax.set_xlabel("Year")
+    ax.set_title("PnL by year (trade count in parens)")
+    ax.grid(True, alpha=0.2, axis="y")
+
+    # ── Panel 2: win rate + profit factor lines ──────────────────────────
+    ax = axes[1]
+    win_rates = [float(v) * 100 for v in yearly_df["win_rate"].tolist()]
+    ax.plot(
+        [str(y) for y in years], win_rates,
+        marker="o", color="#1f77b4", label="Win rate",
+    )
+    ax.set_ylabel("Win rate (%)", color="#1f77b4")
+    ax.tick_params(axis="y", labelcolor="#1f77b4")
+    ax.set_ylim(0, 100)
+
+    ax2 = ax.twinx()
+    pfs = [
+        v if (v is not None and not (isinstance(v, float) and math.isnan(v))) else 0.0
+        for v in yearly_df["profit_factor"].tolist()
+    ]
+    ax2.plot(
+        [str(y) for y in years], pfs,
+        marker="s", color="#ff7f0e", label="Profit factor",
+    )
+    ax2.set_ylabel("Profit factor", color="#ff7f0e")
+    ax2.tick_params(axis="y", labelcolor="#ff7f0e")
+    ax2.axhline(1.0, color="#ff7f0e", linestyle=":", linewidth=0.8)
+
+    ax.set_xlabel("Year")
+    ax.set_title("Trade quality by year")
+    ax.grid(True, alpha=0.2)
+
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, loc="upper left", fontsize=9)
+
+    plt.tight_layout()
+    plt.show()
+
+
+def print_yearly_breakdown(
+    yearly_df: pd.DataFrame,
+    *,
+    currency: str = "USDC",
+) -> None:
+    """Pretty-print a per-year performance table.
+
+    Companion to ``plot_yearly_breakdown`` for users who want the
+    numbers without the chart, or alongside it.
+
+    Parameters
+    ----------
+    yearly_df
+        Output of ``src.backtesting.analysis.performance_by_year``.
+    currency
+        Label for the PnL columns.
+
+    """
+    if yearly_df.empty:
+        print("No yearly data available.")
+        return
+
+    print(f"=== Performance by year ({currency}) ===")
+    cols = [
+        ("PnL", "pnl", "{:>12,.2f}"),
+        ("PnL %", "pnl_pct", "{:>8,.2f}%"),
+        ("Trades", "num_positions", "{:>6}"),
+        ("Win Rate", "win_rate", "{:>8.2%}"),
+        ("PF", "profit_factor", "{:>6.2f}"),
+        ("Avg Win", "avg_winner", "{:>10,.2f}"),
+        ("Avg Loss", "avg_loser", "{:>10,.2f}"),
+        ("Largest Win", "largest_win", "{:>12,.2f}"),
+        ("Largest Loss", "largest_loss", "{:>12,.2f}"),
+    ]
+    # Header
+    header_parts = [f"{'Year':>6}"]
+    for label, _key, fmt in cols:
+        # Use the format string's width to align the header
+        sample = fmt.format(0).replace("0.00", "x").replace("0", "x")
+        header_parts.append(f"{label:>{len(sample)}}")
+    print("  ".join(header_parts))
+    print("-" * (len("  ".join(header_parts))))
+
+    for year in yearly_df.index:
+        row = yearly_df.loc[year]
+        parts = [f"{int(year):>6}"]
+        for _label, key, fmt in cols:
+            val = row.get(key, float("nan"))
+            try:
+                parts.append(fmt.format(val))
+            except (TypeError, ValueError):
+                parts.append(f"{val!s:>10}")
+        print("  ".join(parts))
+
+
 def plot_trade_distributions(
     positions: list,
     *,

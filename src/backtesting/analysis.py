@@ -292,6 +292,71 @@ def tag_regimes(
     })
 
 
+def performance_by_year(
+    positions: list[Any],
+    *,
+    starting_capital: float = 10_000,
+) -> pd.DataFrame:
+    """Split realized PnL by calendar year.
+
+    Each closed trade is assigned to the year of its **close** timestamp
+    (so a multi-week trade lands in the year the PnL was realised).
+    Useful for spotting regime-dependent strategies — a strategy that's
+    +100% one year and -50% the next is a regime trade dressed up.
+
+    Parameters
+    ----------
+    positions
+        Position objects from a completed backtest.  Open positions are
+        skipped (no realized PnL).
+    starting_capital
+        Used as the denominator for ``pnl_pct`` per year.  This is a
+        rough proxy — strictly speaking each year should use the
+        balance at year-start, but that requires the account report.
+        For comparing year-over-year *consistency* the constant
+        denominator is fine.
+
+    Returns
+    -------
+    pd.DataFrame
+        Index: years (int).  Columns: ``pnl``, ``pnl_pct``,
+        ``num_positions``, ``win_rate``, ``avg_winner``, ``avg_loser``,
+        ``profit_factor``, ``avg_duration_hours``, ``largest_win``,
+        ``largest_loss``.
+
+    """
+    pos_df = _positions_to_pnl_df(positions)
+    if pos_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "year", "pnl", "pnl_pct", "num_positions", "win_rate",
+                "avg_winner", "avg_loser", "profit_factor",
+                "avg_duration_hours", "largest_win", "largest_loss",
+            ],
+        )
+
+    pos_df = pos_df.copy()
+    pos_df["year"] = pos_df["ts_closed"].dt.year
+
+    rows: list[dict[str, Any]] = []
+    for year, group in pos_df.groupby("year", sort=True):
+        pnls = list(group["pnl"])
+        stats = _compute_window_stats(pnls, starting_capital)
+        avg_dur_ns = group["duration_ns"].mean()
+        avg_dur_hours = avg_dur_ns / 3_600_000_000_000
+        largest_win = float(max(pnls)) if pnls else 0.0
+        largest_loss = float(min(pnls)) if pnls else 0.0
+        rows.append({
+            "year": int(year),
+            **stats,
+            "avg_duration_hours": round(avg_dur_hours, 1),
+            "largest_win": largest_win,
+            "largest_loss": largest_loss,
+        })
+
+    return pd.DataFrame(rows).set_index("year")
+
+
 def performance_by_regime(
     positions: list[Any],
     regime_df: pd.DataFrame,
