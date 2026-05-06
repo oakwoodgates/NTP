@@ -36,11 +36,20 @@ from src.core.instruments import (
     with_venue_config,
 )
 from src.core.liquidation import (
+    TOPIC_ACCOUNT_LIQUIDATED,
+    TOPIC_POSITION_LIQUIDATED,
     AccountLiquidated,
     LiquidationConfig,
     PositionLiquidated,
     compute_liquidation_price,
     is_account_alive,
+)
+from src.core.liquidation_mixin import LiquidationAware
+from src.core.sizing import (
+    SizingConfig,
+    compute_notional,
+    resolve_min_trade_notional,
+    resolve_sizing_from_strategy_config,
 )
 from src.core.utils import bar_type_str
 from src.core.venues import VENUE_CONFIGS, VenueConfig, get_venue_config
@@ -62,17 +71,24 @@ __all__ = [
     "SETTLEMENT_CURRENCY",
     "TAKER_FEE",
     "TS_INIT_DELTAS",
+    "TOPIC_ACCOUNT_LIQUIDATED",
+    "TOPIC_POSITION_LIQUIDATED",
     "AccountLiquidated",
+    "LiquidationAware",
     "LiquidationConfig",
     "PositionLiquidated",
+    "SizingConfig",
     "VENUE_CONFIGS",
     "VenueConfig",
     "bar_type_str",
     "compute_liquidation_price",
+    "compute_notional",
     "get_venue_config",
     "is_account_alive",
     "make_binance_perp",
     "make_binance_spot",
     "make_hyperliquid_perp",
+    "resolve_min_trade_notional",
+    "resolve_sizing_from_strategy_config",
     "with_venue_config",
 ]
