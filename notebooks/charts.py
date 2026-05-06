@@ -999,6 +999,156 @@ def plot_equity_curve(
     plt.show()
 
 
+def plot_trade_distributions(
+    positions: list,
+    *,
+    title: str = "",
+    bar_interval_ns: int | None = None,
+    currency: str = "USDC",
+) -> None:
+    """Three-panel: PnL distribution, duration distribution, top-trade share.
+
+    Trustworthy trade-quality view that doesn't depend on the broken
+    NT returns methodology.
+
+    Panels:
+
+    1. **PnL histogram** — distribution of per-trade realized PnL.
+       Wins green, losers red.  Mean and median lines marked.  Reveals
+       whether profits are spread across many trades or concentrated in
+       a few outliers.
+    2. **Trade duration histogram** — bars (or seconds) per trade.
+       Bimodal often means "two strategies in one" (a short scalp tail
+       + a long-hold tail).
+    3. **Top-trade-share bar** — shows what fraction of total PnL comes
+       from the top 1, top 3, top 5 winners and from the worst 1, 3, 5
+       losers.  Concentration → fragility.
+
+    Calls ``plt.show()`` directly — designed for inline notebook use.
+
+    Parameters
+    ----------
+    positions
+        List of NT Position objects (closed positions only are used —
+        open positions don't have realized PnL).
+    title
+        Suptitle.  Empty string skips it.
+    bar_interval_ns
+        Bar interval in nanoseconds.  When provided, the duration panel
+        x-axis is in bars; otherwise in days.
+    currency
+        Settlement currency label for axis.
+
+    """
+    closed = [
+        p for p in positions
+        if getattr(p, "is_closed", False)
+        and getattr(p, "realized_pnl", None) is not None
+    ]
+    if not closed:
+        print("No closed trades to plot.")
+        return
+
+    pnls = np.array(
+        [float(p.realized_pnl.as_decimal()) for p in closed], dtype=float,
+    )
+    durations_ns = np.array(
+        [int(p.ts_closed) - int(p.ts_opened) for p in closed], dtype=float,
+    )
+    if bar_interval_ns:
+        durations = durations_ns / bar_interval_ns
+        dur_unit = "bars"
+    else:
+        durations = durations_ns / 1e9 / 86400  # days
+        dur_unit = "days"
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.5))
+    if title:
+        fig.suptitle(title, fontsize=13)
+
+    # ── Panel 1: PnL distribution ────────────────────────────────────────
+    ax = axes[0]
+    wins = pnls[pnls > 0]
+    losses = pnls[pnls < 0]
+    bins = max(20, min(60, len(pnls) // 3))
+    if len(wins) > 0:
+        ax.hist(
+            wins, bins=bins, color="#2ca02c", alpha=0.6,
+            edgecolor="#1a6e1a", label=f"Wins ({len(wins)})",
+        )
+    if len(losses) > 0:
+        ax.hist(
+            losses, bins=bins, color="#d62728", alpha=0.6,
+            edgecolor="#891a1b", label=f"Losses ({len(losses)})",
+        )
+    ax.axvline(pnls.mean(), color="black", linestyle="-", linewidth=1.2,
+               label=f"Mean = {pnls.mean():,.2f}")
+    ax.axvline(np.median(pnls), color="black", linestyle="--", linewidth=1.0,
+               label=f"Median = {np.median(pnls):,.2f}")
+    ax.axvline(0, color="#888", linestyle=":", linewidth=0.8)
+    ax.set_xlabel(f"Trade PnL ({currency})")
+    ax.set_ylabel("# trades")
+    ax.set_title("PnL distribution per trade")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.2)
+
+    # ── Panel 2: Duration distribution ───────────────────────────────────
+    ax = axes[1]
+    bins = max(20, min(60, len(durations) // 3))
+    ax.hist(durations, bins=bins, color="#1f77b4", alpha=0.7, edgecolor="#0f4c81")
+    ax.axvline(durations.mean(), color="black", linestyle="-", linewidth=1.2,
+               label=f"Mean = {durations.mean():.1f} {dur_unit}")
+    ax.axvline(np.median(durations), color="black", linestyle="--", linewidth=1.0,
+               label=f"Median = {np.median(durations):.1f} {dur_unit}")
+    ax.set_xlabel(f"Trade duration ({dur_unit})")
+    ax.set_ylabel("# trades")
+    ax.set_title("Trade duration distribution")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.2)
+
+    # ── Panel 3: Concentration / top-trade share ─────────────────────────
+    ax = axes[2]
+    sorted_desc = np.sort(pnls)[::-1]  # winners first
+    sorted_asc = np.sort(pnls)  # losers first
+    total_abs = max(np.sum(np.abs(pnls)), 1e-9)
+    sum_abs_total = float(np.sum(np.abs(pnls)))
+
+    metrics_x = ["Top 1", "Top 3", "Top 5", "Bot 1", "Bot 3", "Bot 5"]
+    metrics_y = []
+    for n in (1, 3, 5):
+        share = float(np.sum(sorted_desc[: min(n, len(sorted_desc))]))
+        metrics_y.append(share / sum_abs_total * 100)
+    for n in (1, 3, 5):
+        share = float(np.sum(sorted_asc[: min(n, len(sorted_asc))]))
+        metrics_y.append(share / sum_abs_total * 100)
+
+    colors = ["#2ca02c", "#2ca02c", "#2ca02c", "#d62728", "#d62728", "#d62728"]
+    bars = ax.bar(metrics_x, metrics_y, color=colors, alpha=0.7, edgecolor="black")
+    for b, v in zip(bars, metrics_y, strict=False):
+        ax.text(
+            b.get_x() + b.get_width() / 2,
+            b.get_height() + (1 if v >= 0 else -1),
+            f"{v:.1f}%",
+            ha="center", va="bottom" if v >= 0 else "top",
+            fontsize=9,
+        )
+    ax.set_ylabel("% of total |PnL|")
+    ax.set_title("Trade-PnL concentration")
+    ax.axhline(0, color="black", linewidth=0.5)
+    ax.grid(True, alpha=0.2, axis="y")
+    # Annotate concentration risk
+    if metrics_y[1] > 50:  # top 3 wins > 50% of total |PnL|
+        ax.text(
+            0.5, 0.95, "⚠ top-3 wins > 50% of total |PnL|",
+            transform=ax.transAxes, ha="center", va="top",
+            fontsize=9, color="#b35900",
+            bbox={"facecolor": "#fff8e1", "alpha": 0.9, "edgecolor": "#b35900"},
+        )
+
+    plt.tight_layout()
+    plt.show()
+
+
 def print_summary_stats(
     analyzer,
     num_positions: int | None = None,
