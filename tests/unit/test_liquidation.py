@@ -19,9 +19,11 @@ class TestLiquidationConfig:
     def test_defaults(self) -> None:
         cfg = LiquidationConfig()
         assert cfg.enabled is True
-        assert cfg.mm_rate == Decimal("0.005")
+        # All resolution-order-driven fields default to None so make_engine
+        # can fill them from VenueConfig / SizingConfig / instrument.
+        assert cfg.mm_rate is None
         assert cfg.fee_rate is None
-        assert cfg.min_trade_notional == Decimal("10")
+        assert cfg.min_trade_notional is None
         assert cfg.alive_trades_buffer == 1
         assert cfg.halt_on_account_liquidation is True
 
@@ -46,21 +48,40 @@ class TestLiquidationConfig:
 
 
 class TestPositionLiquidated:
-    def test_fields(self) -> None:
+    def test_fields_no_slippage(self) -> None:
+        """Trigger and fill match — perfectly clean liquidation."""
         event = PositionLiquidated(
             instrument_id="BTC-USD-PERP.HYPERLIQUID",
             side=PositionSide.LONG,
             entry_price=Decimal("50000"),
-            liq_price=Decimal("25250"),
+            trigger_price=Decimal("25250"),
+            fill_price=Decimal("25250"),
             realized_pnl=Decimal("-990"),
             ts_event=1000000000,
         )
         assert event.instrument_id == "BTC-USD-PERP.HYPERLIQUID"
         assert event.side == PositionSide.LONG
         assert event.entry_price == Decimal("50000")
-        assert event.liq_price == Decimal("25250")
+        assert event.trigger_price == Decimal("25250")
+        assert event.fill_price == Decimal("25250")
+        assert event.fill_price - event.trigger_price == Decimal("0")
         assert event.realized_pnl == Decimal("-990")
         assert event.ts_event == 1000000000
+
+    def test_fields_with_slippage(self) -> None:
+        """Trigger and fill differ — bar-decomposition gap risk captured."""
+        event = PositionLiquidated(
+            instrument_id="BTC-USD-PERP.HYPERLIQUID",
+            side=PositionSide.LONG,
+            entry_price=Decimal("50000"),
+            trigger_price=Decimal("25250"),     # mixin set the stop here
+            fill_price=Decimal("23000"),         # bar's L gapped through the trigger
+            realized_pnl=Decimal("-1080"),       # worse than expected -990
+            ts_event=1000000000,
+        )
+        # Slippage = how much worse the fill was vs the trigger
+        slippage = event.trigger_price - event.fill_price
+        assert slippage == Decimal("2250")
 
 
 class TestAccountLiquidated:
