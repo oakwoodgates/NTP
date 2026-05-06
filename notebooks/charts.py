@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import html
 import json
 import math
 import textwrap
@@ -2356,3 +2357,565 @@ document.querySelectorAll('.filter-btn').forEach(btn => {
 </body>
 </html>
 """)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Public: self-contained sortable sweep HTML
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Column display order + formatting hints for the sweep HTML report.
+# (column_name, header_label, formatter, css_class)
+# Formatter is one of: "int", "float2", "money", "pct", "pct_signed",
+# "ratio", "bool", "raw".  CSS class is added for color coding.
+_SWEEP_DEFAULT_COLUMNS: tuple[tuple[str, str, str, str], ...] = (
+    # Strategy params come first — auto-detected at runtime.
+    # Below are the standard metric columns in display order.
+    ("total_pnl", "PnL ($)", "money", "num"),
+    ("total_pnl_pct", "PnL %", "pct_signed", "num"),
+    ("num_positions", "# Trades", "int", "num"),
+    ("win_rate", "Win Rate", "pct", "num"),
+    ("avg_pnl_per_trade", "Avg $/Trade", "money", "num"),
+    ("pnl_profit_factor", "Profit Factor", "ratio", "num"),
+    ("expectancy", "Expectancy", "money", "num"),
+    ("payoff_ratio", "Payoff", "ratio", "num"),
+    ("max_drawdown_pct", "Max DD %", "pct", "num"),
+    ("max_drawdown_abs", "Max DD ($)", "money", "num"),
+    ("mar_ratio", "MAR", "ratio", "num"),
+    ("recovery_factor", "Recovery", "ratio", "num"),
+    ("cagr", "CAGR", "pct_signed", "num"),
+    ("max_consec_losers", "Max Losers", "int", "num"),
+    ("bars_in_market_pct", "In Market", "pct", "num"),
+    ("largest_win", "Largest Win", "money", "num"),
+    ("largest_loss", "Largest Loss", "money", "num"),
+    ("long_pnl", "Long PnL", "money", "num"),
+    ("short_pnl", "Short PnL", "money", "num"),
+    ("total_fees", "Fees", "money", "num"),
+    ("fee_pct_of_pnl", "Fees % PnL", "pct", "num"),
+    ("min_balance", "Min Bal", "money", "num"),
+    ("liquidated", "Liq.", "bool", "num"),
+)
+
+
+def _fmt_sweep_cell(value: Any, kind: str) -> str:
+    """Format a single sweep-row cell for HTML display.
+
+    Returns an HTML-safe string with appropriate precision and CSS class
+    hints (positive/negative numerics get colored downstream).
+    NaN renders as an em-dash.
+    """
+    import math as _math
+
+    if value is None or (isinstance(value, float) and _math.isnan(value)):
+        return "—"
+    if kind == "int":
+        try:
+            return f"{int(value):,}"
+        except (ValueError, TypeError):
+            return str(value)
+    if kind == "float2":
+        return f"{float(value):.2f}"
+    if kind == "money":
+        v = float(value)
+        cls = "num-positive" if v > 0 else ("num-negative" if v < 0 else "")
+        return f'<span class="{cls}">{v:>12,.2f}</span>' if cls else f"{v:>12,.2f}"
+    if kind == "pct":
+        return f"{float(value) * 100:.2f}%"
+    if kind == "pct_signed":
+        v = float(value)
+        # total_pnl_pct is already in percentage units; cagr is in fractional units.
+        # Heuristic: if abs(v) > 5 we treat as already-percent (PnL%, drawdown
+        # in percentage points); otherwise we multiply by 100 (CAGR fractional).
+        # We disambiguate via the column name in the caller — but for now
+        # use a simple rule that handles the common cases cleanly.
+        cls = "num-positive" if v > 0 else ("num-negative" if v < 0 else "")
+        # If value looks like a fraction (CAGR style: 0.30) format as %.
+        # If it looks like an already-pct number (PnL%: 951.06), keep as %.
+        if abs(v) <= 5:
+            text = f"{v * 100:.2f}%"
+        else:
+            text = f"{v:.2f}%"
+        return f'<span class="{cls}">{text}</span>' if cls else text
+    if kind == "ratio":
+        v = float(value)
+        if _math.isinf(v):
+            return "∞"
+        return f"{v:.2f}"
+    if kind == "bool":
+        return (
+            '<span class="badge badge-liquidated">LIQ</span>'
+            if bool(value)
+            else ""
+        )
+    return str(value)
+
+
+def generate_sweep_html(
+    results_df: pd.DataFrame,
+    *,
+    output_dir: str | Path | None = None,
+    filename: str | None = None,
+    title: str | None = None,
+    extra_columns: list[str] | None = None,
+    open_browser: bool = False,
+) -> Path:
+    """Generate an interactive, sortable HTML report from a sweep DataFrame.
+
+    Built on DataTables.js (loaded from CDN — needs network on first
+    open; subsequent opens are cached by the browser).  Features:
+
+    * Click any column header to sort
+    * Search box filters all columns
+    * Per-column sort with shift-click (multi-column)
+    * Pagination (25 rows / page default)
+    * CSV export button
+    * Liquidated rows highlighted red, spotlight rows (``_kind ==
+      "spotlight"``) highlighted gold with a badge
+
+    Output is a self-contained HTML file (the only external resources
+    are the DataTables CDN scripts).  Dark theme to match the existing
+    TVLC report style.
+
+    Parameters
+    ----------
+    results_df
+        DataFrame from :func:`run_sweep`.  Expected to include the
+        v2-schema columns (see ``src/backtesting/metrics.py``); columns
+        that are present are shown, those that aren't are skipped.
+    output_dir
+        Directory to write the HTML file.  Default ``reports/sweeps/``
+        relative to the project root.
+    filename
+        Custom filename (without ``.html``).  Default uses the sweep's
+        metadata: ``{strategy}_{instrument}_{interval}.html``.
+    title
+        Custom title.  Default derived from the sweep's metadata
+        columns (``_strategy``, ``_instrument_id``, ``_bar_interval``).
+    extra_columns
+        Additional column names to include beyond the default set.
+        Useful for showing sweep-specific stats not in the default list.
+    open_browser
+        If True, opens the generated HTML in the default browser.
+
+    Returns
+    -------
+    pathlib.Path
+        Absolute path to the generated HTML file.
+
+    """
+    if results_df.empty:
+        msg = "Cannot generate sweep HTML from empty DataFrame."
+        raise ValueError(msg)
+
+    # ── Derive metadata from the DataFrame ────────────────────────────────
+    strategy = (
+        results_df["_strategy"].iloc[0]
+        if "_strategy" in results_df.columns
+        else "?"
+    )
+    instrument = (
+        results_df["_instrument_id"].iloc[0]
+        if "_instrument_id" in results_df.columns
+        else "?"
+    )
+    interval = (
+        results_df["_bar_interval"].iloc[0]
+        if "_bar_interval" in results_df.columns
+        else "?"
+    )
+    swept_at = (
+        results_df["_swept_at"].iloc[0]
+        if "_swept_at" in results_df.columns
+        else "?"
+    )
+    schema_version = (
+        int(results_df["_schema_version"].iloc[0])
+        if "_schema_version" in results_df.columns
+        else 1
+    )
+
+    if title is None:
+        title = f"{strategy} · {instrument} · {interval}"
+
+    # ── Resolve output path ───────────────────────────────────────────────
+    if output_dir is None:
+        proj_root = Path(__file__).resolve().parent.parent
+        output_dir = proj_root / "reports" / "sweeps"
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if filename is None:
+        # Mirror the sweep parquet naming convention.
+        safe_inst = str(instrument).replace("/", "-")
+        filename = f"{strategy}_{safe_inst}_{interval}.html"
+    if not filename.endswith(".html"):
+        filename = f"{filename}.html"
+    out_path = output_dir / filename
+
+    # ── Determine which columns to render ─────────────────────────────────
+    # Auto-detect strategy parameter columns: anything not starting with
+    # "_" and not in the metric or status set.
+    metric_cols = {col[0] for col in _SWEEP_DEFAULT_COLUMNS}
+    skip_cols = metric_cols | {"error"}
+    skip_prefix = "_"
+
+    param_cols = [
+        c
+        for c in results_df.columns
+        if c not in skip_cols and not c.startswith(skip_prefix)
+    ]
+
+    # Filter the default metric set down to columns actually present.
+    metric_specs = [
+        spec
+        for spec in _SWEEP_DEFAULT_COLUMNS
+        if spec[0] in results_df.columns
+    ]
+
+    # Add user-requested extras (with raw formatter).
+    extra_specs: list[tuple[str, str, str, str]] = []
+    if extra_columns:
+        for col in extra_columns:
+            if col in results_df.columns and col not in skip_cols:
+                extra_specs.append((col, col, "raw", "num"))
+
+    # _kind metadata column gets a leading badge column when any spotlight
+    # rows exist.  Detected by checking values, not just column presence.
+    has_kind_column = (
+        "_kind" in results_df.columns
+        and results_df["_kind"].notna().any()
+    )
+
+    # ── Render rows ──────────────────────────────────────────────────────
+    # Determine summary stats for the header bar
+    n_combos = len(results_df)
+    n_liq = (
+        int(results_df["liquidated"].sum())
+        if "liquidated" in results_df.columns
+        else 0
+    )
+    n_grid = (
+        int((results_df["_kind"] != "spotlight").sum())
+        if has_kind_column
+        else n_combos
+    )
+    n_spot = n_combos - n_grid
+    median_dd = (
+        float(results_df["max_drawdown_pct"].median())
+        if "max_drawdown_pct" in results_df.columns
+        else float("nan")
+    )
+    best_pnl = (
+        float(results_df["total_pnl"].max())
+        if "total_pnl" in results_df.columns
+        else float("nan")
+    )
+
+    # Header row
+    header_cells: list[str] = []
+    if has_kind_column:
+        header_cells.append("<th>Kind</th>")
+    for col in param_cols:
+        header_cells.append(f"<th>{html.escape(str(col))}</th>")
+    for _col, label, _kind, _cls in metric_specs:
+        header_cells.append(f"<th>{html.escape(label)}</th>")
+    for _col, label, _kind, _cls in extra_specs:
+        header_cells.append(f"<th>{html.escape(label)}</th>")
+
+    # Body rows
+    body_rows: list[str] = []
+    for _idx, row in results_df.iterrows():
+        is_liq = bool(row.get("liquidated", False))
+        kind_val = row.get("_kind") if has_kind_column else None
+        is_spot = kind_val == "spotlight"
+        row_cls_parts = []
+        if is_liq:
+            row_cls_parts.append("liquidated")
+        if is_spot:
+            row_cls_parts.append("spotlight")
+        row_cls = f' class="{" ".join(row_cls_parts)}"' if row_cls_parts else ""
+
+        cells: list[str] = []
+        if has_kind_column:
+            if is_spot:
+                cells.append(
+                    '<td><span class="badge badge-spotlight">SPOT</span></td>',
+                )
+            elif kind_val:
+                cells.append(f"<td>{html.escape(str(kind_val))}</td>")
+            else:
+                cells.append("<td></td>")
+        for col in param_cols:
+            cells.append(f"<td>{html.escape(str(row.get(col, '')))}</td>")
+        for col, _label, kind, css in metric_specs:
+            formatted = _fmt_sweep_cell(row.get(col), kind)
+            cells.append(f'<td class="{css}">{formatted}</td>')
+        for col, _label, kind, css in extra_specs:
+            formatted = _fmt_sweep_cell(row.get(col), kind)
+            cells.append(f'<td class="{css}">{formatted}</td>')
+
+        body_rows.append(f'<tr{row_cls}>{"".join(cells)}</tr>')
+
+    # ── Default sort: total_pnl desc if present, else first numeric ─────
+    sort_col_idx = 0  # fallback to first column
+    sort_target = "total_pnl"
+    if sort_target in {spec[0] for spec in metric_specs}:
+        # offset = leading kind column + param columns + offset within metrics
+        offset = (1 if has_kind_column else 0) + len(param_cols)
+        for i, (col, *_rest) in enumerate(metric_specs):
+            if col == sort_target:
+                sort_col_idx = offset + i
+                break
+
+    # ── Build HTML ────────────────────────────────────────────────────────
+    html_doc = _SWEEP_HTML_TEMPLATE.format(
+        title=html.escape(title),
+        strategy=html.escape(str(strategy)),
+        instrument=html.escape(str(instrument)),
+        interval=html.escape(str(interval)),
+        swept_at=html.escape(str(swept_at)),
+        schema_version=schema_version,
+        n_combos=n_combos,
+        n_grid=n_grid,
+        n_spot=n_spot,
+        n_liq=n_liq,
+        best_pnl=f"{best_pnl:,.2f}" if math.isfinite(best_pnl) else "—",
+        median_dd=(
+            f"{median_dd * 100:.2f}%" if math.isfinite(median_dd) else "—"
+        ),
+        header_cells="\n".join(header_cells),
+        body_rows="\n".join(body_rows),
+        sort_col_idx=sort_col_idx,
+    )
+
+    out_path.write_text(html_doc, encoding="utf-8")
+    print(f"✓ Sweep HTML written → {out_path}")
+
+    if open_browser:
+        webbrowser.open(out_path.as_uri())
+
+    return out_path
+
+
+_SWEEP_HTML_TEMPLATE = r"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Sweep — {title}</title>
+  <link rel="stylesheet" href="https://cdn.datatables.net/2.1.8/css/dataTables.dataTables.min.css">
+  <link rel="stylesheet" href="https://cdn.datatables.net/buttons/3.2.0/css/buttons.dataTables.min.css">
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <script src="https://cdn.datatables.net/2.1.8/js/dataTables.min.js"></script>
+  <script src="https://cdn.datatables.net/buttons/3.2.0/js/dataTables.buttons.min.js"></script>
+  <script src="https://cdn.datatables.net/buttons/3.2.0/js/buttons.html5.min.js"></script>
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: #0f1116;
+      color: #d1d4dc;
+      margin: 0;
+      padding: 24px;
+    }}
+    h1 {{
+      font-size: 18px;
+      margin: 0 0 4px 0;
+      color: #fff;
+    }}
+    .subtitle {{
+      color: #888;
+      font-size: 12px;
+      margin-bottom: 16px;
+    }}
+    .stats-bar {{
+      background: #1a1d24;
+      padding: 12px 16px;
+      margin-bottom: 16px;
+      border-radius: 6px;
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
+    }}
+    .stat-item {{
+      font-size: 12px;
+    }}
+    .stat-label {{
+      color: #888;
+      margin-right: 6px;
+    }}
+    .stat-value {{
+      font-weight: bold;
+      color: #fff;
+    }}
+    table.dataTable {{
+      font-family: "Menlo", "Monaco", "Consolas", monospace;
+      font-size: 11px;
+      background: #1a1d24;
+      color: #d1d4dc;
+      border-collapse: collapse;
+    }}
+    table.dataTable thead th {{
+      background: #232730;
+      border-bottom: 1px solid #383b45;
+      padding: 8px 12px;
+      color: #fff;
+      font-weight: bold;
+      cursor: pointer;
+    }}
+    table.dataTable tbody td {{
+      padding: 6px 12px;
+      border-bottom: 1px solid #2a2d36;
+    }}
+    table.dataTable tbody tr {{
+      background: #1a1d24;
+    }}
+    table.dataTable tbody tr:hover {{
+      background: #232730;
+    }}
+    table.dataTable tbody tr.liquidated {{
+      background: rgba(214, 39, 40, 0.10);
+    }}
+    table.dataTable tbody tr.liquidated:hover {{
+      background: rgba(214, 39, 40, 0.20);
+    }}
+    table.dataTable tbody tr.spotlight {{
+      background: rgba(255, 200, 0, 0.07);
+    }}
+    table.dataTable tbody tr.spotlight:hover {{
+      background: rgba(255, 200, 0, 0.14);
+    }}
+    .num {{
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }}
+    .num-positive {{
+      color: #2ca02c;
+    }}
+    .num-negative {{
+      color: #d62728;
+    }}
+    .badge {{
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 9px;
+      font-weight: bold;
+      letter-spacing: 0.5px;
+    }}
+    .badge-spotlight {{
+      background: #ffc800;
+      color: #000;
+    }}
+    .badge-liquidated {{
+      background: #d62728;
+      color: #fff;
+    }}
+    .dataTables_wrapper {{
+      color: #d1d4dc;
+    }}
+    .dataTables_filter input,
+    .dataTables_length select {{
+      background: #1a1d24;
+      color: #d1d4dc;
+      border: 1px solid #383b45;
+      padding: 4px 8px;
+      border-radius: 3px;
+    }}
+    .dataTables_paginate .paginate_button {{
+      color: #d1d4dc !important;
+    }}
+    .dataTables_paginate .paginate_button.current {{
+      background: #2962ff !important;
+      color: #fff !important;
+      border: 0 !important;
+    }}
+    button.dt-button {{
+      background: #2962ff !important;
+      color: #fff !important;
+      border: 0 !important;
+      padding: 6px 12px !important;
+      font-size: 11px !important;
+      margin-bottom: 8px !important;
+    }}
+    .legend {{
+      font-size: 11px;
+      color: #888;
+      margin-top: 12px;
+    }}
+    .legend .swatch {{
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      vertical-align: middle;
+      margin-right: 6px;
+      margin-left: 12px;
+      border-radius: 2px;
+    }}
+    .swatch.liq {{ background: rgba(214, 39, 40, 0.30); }}
+    .swatch.spot {{ background: rgba(255, 200, 0, 0.30); }}
+  </style>
+</head>
+<body>
+  <h1>Sweep — {title}</h1>
+  <div class="subtitle">
+    Schema v{schema_version} · generated {swept_at}
+  </div>
+
+  <div class="stats-bar">
+    <div class="stat-item">
+      <span class="stat-label">Combos:</span><span class="stat-value">{n_combos}</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Grid:</span><span class="stat-value">{n_grid}</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Spotlight:</span><span class="stat-value">{n_spot}</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Liquidated:</span><span class="stat-value">{n_liq}</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Best PnL:</span><span class="stat-value">{best_pnl}</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Median DD:</span><span class="stat-value">{median_dd}</span>
+    </div>
+  </div>
+
+  <table id="sweepTable" class="display compact" style="width: 100%">
+    <thead>
+      <tr>
+{header_cells}
+      </tr>
+    </thead>
+    <tbody>
+{body_rows}
+    </tbody>
+  </table>
+
+  <div class="legend">
+    Click headers to sort · Shift-click for multi-column · CSV export top-left
+    <span class="swatch liq"></span>liquidated
+    <span class="swatch spot"></span>spotlight (off-grid)
+  </div>
+
+  <script>
+    $(document).ready(function() {{
+      $('#sweepTable').DataTable({{
+        order: [[ {sort_col_idx}, 'desc' ]],
+        pageLength: 25,
+        lengthMenu: [[25, 50, 100, -1], [25, 50, 100, 'All']],
+        layout: {{
+          topStart: ['buttons'],
+        }},
+        buttons: [
+          {{
+            extend: 'csv',
+            text: 'Download CSV',
+            filename: 'sweep_{strategy}_{instrument}_{interval}',
+          }}
+        ],
+      }});
+    }});
+  </script>
+</body>
+</html>
+"""
