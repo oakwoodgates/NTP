@@ -52,6 +52,16 @@ if TYPE_CHECKING:
 _DEFAULT_SWEEP_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "sweeps"
 
 
+# ── Sweep parquet schema version ─────────────────────────────────────────────
+# Bumped whenever sweep result columns are added or removed.
+#
+#   v1 — original (general + PnL + returns analyzer dump)
+#   v2 — returns analyzer columns dropped; see docs/ANALYZER_RETURNS_CAVEAT.md
+#
+# Loaders should check ``_schema_version`` and adapt or warn on mismatch.
+SWEEP_SCHEMA_VERSION = 2
+
+
 # ── Rust LogGuard singleton ──────────────────────────────────────────────────
 # NT 1.225.0's Rust logging subsystem panics if re-initialized after the
 # LogGuard is freed (i.e. after an engine.dispose()).  BacktestNode solves
@@ -595,10 +605,17 @@ def run_single_backtest(
             else:
                 row["min_balance"] = balance
 
+            # Pull only the trustworthy analyzer stats into the sweep row.
+            # The Returns section (Sharpe, Sortino, Volatility, Returns
+            # Profit Factor, Avg Return, Risk Return Ratio) is deliberately
+            # NOT persisted — it's derived from a zero-padded daily returns
+            # series that biases all returns-derived stats for any strategy
+            # that doesn't trade every day.  See
+            # docs/ANALYZER_RETURNS_CAVEAT.md for the analysis and the list
+            # of stats that will return when upstream lands the fix.
             for stats_name, stats_fn in [
                 ("general", a.get_performance_stats_general),
                 ("PnL", lambda: a.get_performance_stats_pnls(currency)),
-                ("returns", a.get_performance_stats_returns),
             ]:
                 try:
                     for k, v in stats_fn().items():
@@ -785,6 +802,10 @@ def run_sweep(
     df.insert(4, "_data_start", data_start.isoformat())
     df.insert(5, "_data_end", data_end.isoformat())
     df.insert(6, "_swept_at", swept_at.isoformat())
+    # Schema version — bump when columns added/removed.
+    #   v1: original (general + PnL + returns analyzer dump)
+    #   v2: returns analyzer columns dropped (see ANALYZER_RETURNS_CAVEAT.md)
+    df.insert(7, "_schema_version", SWEEP_SCHEMA_VERSION)
 
     # ── Persist to Parquet ────────────────────────────────────────────────
     # Deterministic name: re-running the same strategy+instrument+interval
@@ -845,6 +866,7 @@ def load_sweeps(
         return {}
 
     sweeps: dict[str, pd.DataFrame] = {}
+    schema_warnings: list[str] = []
     for f in files:
         df = pd.read_parquet(f)
 
@@ -856,6 +878,20 @@ def load_sweeps(
         if bar_interval and df["_bar_interval"].iloc[0] != bar_interval:
             continue
 
+        # Schema-version check.  Old files predating ``_schema_version``
+        # are treated as v1 (still loadable but flagged).
+        file_version = (
+            int(df["_schema_version"].iloc[0])
+            if "_schema_version" in df.columns
+            else 1
+        )
+        if file_version != SWEEP_SCHEMA_VERSION:
+            schema_warnings.append(
+                f"  {f.name}: schema v{file_version} "
+                f"(current is v{SWEEP_SCHEMA_VERSION}) — "
+                f"may contain stale columns; re-run sweep to refresh.",
+            )
+
         # Build a readable label from metadata
         strat = df["_strategy"].iloc[0]
         inst = df["_instrument_id"].iloc[0]
@@ -864,6 +900,10 @@ def load_sweeps(
         sweeps[label] = df
 
     print(f"Loaded {len(sweeps)} sweep(s) from {sweep_path}")
+    if schema_warnings:
+        print("⚠ Some sweeps were loaded with an older schema version:")
+        for warning in schema_warnings:
+            print(warning)
     return sweeps
 
 

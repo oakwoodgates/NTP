@@ -75,9 +75,28 @@ NT's `BacktestEngine` account report only records equity at event timestamps (fi
 
 A proper fix requires daily mark-to-market equity that NT doesn't expose from the BacktestEngine. Partial fixes (using non-zero returns only, or computing from the sparse account report) would still be wrong in different ways. This is core engine functionality that should be fixed upstream.
 
+## What's Suppressed In-Project
+
+These follow-on actions were taken so the unreliable stats can't accidentally drive a decision:
+
+- **`charts.print_summary_stats()`** no longer prints the Returns section. It prints a one-line pointer to this doc instead.
+- **`charts.plot_equity_curve()`** no longer plots `(1 + returns).cumprod()` from the broken series. It now draws an event-time balance curve from `account_report["total"]` with running peak + drawdown overlay, clearly labeled as "event-time, NOT daily MTM".
+- **`run_sweep` / `run_single_backtest`** no longer dump `analyzer.get_performance_stats_returns()` into the sweep parquet.  Sweep schema bumped to **v2** (see `SWEEP_SCHEMA_VERSION` in `src/backtesting/engine.py`). `load_sweeps()` warns when reading v1 files.
+
+## What Will Return When Upstream Lands the Fix
+
+When NT exposes daily mark-to-market equity from `BacktestEngine` and `_calculate_portfolio_returns` switches to that source, restore:
+
+- `get_performance_stats_returns()` printing in `print_summary_stats`
+- a daily-returns cumulative curve (alongside, not replacing, the event-time equity curve)
+- `Sharpe`, `Sortino`, `Volatility`, `Returns Profit Factor`, `Avg Return / Avg Win Return / Avg Loss Return`, `Risk Return Ratio` columns in the sweep parquet (bump schema to v3)
+- restore returns-stat ranking options in `compare_sweeps.ipynb` and `validate_strategy.ipynb`
+
+The sweep schema-version system (`_schema_version` column + `SWEEP_SCHEMA_VERSION` constant) is how we'll signal when the data semantics change without breaking older saved sweeps.
+
 ## Impact on Workflow
 
-- **Strategy comparison:** Use Total PnL, PnL %, Win Rate, Expectancy, and drawdown (from account report min balance). Do not rank by Sharpe.
+- **Strategy comparison:** Use Total PnL, PnL %, Win Rate, Expectancy, PnL-based Profit Factor, **Max Drawdown %**, and **MAR ratio** (CAGR / MaxDD%). Do not rank by Sharpe.
 - **Walk-forward:** OOS PnL and OOS PnL % are reliable. OOS Sharpe in fold results is not.
 - **Validation notebook:** Bootstrap confidence intervals on PnL are fine. Any Sharpe-based thresholds should be ignored.
-- **Sweep heatmaps:** Use `total_pnl` or `total_pnl_pct` for coloring, not Sharpe.
+- **Sweep heatmaps:** Use `total_pnl`, `total_pnl_pct`, or `mar_ratio` for coloring, not Sharpe.

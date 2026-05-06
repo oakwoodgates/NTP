@@ -899,51 +899,103 @@ def _add_dc_bands(
 
 
 def plot_equity_curve(
-    analyzer,
-    account_report: pd.DataFrame | None,
-    title: str,
+    *args,
+    currency: str = "USDC",
 ) -> None:
-    """Plot cumulative returns or account balance fallback.
+    """Plot the event-time account balance curve with running peak + drawdown.
+
+    Pulls ``total`` from NT's account report and draws three series on a
+    shared time axis:
+
+    * **Equity (event-time)** — total balance at every NT account-state
+      event (fills, position changes).  This is *not* a daily mark-to-market
+      curve.  Between events the line is a step (last known balance);
+      intra-event price drift on open positions is invisible.
+    * **Running peak** — equity high-water mark to that point.
+    * **Drawdown ($)** — ``running_peak - equity`` on a secondary axis,
+      so the depth and duration of underwater periods are visible at a
+      glance.
+
+    The previous implementation used ``analyzer.returns()`` which is the
+    upstream-broken zero-padded daily series.  We deliberately do not
+    plot any returns-derived series until upstream fixes the methodology.
+    See ``docs/ANALYZER_RETURNS_CAVEAT.md``.
 
     Calls ``plt.show()`` directly — designed for inline notebook use.
 
     Parameters
     ----------
-    analyzer
-        NT portfolio analyzer (after ``calculate_statistics`` has been called).
-    account_report
+    account_report : pd.DataFrame | None
         DataFrame from ``engine.trader.generate_account_report(venue)``,
-        or ``None``. Used as fallback when analyzer returns are empty.
-    title
+        with ``total`` column.  May be ``None`` or empty.
+    title : str
         Chart title string (e.g. ``"EMACross(20/50)  BTC 1h"``).
+    currency : str, keyword-only
+        Settlement currency label for the y-axis.  Default ``"USDC"``.
+
+    Notes
+    -----
+    Two call signatures are accepted:
+
+    * **Current**: ``plot_equity_curve(account_report, title, currency=...)``.
+    * **Legacy**: ``plot_equity_curve(analyzer, account_report, title)``.
+      The ``analyzer`` argument is silently ignored — kept solely so that
+      pre-overhaul backtest notebooks don't error.
 
     """
-    _, ax = plt.subplots(figsize=(14, 5))
-    plotted = False
-
-    try:
-        returns = analyzer.returns()
-        if returns is not None and len(returns) > 0:
-            cumulative = (1 + returns).cumprod()
-            cumulative.plot(ax=ax, label="Cumulative Return")
-            plotted = True
-    except Exception:
-        pass
-
-    if not plotted and account_report is not None and not account_report.empty:
-        account_report.plot(ax=ax, label="Account Balance")
-        ax.set_ylabel("Balance (USDC)")
-        plotted = True
-
-    if plotted:
-        ax.set_title(f"Equity Curve — {title}", fontsize=13)
-        ax.set_xlabel("Time")
-        ax.grid(True, alpha=0.2)
-        ax.legend()
-        plt.tight_layout()
-        plt.show()
+    # Signature back-compat: legacy notebooks call with (analyzer, df, title);
+    # current call is (df, title).  Detect by argument count and types.
+    if len(args) == 3:
+        # Legacy: (analyzer, account_report, title) — ignore the analyzer.
+        _, account_report, title = args
+    elif len(args) == 2:
+        account_report, title = args
     else:
-        print("No returns or account data available for equity curve.")
+        msg = (
+            f"plot_equity_curve expected 2 or 3 positional args "
+            f"(account_report, title) — got {len(args)}"
+        )
+        raise TypeError(msg)
+
+    if account_report is None or account_report.empty:
+        print("No account report data available for equity curve.")
+        return
+
+    equity = account_report["total"].astype(float).copy()
+    # account_report can have multiple rows per timestamp (locked vs free).
+    # Collapse to one row per timestamp by taking the last balance.
+    equity = equity.groupby(equity.index).last().sort_index()
+    peak = equity.cummax()
+    drawdown_abs = peak - equity
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+    equity.plot(ax=ax, color="#1f77b4", label="Equity (event-time)", linewidth=1.5)
+    peak.plot(ax=ax, color="#888", label="Running peak", linestyle="--", linewidth=1.0)
+    ax.set_ylabel(f"Balance ({currency})")
+    ax.grid(True, alpha=0.2)
+
+    ax2 = ax.twinx()
+    ax2.fill_between(
+        drawdown_abs.index, 0, drawdown_abs.values,
+        color="#d62728", alpha=0.25, label="Drawdown ($)",
+    )
+    ax2.set_ylabel(f"Drawdown ({currency})", color="#d62728")
+    ax2.tick_params(axis="y", labelcolor="#d62728")
+    ax2.invert_yaxis()  # drawdown grows downward visually
+
+    # Combine legends from both axes
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1 + h2, l1 + l2, loc="upper left")
+
+    ax.set_title(
+        f"Equity & drawdown — {title}\n"
+        "(event-time, NOT daily MTM — intra-event drift on open positions invisible)",
+        fontsize=11,
+    )
+    ax.set_xlabel("Time")
+    fig.tight_layout()
+    plt.show()
 
 
 def print_summary_stats(
@@ -951,7 +1003,15 @@ def print_summary_stats(
     num_positions: int | None = None,
     currency=USDC,
 ) -> None:
-    """Print general, PnL, and returns stats from the analyzer.
+    """Print general and PnL stats from the analyzer.
+
+    The Returns section (Sharpe, Sortino, Volatility, Returns Profit Factor,
+    Average Return, Risk Return Ratio) is **deliberately omitted** because
+    NT's ``_calculate_portfolio_returns`` zero-pads non-trading days via
+    ``.ffill().pct_change()``, biasing all returns-derived stats for any
+    strategy that doesn't trade every day.  See
+    ``docs/ANALYZER_RETURNS_CAVEAT.md`` for the analysis and which stats
+    will be reinstated when upstream lands the fix.
 
     Parameters
     ----------
@@ -965,24 +1025,24 @@ def print_summary_stats(
     """
     general_stats = analyzer.get_performance_stats_general()
     pnl_stats = analyzer.get_performance_stats_pnls(currency)
-    returns_stats = analyzer.get_performance_stats_returns()
 
     print("=== General ===")
     for k, v in general_stats.items():
         print(f"  {k}: {v}")
 
-    print("\n=== PnL (USDC) ===")
+    print(f"\n=== PnL ({currency}) ===")
     for k, v in pnl_stats.items():
-        print(f"  {k}: {v}")
-
-    print("\n=== Returns ===")
-    for k, v in returns_stats.items():
         print(f"  {k}: {v}")
 
     print(f"\nTotal PnL      : {analyzer.total_pnl(currency)}")
     print(f"Total PnL %    : {analyzer.total_pnl_percentage(currency)}")
     if num_positions is not None:
         print(f"Positions      : {num_positions}")
+    print(
+        "\nReturns-section stats (Sharpe, Sortino, Vol, Returns PF, "
+        "Avg Return, Risk Return Ratio) are suppressed — see "
+        "docs/ANALYZER_RETURNS_CAVEAT.md.",
+    )
 
 
 def plot_pnl_heatmap(
