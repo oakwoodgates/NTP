@@ -38,9 +38,15 @@ def buy_and_hold(
 
     Buys at the first bar's close, sells at the last bar's close.
     Models a single round-trip taker fee on entry and exit when
-    ``fee_rate`` is non-zero.  Leverage scales the position notional
-    (no margin enforcement — same simplification NT uses for
-    backtests).
+    ``fee_rate`` is non-zero.
+
+    **Default is spot (leverage=1.0)** — the universal mental model
+    for B&H ("could I just have held the asset?").  Leveraged B&H is
+    available via the ``leverage`` argument but be aware that without
+    margin enforcement the equity curve can go deeply negative on a
+    drawdown that would have liquidated a real account.  In other
+    words: leveraged B&H here is **counterfactual** ("what would a
+    perp position have done if it survived"), not realistic.
 
     Parameters
     ----------
@@ -54,7 +60,11 @@ def buy_and_hold(
         Default 0 (frictionless baseline).  Pass your venue's taker
         fee to compare net-of-fees.
     leverage
-        Multiplier on the position size.  Default 1.0 (no leverage).
+        Multiplier on the position size.  Default ``1.0`` (spot).
+        **Don't pass strategy leverage here** unless you specifically
+        want the counterfactual "what if I'd opened a single perp
+        position and held it for the whole sample" — that comparison
+        is misleading because it ignores liquidation risk.
 
     Returns
     -------
