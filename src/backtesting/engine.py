@@ -8,16 +8,33 @@ from __future__ import annotations
 
 import time
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import msgspec
 import numpy as np
 import pandas as pd
 from nautilus_trader.backtest.config import BacktestEngineConfig
 from nautilus_trader.backtest.engine import BacktestEngine
+from nautilus_trader.common import Environment
 from nautilus_trader.config import LoggingConfig
+from nautilus_trader.core.rust.model import PositionSide, TradingState
 from nautilus_trader.model.enums import AccountType, OmsType
 from nautilus_trader.model.objects import Money
+
+from src.actors.account_alive import (
+    AccountAliveMonitor,
+    AccountAliveMonitorConfig,
+)
+from src.core.liquidation import (
+    TOPIC_ACCOUNT_LIQUIDATED,
+    TOPIC_POSITION_LIQUIDATED,
+    AccountLiquidated,
+    LiquidationConfig,
+    PositionLiquidated,
+)
+from src.core.sizing import resolve_min_trade_notional
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -26,6 +43,9 @@ if TYPE_CHECKING:
     from nautilus_trader.model.data import Bar
     from nautilus_trader.model.identifiers import Venue
     from nautilus_trader.model.instruments import Instrument
+
+    from src.core.sizing import SizingConfig
+    from src.core.venues import VenueConfig
 
 
 # ── Default sweep output directory ───────────────────────────────────────────
@@ -58,12 +78,76 @@ def _native_params(params: dict[str, Any]) -> dict[str, Any]:
     return {k: v.item() if hasattr(v, "item") else v for k, v in params.items()}
 
 
+class _LiquidationCounters:
+    """Per-run accumulator for liquidation telemetry published on the msgbus.
+
+    Tracks:
+    - position_count: number of mixin-driven position liquidations.
+    - account_event: first AccountLiquidated event seen (latched).
+    - denied_post_halt: count of OrderDenied events with reason="TradingState.HALTED".
+      Useful sanity check that HALTED is actually denying new submits — for a
+      dead combo with continuing signals we expect this to be > 0.
+    - position_events: full list of PositionLiquidated events. The sweep
+      uses these to compute trigger-vs-fill slippage statistics — the
+      simulator's "gap risk" quality signal.
+    """
+
+    def __init__(self) -> None:
+        self.position_count: int = 0
+        self.account_event: AccountLiquidated | None = None
+        self.denied_post_halt: int = 0
+        self.position_events: list[PositionLiquidated] = []
+
+    def on_position_liquidated(self, msg: Any) -> None:
+        if isinstance(msg, PositionLiquidated):
+            self.position_count += 1
+            self.position_events.append(msg)
+
+    def on_account_liquidated(self, msg: Any) -> None:
+        if isinstance(msg, AccountLiquidated) and self.account_event is None:
+            self.account_event = msg
+
+    def on_order_event(self, msg: Any) -> None:
+        # OrderDenied has a `reason` str. We only count denials caused by
+        # the AccountAliveMonitor halting trading (vs throttling, reduce-only
+        # mismatches, etc).
+        if (
+            type(msg).__name__ == "OrderDenied"
+            and "TradingState.HALTED" in (getattr(msg, "reason", None) or "")
+        ):
+            self.denied_post_halt += 1
+
+
+def _slippage_pct(event: PositionLiquidated) -> Decimal:
+    """Compute liquidation-stop slippage as a % of entry price.
+
+    Sign convention: positive = worse than trigger (gap-risk loss).
+    For a long, fill below trigger is worse → slippage = trigger − fill.
+    For a short, fill above trigger is worse → slippage = fill − trigger.
+
+    Returns Decimal("0") if entry_price is 0 (defensive — shouldn't happen).
+    """
+    if event.entry_price <= 0:
+        return Decimal("0")
+    if event.side == PositionSide.LONG:
+        delta = event.trigger_price - event.fill_price
+    else:
+        delta = event.fill_price - event.trigger_price
+    return (delta / event.entry_price) * Decimal("100")
+
+
 def make_engine(
     venue: Venue,
     instrument: Instrument,
     bars: list[Bar],
     starting_capital: int | float,
+    leverage: int = 1,
     log_level: str = "ERROR",
+    *,
+    environment: Environment = Environment.BACKTEST,
+    liquidation: LiquidationConfig | None = None,
+    venue_config: VenueConfig | None = None,
+    sizing: SizingConfig | None = None,
 ) -> BacktestEngine:
     """Create a configured BacktestEngine with venue, instrument, and data.
 
@@ -77,10 +161,51 @@ def make_engine(
         Bar data to feed.
     starting_capital
         Starting balance in the instrument's settlement currency.
+    leverage
+        Account leverage (e.g. 20 for 20x). Passed as default_leverage
+        to the simulated venue.
     log_level
         NT log level. Default ``"ERROR"`` to avoid stdout flooding.
+    environment
+        Defensive parameter — must be ``Environment.BACKTEST`` (the
+        default).  ``make_engine`` returns a ``BacktestEngine``; live
+        and sandbox runs use ``TradingNode`` directly via
+        ``scripts/run_live.py`` and ``scripts/run_sandbox.py``.
+        Passing ``Environment.LIVE`` or ``Environment.SANDBOX`` here
+        raises ``ValueError`` with a pointer to the right runner script.
+    liquidation
+        When set, registers the ``AccountAliveMonitor`` actor so the
+        engine simulates account-level liquidation (HALTED via
+        ``RiskEngine.set_trading_state``) on equity floor breach.
+        Per-position liquidation lives in the strategy's
+        ``LiquidationAware`` mixin and is configured via the strategy
+        config's ``liquidation`` field — pass the resolved
+        :class:`LiquidationConfig` returned by
+        :func:`resolve_strategy_liquidation_config` into both.
+    venue_config
+        Required when ``liquidation`` is set.  Source of mm_rate /
+        fee_rate defaults (see :class:`~src.core.venues.VenueConfig`).
+    sizing
+        Optional.  When set, contributes to the
+        ``min_trade_notional`` resolution order
+        (``min_notional`` → ``fixed_notional``).
+
+    Raises
+    ------
+    ValueError
+        If ``environment`` is not ``Environment.BACKTEST``.
 
     """
+    if environment != Environment.BACKTEST:
+        msg = (
+            f"make_engine() builds a BacktestEngine; got environment={environment!r}. "
+            "For live / sandbox use TradingNode directly — see "
+            "scripts/run_live.py and scripts/run_sandbox.py. "
+            "Pass `liquidation=liquidation_for_environment(cfg, env)` to those "
+            "scripts to disable / adjust the simulator per environment."
+        )
+        raise ValueError(msg)
+
     _ensure_log_guard(log_level)
     engine = BacktestEngine(config=BacktestEngineConfig())
     engine.add_venue(
@@ -89,10 +214,208 @@ def make_engine(
         account_type=AccountType.MARGIN,
         base_currency=None,
         starting_balances=[Money(starting_capital, instrument.settlement_currency)],
+        default_leverage=Decimal(leverage),
     )
     engine.add_instrument(instrument)
     engine.add_data(bars)
+
+    if liquidation is not None and liquidation.enabled:
+        if venue_config is None:
+            msg = (
+                "make_engine(liquidation=...) requires venue_config to resolve "
+                "mm_rate and fee_rate per-venue. Pass the VenueConfig from "
+                "src.core.venues.get_venue_config(...)."
+            )
+            raise ValueError(msg)
+        _register_account_alive_monitor(
+            engine=engine,
+            instrument=instrument,
+            leverage=leverage,
+            liquidation=liquidation,
+            venue_config=venue_config,
+            sizing=sizing,
+        )
+
     return engine
+
+
+def resolve_strategy_liquidation_config(
+    user: LiquidationConfig | None,
+    venue_config: VenueConfig,
+    instrument: Instrument,
+    sizing: SizingConfig | None = None,
+) -> LiquidationConfig | None:
+    """Return a fully-resolved LiquidationConfig for embedding on a strategy.
+
+    The strategy's ``LiquidationAware`` mixin reads ``mm_rate`` directly
+    off this config; ``make_engine`` cannot mutate the strategy config
+    after construction, so callers must build the resolved config first
+    and pass it into both the strategy and ``make_engine``.
+
+    Returns ``None`` (or the original config with ``enabled=False``) when
+    liquidation is disabled — the strategy mixin no-ops in that case.
+    """
+    if user is None or not user.enabled:
+        return user
+    mm_rate = user.mm_rate if user.mm_rate is not None else venue_config.mm_rate
+    fee_rate = (
+        user.fee_rate
+        if user.fee_rate is not None
+        else _instrument_taker_fee(instrument)
+    )
+    min_trade_notional = resolve_min_trade_notional(
+        sizing=sizing,
+        instrument=instrument,
+        explicit=user.min_trade_notional,
+    )
+    return LiquidationConfig(
+        enabled=user.enabled,
+        mm_rate=mm_rate,
+        fee_rate=fee_rate,
+        min_trade_notional=min_trade_notional,
+        alive_trades_buffer=user.alive_trades_buffer,
+        halt_on_account_liquidation=user.halt_on_account_liquidation,
+    )
+
+
+def liquidation_for_environment(
+    config: LiquidationConfig | None,
+    environment: Environment,
+) -> LiquidationConfig | None:
+    """Adjust a LiquidationConfig for the given run environment.
+
+    The simulator is appropriate in some environments and dangerous in
+    others. This helper enforces the right behavior so a notebook config
+    that gets copy-pasted into a live runner doesn't put simulated stops
+    on a real venue's order book.
+
+    Mapping
+    -------
+    - ``BACKTEST`` — return the config as-is. Both per-position
+      liquidation stops and account halts are appropriate.
+    - ``SANDBOX`` — return a copy with ``halt_on_account_liquidation=False``.
+      Sandbox runs ``SimulatedExchange`` against live data (the same
+      no-margin-enforcement bug applies, so simulating liquidation IS
+      appropriate), but you typically don't want a paper-trading
+      session to stop dead on a single liquidation event — the goal is
+      ongoing observation.
+    - ``LIVE`` — return ``None``. The venue handles its own liquidation;
+      our stops on top of the real book would conflict with HL's own
+      forced close.
+
+    Use this in ``scripts/run_live.py`` and ``scripts/run_sandbox.py``::
+
+        strategy_liquidation = liquidation_for_environment(
+            config=USER_LIQUIDATION_CONFIG,
+            environment=Environment.LIVE,   # or SANDBOX
+        )
+        # Pass strategy_liquidation into the strategy config so the
+        # mixin no-ops in live (None) or keeps placing stops without
+        # halting in sandbox.
+    """
+    if environment == Environment.BACKTEST:
+        return config
+    if environment == Environment.LIVE:
+        return None
+    if environment == Environment.SANDBOX:
+        if config is None or not config.enabled:
+            return config
+        return msgspec.structs.replace(config, halt_on_account_liquidation=False)
+    msg = f"Unknown environment: {environment!r}"
+    raise ValueError(msg)
+
+
+def _register_account_alive_monitor(
+    *,
+    engine: BacktestEngine,
+    instrument: Instrument,
+    leverage: int,
+    liquidation: LiquidationConfig,
+    venue_config: VenueConfig,
+    sizing: SizingConfig | None,
+) -> None:
+    """Construct AccountAliveMonitor and register it on the engine.
+
+    Resolves all config values up front so the actor sees no Nones.
+    Builds the halt callback against the engine's RiskEngine.
+    """
+    mm_rate = liquidation.mm_rate or venue_config.mm_rate
+    fee_rate = liquidation.fee_rate or _instrument_taker_fee(instrument)
+    min_trade_notional = resolve_min_trade_notional(
+        sizing=sizing,
+        instrument=instrument,
+        explicit=liquidation.min_trade_notional,
+    )
+
+    monitor_config = AccountAliveMonitorConfig(
+        venue=venue_config.nt_venue,
+        settlement_currency=str(instrument.settlement_currency),
+        venue_leverage=leverage,
+        min_trade_notional=min_trade_notional,
+        fee_rate=fee_rate,
+        alive_trades_buffer=liquidation.alive_trades_buffer,
+    )
+
+    halt_callback: Callable[[], None] | None = None
+    if liquidation.halt_on_account_liquidation:
+        risk_engine = engine.kernel.risk_engine
+
+        def _halt() -> None:
+            risk_engine.set_trading_state(TradingState.HALTED)
+
+        halt_callback = _halt
+
+    monitor = AccountAliveMonitor(monitor_config, halt_callback=halt_callback)
+    engine.add_actor(monitor)
+
+    # NT's MessageBus caches concrete-topic → subscriber lists on first
+    # publish. Subscriptions added later (e.g., from actor.on_start
+    # during engine.run()) are NOT inserted into existing concrete-topic
+    # caches, and the cache is only re-resolved when its subscriber list
+    # is empty. So a late wildcard subscription to `events.account.*` is
+    # silently lost if any AccountState event has already published —
+    # which it has, because adding the venue with starting balances
+    # triggers an initial AccountState before this actor is started.
+    #
+    # Solution: subscribe BEFORE engine.run() with a closure that
+    # forwards into the actor's handler. The actor's `on_start` no
+    # longer subscribes (kept as a no-op for symmetry with NT lifecycle).
+    engine.kernel.msgbus.subscribe(
+        topic="events.account.*",
+        handler=monitor._on_account_state,
+    )
+
+    # Silence unused-import warning at the type-check layer.
+    _ = mm_rate  # mm_rate is consumed by the strategy mixin via LiquidationConfig
+
+
+def _instrument_taker_fee(instrument: Instrument) -> Decimal:
+    """Read the instrument's taker fee as Decimal."""
+    raw = getattr(instrument, "taker_fee", None)
+    if raw is None:
+        return Decimal("0")
+    if hasattr(raw, "as_decimal"):
+        return raw.as_decimal()  # type: ignore[no-any-return]
+    return Decimal(str(raw))
+
+
+def _sum_commissions(engine: BacktestEngine, instrument: Instrument) -> Decimal:
+    """Sum per-position commission across all closed + open positions.
+
+    Each position carries a per-currency dict of accumulated commissions.
+    We pick the entry matching the instrument's settlement currency and
+    sum across positions. Used by the sweep schema to cross-check the
+    fee model: total_fees / num_positions should be roughly
+    ``2 × avg_notional × taker_fee`` (round-trip per position).
+    """
+    settlement = instrument.settlement_currency
+    total = Decimal("0")
+    all_positions = engine.cache.position_snapshots() + engine.cache.positions()
+    for pos in all_positions:
+        for comm in pos.commissions():
+            if comm.currency == settlement:
+                total += comm.as_decimal()
+    return total
 
 
 def run_single_backtest(
@@ -103,7 +426,12 @@ def run_single_backtest(
     params: dict[str, Any],
     add_strategy: Callable[[BacktestEngine], None],
     score_from_ns: int | None = None,
+    leverage: int = 1,
     log_level: str = "ERROR",
+    *,
+    liquidation: LiquidationConfig | None = None,
+    venue_config: VenueConfig | None = None,
+    sizing: SizingConfig | None = None,
 ) -> dict[str, Any]:
     """Run one backtest and return a flat dict of results.
 
@@ -132,8 +460,14 @@ def run_single_backtest(
         analysis to exclude trades that fire during the warmup period
         (bars prepended for indicator initialization).  When ``None``
         (the default), all positions are scored.
+    leverage
+        Account leverage (e.g. 20 for 20x).
     log_level
         NT log level.
+    liquidation, venue_config, sizing
+        Forwarded to :func:`make_engine`. When ``liquidation`` is set,
+        the row dict gains ``liquidated_positions``, ``liquidated_account``,
+        and ``liquidated_at_ts`` columns.
 
     Returns
     -------
@@ -141,9 +475,44 @@ def run_single_backtest(
         Contains all keys from *params* plus ``total_pnl``,
         ``total_pnl_pct``, ``num_positions``, ``final_balance``,
         ``min_balance``, ``error``, and analyzer performance stats.
+        When ``liquidation`` is set: ``liquidated_positions`` (int),
+        ``liquidated_account`` (bool), ``liquidated_at_ts`` (str | None).
 
     """
-    eng = make_engine(venue, instrument, bars, starting_capital, log_level)
+    eng = make_engine(
+        venue,
+        instrument,
+        bars,
+        starting_capital,
+        leverage,
+        log_level,
+        liquidation=liquidation,
+        venue_config=venue_config,
+        sizing=sizing,
+    )
+
+    # Subscribe sweep counters to the liquidation topics before strategies run.
+    # NB: subscriptions added BEFORE engine.run() are registered into the
+    # msgbus's _subscriptions list so they get picked up on first publish
+    # to a matching topic. See the long comment in _register_account_alive_monitor.
+    liq_state = _LiquidationCounters()
+    if liquidation is not None and liquidation.enabled:
+        eng.kernel.msgbus.subscribe(
+            topic=TOPIC_POSITION_LIQUIDATED,
+            handler=liq_state.on_position_liquidated,
+        )
+        eng.kernel.msgbus.subscribe(
+            topic=TOPIC_ACCOUNT_LIQUIDATED,
+            handler=liq_state.on_account_liquidated,
+        )
+        # OrderDenied events flow on `events.order.*`. Counting HALT-reasoned
+        # denials gives us a sanity check that HALTED is actually rejecting
+        # post-halt submits, not just appearing to.
+        eng.kernel.msgbus.subscribe(
+            topic="events.order.*",
+            handler=liq_state.on_order_event,
+        )
+
     add_strategy(eng)
 
     row: dict[str, Any] = {**params}
@@ -244,6 +613,36 @@ def run_single_backtest(
             num_positions=0, final_balance=np.nan, min_balance=np.nan,
         )
     finally:
+        # Always populate liquidation columns — when liquidation is off
+        # they're zero/false/None, keeping the schema consistent across rows.
+        row["liquidated_positions"] = liq_state.position_count
+        row["liquidated_account"] = liq_state.account_event is not None
+        row["liquidated_at_ts"] = (
+            pd.Timestamp(liq_state.account_event.ts_event, unit="ns", tz="UTC").isoformat()
+            if liq_state.account_event is not None
+            else None
+        )
+        row["denied_post_halt"] = liq_state.denied_post_halt
+
+        # Liquidation-stop slippage: trigger vs actual fill, as % of entry.
+        # NaN when no liquidations fired (most rows).  Average and max
+        # across the per-row events let us spot bar-decomposition gap risk.
+        if liq_state.position_events:
+            slips = [_slippage_pct(ev) for ev in liq_state.position_events]
+            row["liq_slippage_avg_pct"] = float(sum(slips) / len(slips))
+            row["liq_slippage_max_pct"] = float(max(slips))
+        else:
+            row["liq_slippage_avg_pct"] = np.nan
+            row["liq_slippage_max_pct"] = np.nan
+
+        # Sum commissions across all closed + open positions in the settlement
+        # currency. Cross-checks the fee model — total_fees / num_positions
+        # should be roughly 2 × notional × taker_fee.
+        try:
+            row["total_fees"] = float(_sum_commissions(eng, instrument))
+        except Exception as e:
+            print(f"  Warning: fee sum failed for {params}: {e}")
+            row["total_fees"] = np.nan
         eng.dispose()
 
     return row
@@ -266,8 +665,12 @@ def run_sweep(
     sweep_name: str | None = None,
     save_sweep: bool = True,
     sweep_dir: str | Path = _DEFAULT_SWEEP_DIR,
+    leverage: int = 1,
     log_level: str = "ERROR",
     verbose: bool = True,
+    liquidation: LiquidationConfig | None = None,
+    venue_config: VenueConfig | None = None,
+    sizing: SizingConfig | None = None,
 ) -> pd.DataFrame:
     """Run a parameter sweep, persist results to Parquet, return DataFrame.
 
@@ -345,7 +748,11 @@ def run_sweep(
             starting_capital=starting_capital,
             params=params,
             add_strategy=lambda eng, p=params: strategy_factory(eng, p),  # type: ignore[misc]
+            leverage=leverage,
             log_level=log_level,
+            liquidation=liquidation,
+            venue_config=venue_config,
+            sizing=sizing,
         )
         results.append(row)
 
@@ -475,8 +882,12 @@ def run_walk_forward(
     test_pct: float = 0.125,
     select_by: str = "total_pnl",
     warmup_bars: int = 200,
+    leverage: int = 1,
     log_level: str = "ERROR",
     verbose: bool = True,
+    liquidation: LiquidationConfig | None = None,
+    venue_config: VenueConfig | None = None,
+    sizing: SizingConfig | None = None,
 ) -> pd.DataFrame:
     """Sliding-window walk-forward analysis.
 
@@ -615,7 +1026,11 @@ def run_walk_forward(
                 params=params,
                 add_strategy=lambda eng, p=params: strategy_factory(eng, p),  # type: ignore[misc]
                 score_from_ns=train_score_from_ns,
+                leverage=leverage,
                 log_level=log_level,
+                liquidation=liquidation,
+                venue_config=venue_config,
+                sizing=sizing,
             )
             train_results.append(row)
 
@@ -652,7 +1067,11 @@ def run_walk_forward(
             params=best_params,
             add_strategy=lambda eng, p=best_params: strategy_factory(eng, p),  # type: ignore[misc]
             score_from_ns=test_score_from_ns,
+            leverage=leverage,
             log_level=log_level,
+            liquidation=liquidation,
+            venue_config=venue_config,
+            sizing=sizing,
         )
 
         oos_pnl = oos_row.get("total_pnl", float("nan"))

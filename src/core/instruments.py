@@ -192,26 +192,18 @@ def make_binance_spot(
 
 def with_venue_config(
     instrument: CryptoPerpetual,
-    max_leverage: int,
     maker_fee: Decimal | None = None,
     taker_fee: Decimal | None = None,
 ) -> CryptoPerpetual:
-    """Clone a CryptoPerpetual with venue-specific backtesting overrides.
-
-    Catalog instruments store raw margins and default exchange fees. For
-    backtesting, NT's risk engine enforces margin values, and fees affect PnL
-    calculations. This function clones the instrument with:
-    - margin_init = 1/max_leverage, margin_maint = margin_init/2
-    - Optional maker/taker fee overrides (when None, preserves catalog fees)
-
-    Works for any exchange — no factory-specific logic.
+    """Clone a CryptoPerpetual with venue-specific fee overrides.
+  
+    This function overrides maker/taker fees when simulating
+    execution on a different exchange than the data source.
 
     Parameters
     ----------
     instrument : CryptoPerpetual
         The source instrument (typically from ParquetDataCatalog).
-    max_leverage : int
-        Desired leverage. Margin is derived as 1/max_leverage.
     maker_fee : Decimal | None
         Override maker fee. None preserves the instrument's existing fee.
     taker_fee : Decimal | None
@@ -222,9 +214,6 @@ def with_venue_config(
     CryptoPerpetual
 
     """
-    margin_init = Decimal(1) / Decimal(max_leverage)
-    margin_maint = margin_init / 2
-
     return CryptoPerpetual(
         instrument_id=instrument.id,
         raw_symbol=instrument.raw_symbol,
@@ -238,8 +227,8 @@ def with_venue_config(
         size_increment=instrument.size_increment,
         ts_event=instrument.ts_event,
         ts_init=instrument.ts_init,
-        margin_init=margin_init,
-        margin_maint=margin_maint,
+        margin_init=Decimal("1"),
+        margin_maint=Decimal("1"),
         maker_fee=maker_fee if maker_fee is not None else instrument.maker_fee,
         taker_fee=taker_fee if taker_fee is not None else instrument.taker_fee,
     )

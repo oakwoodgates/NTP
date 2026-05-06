@@ -31,7 +31,11 @@ class VenueConfig:
     taker_fee : Decimal
         Taker fee as a fraction.
     leverage : int
-        Maximum leverage to apply (margin_init = 1 / leverage).
+        Maximum leverage to apply.
+    mm_rate : Decimal
+        Maintenance margin rate as a fraction of notional
+        (e.g., Decimal("0.005") = 0.5%).  Used by the LiquidationMonitor
+        to compute the liquidation price.
     settlement_currency : str
         Settlement currency code (e.g., "USDC", "USDT").  Informational --
         the actual settlement currency comes from the underlying instrument.
@@ -43,6 +47,7 @@ class VenueConfig:
     maker_fee: Decimal
     taker_fee: Decimal
     leverage: int
+    mm_rate: Decimal
     settlement_currency: str
 
 
@@ -53,6 +58,7 @@ VENUE_CONFIGS: dict[str, VenueConfig] = {
         maker_fee=Decimal("0.00010"),    # 1 bp   -- HL VIP 0 base tier
         taker_fee=Decimal("0.00035"),    # 3.5 bp
         leverage=20,
+        mm_rate=Decimal("0.005"),        # 0.5%  -- HL base tier
         settlement_currency="USDC",
     ),
     "BINANCE_PERP": VenueConfig(
@@ -61,6 +67,7 @@ VENUE_CONFIGS: dict[str, VenueConfig] = {
         maker_fee=Decimal("0.000200"),   # 2 bp  -- Binance Futures VIP 0
         taker_fee=Decimal("0.000500"),   # 5 bp
         leverage=20,
+        mm_rate=Decimal("0.004"),        # 0.4%  -- Binance BTC <$50k tier
         settlement_currency="USDT",
     ),
     "BINANCE_SPOT": VenueConfig(
@@ -69,6 +76,7 @@ VENUE_CONFIGS: dict[str, VenueConfig] = {
         maker_fee=Decimal("0.001000"),   # 10 bp -- Binance Spot VIP 0
         taker_fee=Decimal("0.001000"),
         leverage=1,
+        mm_rate=Decimal("0"),            # no maintenance margin on spot
         settlement_currency="USDT",
     ),
 }

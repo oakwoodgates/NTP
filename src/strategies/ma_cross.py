@@ -19,6 +19,16 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.trading.config import StrategyConfig
 from nautilus_trader.trading.strategy import Strategy
 
+# LiquidationConfig and SizingConfig are imported at runtime — msgspec
+# resolves these as field types on the StrategyConfig at struct-build time.
+from src.core.liquidation import LiquidationConfig  # noqa: TC001
+from src.core.liquidation_mixin import LiquidationAware
+from src.core.sizing import (
+    SizingConfig,  # noqa: TC001
+    compute_notional,
+    resolve_sizing_from_strategy_config,
+)
+
 if TYPE_CHECKING:
     from nautilus_trader.model.instruments import Instrument
 
@@ -41,10 +51,15 @@ class MACrossConfig(StrategyConfig, frozen=True):
         The instrument ID for the strategy.
     bar_type : BarType
         The bar type for the strategy.
-    trade_notional : Decimal
-        The USD notional size per trade.  Quantity is computed at entry
-        time as ``trade_notional / current_price``, so each trade risks
-        approximately the same dollar amount regardless of asset price.
+    sizing : SizingConfig | None
+        Position sizing config.  When ``None``, falls back to
+        ``trade_notional`` (back-compat).  When set, overrides
+        ``trade_notional``.
+    trade_notional : Decimal | None
+        Back-compat fixed notional. Equivalent to
+        ``SizingConfig(mode="fixed", fixed_notional=trade_notional)``.
+        Quantity is computed at entry as ``notional / current_price``.
+        Either ``sizing`` or ``trade_notional`` must be set.
     ma_type : str, default "EMA"
         Moving average type: ``"EMA"`` | ``"SMA"`` | ``"HMA"`` |
         ``"DEMA"`` | ``"AMA"`` | ``"VIDYA"``.
@@ -62,26 +77,37 @@ class MACrossConfig(StrategyConfig, frozen=True):
         If all open positions should be closed on strategy stop.
         Set to False to stop the strategy without liquidating (e.g., during
         a code deploy in live trading).
+    liquidation : LiquidationConfig | None, default None
+        Liquidation simulator config. When ``None`` the
+        ``LiquidationAware`` mixin is inert. ``mm_rate`` is resolved by
+        ``make_engine`` from ``VenueConfig`` before being passed in.
 
     """
 
     instrument_id: InstrumentId
     bar_type: BarType
-    trade_notional: Decimal
+    sizing: SizingConfig | None = None
+    trade_notional: Decimal | None = None
     ma_type: str = "EMA"
     fast_period: PositiveInt = 10
     slow_period: PositiveInt = 20
     ama_alpha_fast: PositiveInt = 2
     ama_alpha_slow: PositiveInt = 30
     close_positions_on_stop: bool = True
+    liquidation: LiquidationConfig | None = None
 
 
-class MACross(Strategy):
+class MACross(LiquidationAware, Strategy):
     """Moving-average crossover strategy using MovingAverageFactory.
 
     Goes long when fast MA crosses above slow MA.
     Goes short when fast MA crosses below slow MA.
     Designed for perpetual futures (supports both directions).
+
+    Inheritance order: ``LiquidationAware`` MUST come first. NT calls the
+    typed handlers (``on_position_opened`` etc.) by name; ``Strategy`` defines
+    those as concrete no-op stubs, so ``(Strategy, LiquidationAware)`` order
+    finds the stubs first via MRO and the mixin silently never runs.
 
     Parameters
     ----------
@@ -93,6 +119,7 @@ class MACross(Strategy):
     ValueError
         If `config.fast_period` is not less than `config.slow_period`.
         If `config.ma_type` is not a recognised type.
+        If neither `config.sizing` nor `config.trade_notional` is set.
 
     """
 
@@ -103,6 +130,11 @@ class MACross(Strategy):
         )
         PyCondition.is_in(config.ma_type, _MA_TYPE_LOOKUP, "config.ma_type", "_MA_TYPE_LOOKUP")
         super().__init__(config)
+        self._init_liquidation(config.liquidation)
+
+        # Resolve sizing: explicit SizingConfig wins; else build a fixed-mode
+        # config from trade_notional for back-compat.
+        self._sizing = resolve_sizing_from_strategy_config(config)
 
         self.instrument: Instrument | None = None
         ma_enum = _MA_TYPE_LOOKUP[config.ma_type]
@@ -175,7 +207,7 @@ class MACross(Strategy):
                 self._enter(OrderSide.SELL, price)
 
     def _enter(self, side: OrderSide, price: Decimal) -> None:
-        """Submit a market order sized by notional USD amount."""
+        """Submit a market order sized via SizingConfig."""
         if self.instrument is None:
             self.log.error("Instrument not loaded — cannot enter position")
             return
@@ -183,11 +215,24 @@ class MACross(Strategy):
             self.log.warning("Invalid price — cannot compute quantity")
             return
 
-        qty = self.instrument.make_qty(self.config.trade_notional / price)
+        venue = self.config.instrument_id.venue
+        account = self.cache.account_for_venue(venue)
+        equity = (
+            account.balance_total(self.instrument.settlement_currency).as_decimal()
+            if account is not None
+            else Decimal("0")
+        )
+        notional = compute_notional(equity, self._sizing, self.instrument)
+        if notional <= 0:
+            self.log.warning(
+                f"Computed notional={notional} (equity={equity}) — skipping entry",
+            )
+            return
+
+        qty = self.instrument.make_qty(notional / price)
         if qty <= 0:
             self.log.warning(
-                f"Computed qty=0 for notional={self.config.trade_notional} "
-                f"at price={price}"
+                f"Computed qty=0 for notional={notional} at price={price}",
             )
             return
 
@@ -206,6 +251,7 @@ class MACross(Strategy):
         self.unsubscribe_bars(self.config.bar_type)
 
     def on_reset(self) -> None:
-        """Reset indicators for engine reuse (parameter sweeps)."""
+        """Reset indicators and liquidation state for engine reuse (parameter sweeps)."""
+        super().on_reset()
         self.fast_ma.reset()
         self.slow_ma.reset()

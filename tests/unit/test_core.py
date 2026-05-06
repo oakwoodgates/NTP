@@ -146,26 +146,26 @@ class TestMakeHyperliquidPerp:
 
 
 class TestWithVenueConfig:
-    def test_margin_init(self) -> None:
+    def test_margin_init_always_one(self) -> None:
         base = make_hyperliquid_perp("BTC", 1, 5, 40)
-        result = with_venue_config(base, 20)
-        assert result.margin_init == Decimal("0.05")  # 1/20
+        result = with_venue_config(base)
+        assert result.margin_init == Decimal("1")
 
-    def test_margin_maint(self) -> None:
+    def test_margin_maint_always_one(self) -> None:
         base = make_hyperliquid_perp("BTC", 1, 5, 40)
-        result = with_venue_config(base, 20)
-        assert result.margin_maint == Decimal("0.025")  # 0.05/2
+        result = with_venue_config(base)
+        assert result.margin_maint == Decimal("1")
 
     def test_preserves_fees_by_default(self) -> None:
         base = make_hyperliquid_perp("BTC", 1, 5, 40)
-        result = with_venue_config(base, 20)
+        result = with_venue_config(base)
         assert result.maker_fee == base.maker_fee
         assert result.taker_fee == base.taker_fee
 
     def test_override_both_fees(self) -> None:
         base = make_hyperliquid_perp("BTC", 1, 5, 40)
         result = with_venue_config(
-            base, 20,
+            base,
             maker_fee=Decimal("0.001"),
             taker_fee=Decimal("0.002"),
         )
@@ -174,23 +174,23 @@ class TestWithVenueConfig:
 
     def test_override_maker_only(self) -> None:
         base = make_hyperliquid_perp("BTC", 1, 5, 40)
-        result = with_venue_config(base, 20, maker_fee=Decimal("0.0005"))
+        result = with_venue_config(base, maker_fee=Decimal("0.0005"))
         assert result.maker_fee == Decimal("0.0005")
         assert result.taker_fee == base.taker_fee
 
     def test_override_taker_only(self) -> None:
         base = make_hyperliquid_perp("BTC", 1, 5, 40)
-        result = with_venue_config(base, 20, taker_fee=Decimal("0.003"))
+        result = with_venue_config(base, taker_fee=Decimal("0.003"))
         assert result.maker_fee == base.maker_fee
         assert result.taker_fee == Decimal("0.003")
 
     def test_preserves_instrument_id(self) -> None:
         base = make_hyperliquid_perp("BTC", 1, 5, 40)
-        result = with_venue_config(base, 10)
+        result = with_venue_config(base)
         assert result.id == base.id
 
     def test_preserves_precision(self) -> None:
         base = make_hyperliquid_perp("ETH", 2, 4, 25)
-        result = with_venue_config(base, 10)
+        result = with_venue_config(base)
         assert result.price_precision == 2
         assert result.size_precision == 4
