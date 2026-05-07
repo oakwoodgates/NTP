@@ -49,11 +49,10 @@ this structure:
 ### 3.9 v2 tearsheet (single-file archive)
 
 ## 4. Parameter sweep
-### 4.1 Spotlight params guide
-### 4.2 Run sweep
-### 4.3 PnL heatmap
-### 4.4 Liquidation diagnostics
-### 4.5 Sortable HTML sweep table
+### 4.1 Run sweep
+### 4.2 PnL heatmap
+### 4.3 Liquidation diagnostics
+### 4.4 Sortable HTML sweep table
 
 ## 5. Interactive trade chart (TVLC)
 
