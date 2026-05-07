@@ -96,6 +96,66 @@ For HTML reports the notebook generates:
 `SWEEP_NAME` and `RESULT_NAME` are derived in Cell 1.1 — see the comment
 block above the assignments for the convention.
 
+## Snapshotting a notebook run
+
+Two distinct workflows: **interactive exploration** and **producing a
+shareable snapshot**.
+
+### 1. Interactive exploration
+
+Open the notebook in VS Code / Cursor / JupyterLab and click "Run All"
+(or step through cells).  Inline outputs appear in the editor.  The
+"snapshot" cell at the end of the notebook (section 7.1 in the v2
+template) is documentation only — it doesn't try to save anything,
+because save-from-inside-the-notebook hits a chicken-and-egg race
+(cells aren't autosaved to disk until *after* they've executed, but
+the save cell needs to run *during* execution).
+
+### 2. Snapshot for sharing / archiving
+
+After you're happy with an interactive run, drop to a terminal and run:
+
+**Bash / Git Bash / WSL:**
+```bash
+./scripts/snapshot-notebook.sh notebooks/backtest/ema_cross.ipynb
+```
+
+**PowerShell:**
+```powershell
+.\scripts\snapshot-notebook.ps1 notebooks\backtest\ema_cross.ipynb
+```
+
+The wrapper re-executes the notebook headless via
+`jupyter nbconvert --execute` and writes timestamped snapshots to:
+
+```
+reports/notebooks/<category>/<basename>_<UTC_TIMESTAMP>.ipynb   (executed copy)
+reports/html/<category>/<basename>_<UTC_TIMESTAMP>.html         (rendered HTML)
+```
+
+Where `<category>` is the parent directory name of the input notebook
+(so `notebooks/backtest/ema_cross.ipynb` → `category=backtest`).
+
+The headless run takes 1–2 minutes for the v2 reference notebook
+(~27 code cells, sweep + tearsheet generation).  In exchange you get a
+real shareable artifact instead of the empty-snapshot trap.
+
+### Why two workflows instead of one?
+
+`nbconvert --execute` is a separate process from your editor's kernel.
+It manages its own kernel start/stop and writes the notebook atomically
+when execution completes — so every cell's output is captured.
+
+An in-notebook save cell, by contrast, has to call `shutil.copy()` on
+the .ipynb file mid-execution, when the on-disk copy hasn't been
+autosaved yet.  Result: the snapshot has whatever was on disk *before*
+you clicked Run All — usually the previous run's outputs or a blank
+notebook.
+
+The two-workflow split makes the right thing easy and the wrong thing
+unavailable.  If you want headless reproducible runs (CI, scheduled
+jobs), the same wrapper script is what you'd call.
+
 ## ⚠ Avoiding the "jumbled cells" problem
 
 When external tooling (Python scripts, Claude Code, etc.) edits a notebook
