@@ -1722,6 +1722,7 @@ def plot_pnl_heatmap(
     flag_col: str | None = "error",
     flag_value: str = "liquidated",
     flag_label: str = "hit zero equity",
+    exclude_kinds: tuple[str, ...] | None = ("spotlight",),
 ) -> None:
     """Diverging RdYlGn heatmap from sweep results DataFrame.
 
@@ -1754,15 +1755,27 @@ def plot_pnl_heatmap(
         Default ``"liquidated"``.
     flag_label
         Legend label for the underline marker. Default ``"hit zero equity"``.
+    exclude_kinds
+        Tuple of ``_kind`` values to drop before pivoting.  Default
+        ``("spotlight",)`` — keeps the heatmap a clean regular grid even
+        when off-grid spotlight combos are mixed into the sweep.  Pass
+        an empty tuple to disable filtering and include everything.
 
     """
-    pivot = results_df.pivot(index=row_col, columns=col_col, values=value_col)
+    df = results_df
+    if exclude_kinds and "_kind" in df.columns:
+        # Filter out off-grid combos so the pivot stays a regular grid.
+        # NaN _kind values are kept (regular grid rows).
+        df = df[~df["_kind"].isin(list(exclude_kinds))]
 
-    # Build a matching boolean pivot for flagged cells
+    pivot = df.pivot(index=row_col, columns=col_col, values=value_col)
+
+    # Build a matching boolean pivot for flagged cells (using the
+    # filtered df so flag_pivot lines up with the value pivot).
     flag_pivot = None
-    if flag_col and flag_col in results_df.columns:
-        flagged = (results_df[flag_col].fillna("") == flag_value).astype(float)
-        flag_pivot = results_df.assign(_flag=flagged).pivot(
+    if flag_col and flag_col in df.columns:
+        flagged = (df[flag_col].fillna("") == flag_value).astype(float)
+        flag_pivot = df.assign(_flag=flagged).pivot(
             index=row_col, columns=col_col, values="_flag",
         )
 
