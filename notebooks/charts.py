@@ -999,6 +999,229 @@ def plot_equity_curve(
     plt.show()
 
 
+def plot_drawdown_distribution(
+    account_report: pd.DataFrame | None,
+    *,
+    title: str = "Drawdown distribution",
+    currency: str = "USDC",
+    bar_interval_ns: int | None = None,
+) -> None:
+    """Two-panel chart: drawdown depth distribution + duration distribution.
+
+    Complements the equity & drawdown chart (which shows individual
+    drawdowns over time) by aggregating across all underwater periods
+    in the run.  Answers the questions the time-axis chart can't:
+
+    * "How deep are typical drawdowns?" (depth histogram)
+    * "How long was I underwater on average?" (duration histogram)
+    * "What's the worst-case duration I have to be ready for?"
+      (annotated max duration)
+
+    Long drawdowns kill psychology much more than deep ones — a 30%
+    drawdown that recovers in 2 weeks is easier to stomach than a 10%
+    drawdown that takes 18 months to unwind.
+
+    Calls ``plt.show()`` directly — designed for inline notebook use.
+
+    Parameters
+    ----------
+    account_report
+        DataFrame from ``engine.trader.generate_account_report(venue)``.
+    title
+        Suptitle for the figure.
+    currency
+        Currency label (used in depth-axis label).
+    bar_interval_ns
+        Bar interval in nanoseconds.  When provided, durations are
+        reported in bars; otherwise in days.
+
+    """
+    from src.backtesting.metrics import compute_drawdown_periods
+
+    if account_report is None or account_report.empty:
+        print("No account report data — skipping drawdown distribution.")
+        return
+
+    balance = account_report["total"].astype(float).copy()
+    periods = compute_drawdown_periods(balance)
+    if not periods:
+        print("No drawdowns in this run (monotonically increasing equity).")
+        return
+
+    depths_pct = np.array([p["depth_pct"] * 100 for p in periods])
+    durations_secs = np.array([p["duration_seconds"] for p in periods])
+    if bar_interval_ns:
+        durations = durations_secs * 1e9 / bar_interval_ns
+        dur_unit = "bars"
+    else:
+        durations = durations_secs / 86400
+        dur_unit = "days"
+    n_recovered = sum(1 for p in periods if p["recovered"])
+    n_open = len(periods) - n_recovered
+
+    fig, axes = plt.subplots(1, 2, figsize=(14, 4.5))
+    fig.suptitle(
+        f"{title}  ·  {len(periods)} drawdowns  "
+        f"({n_recovered} recovered, {n_open} open at end)",
+        fontsize=13,
+    )
+
+    # Panel 1: Depth distribution
+    ax = axes[0]
+    bins = max(15, min(50, len(periods) // 2))
+    ax.hist(depths_pct, bins=bins, color="#d62728", alpha=0.7,
+            edgecolor="#891a1b")
+    ax.axvline(depths_pct.mean(), color="black", linestyle="-", linewidth=1.0,
+               label=f"Mean = {depths_pct.mean():.1f}%")
+    ax.axvline(np.median(depths_pct), color="black", linestyle="--",
+               linewidth=0.8,
+               label=f"Median = {np.median(depths_pct):.1f}%")
+    ax.axvline(depths_pct.max(), color="#891a1b", linestyle=":",
+               linewidth=0.8,
+               label=f"Max = {depths_pct.max():.1f}%")
+    ax.set_xlabel("Drawdown depth (%)")
+    ax.set_ylabel("# drawdowns")
+    ax.set_title("Drawdown depth")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.2)
+
+    # Panel 2: Duration distribution
+    ax = axes[1]
+    bins = max(15, min(50, len(periods) // 2))
+    ax.hist(durations, bins=bins, color="#ff7f0e", alpha=0.7,
+            edgecolor="#b35900")
+    ax.axvline(durations.mean(), color="black", linestyle="-", linewidth=1.0,
+               label=f"Mean = {durations.mean():.1f} {dur_unit}")
+    ax.axvline(np.median(durations), color="black", linestyle="--",
+               linewidth=0.8,
+               label=f"Median = {np.median(durations):.1f} {dur_unit}")
+    ax.axvline(durations.max(), color="#b35900", linestyle=":", linewidth=0.8,
+               label=f"Max = {durations.max():.0f} {dur_unit}")
+    ax.set_xlabel(f"Drawdown duration ({dur_unit})")
+    ax.set_ylabel("# drawdowns")
+    ax.set_title("Drawdown duration")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.2)
+
+    # Highlight long drawdowns warning if max duration is > 90 days equivalent
+    long_dd_threshold_secs = 90 * 86400  # 90 days
+    if durations_secs.max() > long_dd_threshold_secs:
+        ax.text(
+            0.5, 0.95,
+            f"⚠ longest drawdown: "
+            f"{durations_secs.max() / 86400:.0f} days",
+            transform=ax.transAxes, ha="center", va="top",
+            fontsize=9, color="#b35900",
+            bbox={"facecolor": "#fff8e1", "alpha": 0.9, "edgecolor": "#b35900"},
+        )
+
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_bootstrap_pnl(
+    bootstrap_dist: dict[str, float],
+    *,
+    title: str = "Bootstrap PnL distribution",
+    currency: str = "USDC",
+) -> None:
+    """Visualise a bootstrap-PnL confidence interval as a synthetic histogram.
+
+    The metrics module's ``bootstrap_total_pnl`` returns summary stats
+    only (mean / std / 5/25/50/75/95 percentiles) — not the full sample.
+    This chart reconstructs an approximate histogram from those summary
+    stats by drawing a Gaussian centered at ``mean`` with width ``std``
+    and overlaying the empirical percentile lines.  It's a visual aid
+    for the dispersion, not a true reproduction of the bootstrap
+    distribution.
+
+    The actual-total line shows where the strategy's realised PnL
+    sits within the resampled distribution — your eye should see
+    immediately whether it's at the mean, in the upper tail, or in
+    the lower tail.
+
+    Calls ``plt.show()`` directly — designed for inline notebook use.
+
+    Parameters
+    ----------
+    bootstrap_dist
+        Output of ``src.backtesting.metrics.bootstrap_total_pnl(...)``.
+    title
+        Suptitle for the figure.
+    currency
+        Currency label for the x-axis.
+
+    """
+    if not bootstrap_dist or math.isnan(bootstrap_dist.get("mean", float("nan"))):
+        print("No bootstrap distribution to plot.")
+        return
+
+    mean = bootstrap_dist["mean"]
+    std = bootstrap_dist["std"]
+    actual = bootstrap_dist["actual_total"]
+    pct5 = bootstrap_dist["pct_5"]
+    pct25 = bootstrap_dist["pct_25"]
+    median = bootstrap_dist["median"]
+    pct75 = bootstrap_dist["pct_75"]
+    pct95 = bootstrap_dist["pct_95"]
+    n_iter = bootstrap_dist.get("n_iterations", 0)
+    n_trades = bootstrap_dist.get("n_trades", 0)
+
+    fig, ax = plt.subplots(figsize=(12, 4.5))
+    fig.suptitle(
+        f"{title}  ·  {n_iter:,} resamples of {n_trades} trades",
+        fontsize=13,
+    )
+
+    # Synthetic Gaussian histogram visual (purely for shape — actual
+    # bootstrap is reflected via the percentile lines).
+    rng = np.random.default_rng(seed=0)
+    synth = rng.normal(mean, std, 5000) if std > 0 else np.full(5000, mean)
+    ax.hist(synth, bins=60, color="#1f77b4", alpha=0.35, edgecolor="#0f4c81",
+            label="approx. distribution shape")
+
+    # Percentile bands
+    ax.axvspan(pct5, pct95, alpha=0.10, color="#1f77b4",
+               label="5–95 pct band")
+    ax.axvspan(pct25, pct75, alpha=0.20, color="#1f77b4",
+               label="25–75 pct band")
+    ax.axvline(median, color="#0f4c81", linestyle="-", linewidth=1.5,
+               label=f"Median = {median:,.0f}")
+    ax.axvline(actual, color="#d62728", linestyle="-", linewidth=2.0,
+               label=f"Actual = {actual:,.0f}")
+
+    # Verdict text
+    if actual >= pct95:
+        verdict = "Actual is in the TOP 5% of resamples — lucky path?"
+        verdict_color = "#b35900"
+    elif actual >= pct75:
+        verdict = "Actual is in the 75–95th percentile — above-average path."
+        verdict_color = "#26a69a"
+    elif actual >= pct25:
+        verdict = "Actual is within the central 50% — typical path."
+        verdict_color = "#444"
+    elif actual >= pct5:
+        verdict = "Actual is in the 5–25th percentile — below-average path."
+        verdict_color = "#666"
+    else:
+        verdict = "Actual is in the BOTTOM 5% of resamples — unlucky path?"
+        verdict_color = "#b35900"
+    ax.text(
+        0.02, 0.95, verdict,
+        transform=ax.transAxes, ha="left", va="top",
+        fontsize=10, color=verdict_color,
+        bbox={"facecolor": "#f0f0f0", "alpha": 0.85, "edgecolor": verdict_color},
+    )
+
+    ax.set_xlabel(f"Total PnL ({currency})")
+    ax.set_ylabel("Density (synthetic shape)")
+    ax.legend(loc="upper right", fontsize=9)
+    ax.grid(True, alpha=0.2)
+
+    plt.tight_layout()
+    plt.show()
+
+
 def plot_baselines_comparison(
     *,
     strategy_pnl: float,

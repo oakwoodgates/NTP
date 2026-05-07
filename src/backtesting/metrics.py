@@ -33,7 +33,9 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -370,6 +372,172 @@ def compute_activity_metrics(
 
 
 # ── Convenience wrapper ──────────────────────────────────────────────────────
+
+
+def bootstrap_total_pnl(
+    trade_pnls: list[float],
+    *,
+    n_iterations: int = 10_000,
+    seed: int | None = 42,
+) -> dict[str, float]:
+    """Bootstrap a confidence interval on total PnL.
+
+    Resamples the per-trade PnL list with replacement ``n_iterations``
+    times.  Each iteration sums the resampled trades and records the
+    total.  Returns the distribution as a dict of summary stats.
+
+    Why this matters: a single point estimate of total PnL ($9,510)
+    tells you nothing about whether the strategy is robust or just
+    lucky on this specific historical path.  Bootstrap CI gives you
+    the dispersion: "9,510 with 95% CI [4,200, 14,800]" tells a much
+    more honest story.
+
+    Caveat: trade-return bootstrap **assumes IID trades**.  Real
+    strategies have autocorrelation (winning streaks cluster, drawdowns
+    cluster).  Block-bootstrap is more honest for that — use this as a
+    first-pass dispersion estimate, not a true confidence interval.
+
+    Parameters
+    ----------
+    trade_pnls
+        Per-trade realized PnL (one float per closed trade).
+    n_iterations
+        Number of bootstrap samples.  Default 10,000.
+    seed
+        RNG seed for reproducibility.  Default 42.
+
+    Returns
+    -------
+    dict[str, float]
+        Keys: ``mean``, ``std``, ``pct_5``, ``pct_25``, ``median``,
+        ``pct_75``, ``pct_95``, ``min``, ``max``, ``n_iterations``,
+        ``n_trades``, ``actual_total``.
+
+    """
+    keys = [
+        "mean", "std", "pct_5", "pct_25", "median", "pct_75", "pct_95",
+        "min", "max", "n_iterations", "n_trades", "actual_total",
+    ]
+    if not trade_pnls:
+        return dict.fromkeys(keys, float("nan"))
+
+    arr = np.asarray(trade_pnls, dtype=float)
+    n = len(arr)
+    rng = np.random.default_rng(seed)
+    # Vectorised resample: (n_iterations, n) random indices, then sum.
+    idx = rng.integers(0, n, size=(n_iterations, n))
+    samples = arr[idx].sum(axis=1)
+
+    return {
+        "mean": float(samples.mean()),
+        "std": float(samples.std(ddof=1)) if n_iterations > 1 else 0.0,
+        "pct_5": float(np.percentile(samples, 5)),
+        "pct_25": float(np.percentile(samples, 25)),
+        "median": float(np.median(samples)),
+        "pct_75": float(np.percentile(samples, 75)),
+        "pct_95": float(np.percentile(samples, 95)),
+        "min": float(samples.min()),
+        "max": float(samples.max()),
+        "n_iterations": int(n_iterations),
+        "n_trades": int(n),
+        "actual_total": float(arr.sum()),
+    }
+
+
+def compute_drawdown_periods(
+    balance: pd.Series,
+) -> list[dict[str, Any]]:
+    """Decompose a balance series into discrete underwater periods.
+
+    Walks the equity curve and returns one dict per drawdown — defined
+    as a contiguous stretch where ``balance < running_peak``, ending
+    when balance recovers to a new peak (or at the end of the sample
+    if recovery never happens).
+
+    Each period dict carries:
+
+    * ``start`` (pd.Timestamp) — first underwater bar
+    * ``end`` (pd.Timestamp) — recovery bar (or last bar if open)
+    * ``trough`` (pd.Timestamp) — bar where the deepest drawdown hit
+    * ``depth_abs`` (float) — peak − trough in absolute units
+    * ``depth_pct`` (float) — depth / peak  (always positive)
+    * ``duration_seconds`` (float) — end − start
+    * ``recovered`` (bool) — True if recovered before end of sample
+
+    Parameters
+    ----------
+    balance
+        Event-time balance series indexed by ``pd.DatetimeIndex``.
+        Multiple rows per timestamp are collapsed (last per timestamp).
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        One entry per underwater period, in chronological order.  Empty
+        list if no drawdowns (monotonic-up balance).
+
+    """
+    if balance.empty:
+        return []
+    s = balance.astype(float).groupby(balance.index).last().sort_index()
+    if s.empty:
+        return []
+
+    peak = s.cummax()
+    underwater = s < peak  # bool series
+
+    periods: list[dict[str, Any]] = []
+    in_dd = False
+    start_idx: pd.Timestamp | None = None
+    trough_idx: pd.Timestamp | None = None
+    trough_depth_pct = 0.0
+
+    for ts, is_uw in underwater.items():
+        if is_uw and not in_dd:
+            in_dd = True
+            start_idx = ts
+            trough_idx = ts
+            depth = float(peak.loc[ts] - s.loc[ts])
+            trough_depth_pct = depth / float(peak.loc[ts]) if peak.loc[ts] > 0 else 0.0
+        elif is_uw and in_dd:
+            depth_pct = (
+                float(peak.loc[ts] - s.loc[ts]) / float(peak.loc[ts])
+                if peak.loc[ts] > 0 else 0.0
+            )
+            if depth_pct > trough_depth_pct:
+                trough_depth_pct = depth_pct
+                trough_idx = ts
+        elif not is_uw and in_dd:
+            in_dd = False
+            assert start_idx is not None and trough_idx is not None
+            depth_abs = float(peak.loc[trough_idx] - s.loc[trough_idx])
+            periods.append({
+                "start": start_idx,
+                "end": ts,
+                "trough": trough_idx,
+                "depth_abs": depth_abs,
+                "depth_pct": trough_depth_pct,
+                "duration_seconds": (ts - start_idx).total_seconds(),
+                "recovered": True,
+            })
+            start_idx = trough_idx = None
+            trough_depth_pct = 0.0
+
+    # Open drawdown at end of sample
+    if in_dd and start_idx is not None and trough_idx is not None:
+        end = s.index[-1]
+        depth_abs = float(peak.loc[trough_idx] - s.loc[trough_idx])
+        periods.append({
+            "start": start_idx,
+            "end": end,
+            "trough": trough_idx,
+            "depth_abs": depth_abs,
+            "depth_pct": trough_depth_pct,
+            "duration_seconds": (end - start_idx).total_seconds(),
+            "recovered": False,
+        })
+
+    return periods
 
 
 def compute_all_metrics(

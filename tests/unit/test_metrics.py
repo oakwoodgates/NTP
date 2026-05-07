@@ -14,9 +14,11 @@ import pytest
 
 from src.backtesting.metrics import (
     TradeRecord,
+    bootstrap_total_pnl,
     compute_activity_metrics,
     compute_all_metrics,
     compute_balance_metrics,
+    compute_drawdown_periods,
     compute_trade_metrics,
 )
 
@@ -338,3 +340,121 @@ class TestComputeAllMetrics:
         # And trade count check
         assert out["num_winners"] == 1.0
         assert out["num_losers"] == 1.0
+
+
+# ── bootstrap_total_pnl ─────────────────────────────────────────────────────
+
+
+class TestBootstrapTotalPnL:
+    def test_returns_required_keys(self) -> None:
+        out = bootstrap_total_pnl(
+            [10.0, -5.0, 20.0, -3.0, 15.0],
+            n_iterations=200, seed=1,
+        )
+        expected = {
+            "mean", "std", "pct_5", "pct_25", "median", "pct_75", "pct_95",
+            "min", "max", "n_iterations", "n_trades", "actual_total",
+        }
+        assert expected.issubset(out.keys())
+
+    def test_actual_total_matches_input_sum(self) -> None:
+        pnls = [10.0, -5.0, 20.0, -3.0, 15.0]
+        out = bootstrap_total_pnl(pnls, n_iterations=100, seed=1)
+        assert out["actual_total"] == pytest.approx(sum(pnls))
+
+    def test_n_trades_matches_input_length(self) -> None:
+        pnls = [1.0, 2.0, 3.0, 4.0]
+        out = bootstrap_total_pnl(pnls, n_iterations=100, seed=1)
+        assert out["n_trades"] == 4
+
+    def test_seed_determinism(self) -> None:
+        pnls = [10.0, -5.0, 20.0, -3.0, 15.0, 7.0, -2.0]
+        a = bootstrap_total_pnl(pnls, n_iterations=500, seed=42)
+        b = bootstrap_total_pnl(pnls, n_iterations=500, seed=42)
+        assert a["mean"] == b["mean"]
+        assert a["pct_5"] == b["pct_5"]
+        assert a["pct_95"] == b["pct_95"]
+
+    def test_percentiles_ordered(self) -> None:
+        pnls = [10.0, -5.0, 20.0, -3.0, 15.0, 7.0, -2.0, 8.0]
+        out = bootstrap_total_pnl(pnls, n_iterations=2000, seed=1)
+        assert out["pct_5"] <= out["pct_25"] <= out["median"]
+        assert out["median"] <= out["pct_75"] <= out["pct_95"]
+
+    def test_mean_converges_to_actual_total(self) -> None:
+        # With many iterations, the bootstrap mean should approach the
+        # actual total (since each resample's mean PnL ≈ true mean PnL,
+        # times n trades).
+        pnls = [10.0, -5.0, 20.0, -3.0, 15.0]
+        out = bootstrap_total_pnl(pnls, n_iterations=10_000, seed=1)
+        # Within 5% of actual total
+        assert abs(out["mean"] - out["actual_total"]) / abs(out["actual_total"]) < 0.05
+
+    def test_empty_returns_all_nan(self) -> None:
+        out = bootstrap_total_pnl([], n_iterations=100)
+        assert all(math.isnan(v) for v in out.values())
+
+
+# ── compute_drawdown_periods ────────────────────────────────────────────────
+
+
+class TestComputeDrawdownPeriods:
+    def test_no_drawdown_returns_empty(self) -> None:
+        idx = pd.to_datetime(["2025-01-01", "2025-02-01", "2025-03-01"], utc=True)
+        s = pd.Series([1000.0, 1100.0, 1200.0], index=idx)
+        assert compute_drawdown_periods(s) == []
+
+    def test_empty_series(self) -> None:
+        assert compute_drawdown_periods(pd.Series(dtype=float)) == []
+
+    def test_single_drawdown_recovered(self) -> None:
+        # 1000 → 1100 (peak) → 900 (trough) → 1200 (recovery, new peak)
+        idx = pd.to_datetime(
+            ["2025-01-01", "2025-01-15", "2025-02-01", "2025-02-15"], utc=True,
+        )
+        s = pd.Series([1000.0, 1100.0, 900.0, 1200.0], index=idx)
+        periods = compute_drawdown_periods(s)
+        assert len(periods) == 1
+        p = periods[0]
+        assert p["start"] == idx[2]    # first underwater bar
+        assert p["end"] == idx[3]      # recovery bar
+        assert p["trough"] == idx[2]   # deepest
+        assert p["recovered"] is True
+        assert p["depth_pct"] == pytest.approx(200.0 / 1100.0)
+        assert p["depth_abs"] == pytest.approx(200.0)
+
+    def test_open_drawdown_at_end(self) -> None:
+        # Peak then under, no recovery
+        idx = pd.to_datetime(["2025-01-01", "2025-02-01", "2025-03-01"], utc=True)
+        s = pd.Series([1000.0, 1100.0, 800.0], index=idx)
+        periods = compute_drawdown_periods(s)
+        assert len(periods) == 1
+        assert periods[0]["recovered"] is False
+        assert periods[0]["end"] == idx[-1]
+
+    def test_multiple_drawdowns(self) -> None:
+        # Two distinct drawdowns separated by recovery to new peak.
+        idx = pd.to_datetime(
+            ["2025-01-01", "2025-02-01", "2025-03-01", "2025-04-01",
+             "2025-05-01", "2025-06-01"],
+            utc=True,
+        )
+        # 1000 → peak 1500 → 1200 (DD1) → 2000 (recovery) → 1800 (DD2) → 2500 (recovery)
+        s = pd.Series([1000.0, 1500.0, 1200.0, 2000.0, 1800.0, 2500.0], index=idx)
+        periods = compute_drawdown_periods(s)
+        assert len(periods) == 2
+        assert all(p["recovered"] for p in periods)
+
+    def test_trough_is_deepest_point(self) -> None:
+        # 1000 → peak 2000 → 1500 → 1200 (trough) → 1700 → 2100 (recovery)
+        idx = pd.to_datetime(
+            ["2025-01-01", "2025-02-01", "2025-03-01", "2025-04-01",
+             "2025-05-01", "2025-06-01"],
+            utc=True,
+        )
+        s = pd.Series([1000.0, 2000.0, 1500.0, 1200.0, 1700.0, 2100.0], index=idx)
+        periods = compute_drawdown_periods(s)
+        assert len(periods) == 1
+        assert periods[0]["trough"] == idx[3]
+        assert periods[0]["depth_abs"] == pytest.approx(800.0)
+        assert periods[0]["depth_pct"] == pytest.approx(800.0 / 2000.0)
