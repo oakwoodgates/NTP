@@ -27,6 +27,10 @@ from src.actors.account_alive import (
     AccountAliveMonitor,
     AccountAliveMonitorConfig,
 )
+from src.backtesting.metrics import (
+    TradeRecord,
+    compute_all_metrics,
+)
 from src.core.liquidation import (
     TOPIC_ACCOUNT_LIQUIDATED,
     TOPIC_POSITION_LIQUIDATED,
@@ -50,6 +54,16 @@ if TYPE_CHECKING:
 
 # ── Default sweep output directory ───────────────────────────────────────────
 _DEFAULT_SWEEP_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "sweeps"
+
+
+# ── Sweep parquet schema version ─────────────────────────────────────────────
+# Bumped whenever sweep result columns are added or removed.
+#
+#   v1 — original (general + PnL + returns analyzer dump)
+#   v2 — returns analyzer columns dropped; see docs/ANALYZER_RETURNS_CAVEAT.md
+#
+# Loaders should check ``_schema_version`` and adapt or warn on mismatch.
+SWEEP_SCHEMA_VERSION = 2
 
 
 # ── Rust LogGuard singleton ──────────────────────────────────────────────────
@@ -399,6 +413,43 @@ def _instrument_taker_fee(instrument: Instrument) -> Decimal:
     return Decimal(str(raw))
 
 
+def _trade_records_from_positions(positions: list[Any]) -> list[TradeRecord]:
+    """Extract closed trades into the metric module's plain-data record.
+
+    Open positions (no ``ts_closed``) are skipped — they have no realized
+    PnL yet, and metrics must be deterministic against closed trades only.
+    Positions with ``realized_pnl=None`` are skipped for the same reason.
+    """
+    out: list[TradeRecord] = []
+    for p in positions:
+        if not p.is_closed:
+            continue
+        if p.realized_pnl is None:
+            continue
+        side_name = "LONG" if p.entry.name == "BUY" else "SHORT"
+        out.append(
+            TradeRecord(
+                pnl=float(p.realized_pnl.as_decimal()),
+                ts_opened_ns=int(p.ts_opened),
+                ts_closed_ns=int(p.ts_closed),
+                side=side_name,
+            ),
+        )
+    return out
+
+
+def _bar_interval_ns_from_bars(bars: list[Bar]) -> int | None:
+    """Infer bar interval from the first two bars in the data.
+
+    Used to convert raw nanosecond durations into "bars" in the metrics
+    output.  Returns ``None`` for single-bar or empty inputs — the
+    metrics module then falls back to seconds.
+    """
+    if len(bars) < 2:
+        return None
+    return int(bars[1].ts_event - bars[0].ts_event)
+
+
 def _sum_commissions(engine: BacktestEngine, instrument: Instrument) -> Decimal:
     """Sum per-position commission across all closed + open positions.
 
@@ -528,6 +579,10 @@ def run_single_backtest(
         if score_from_ns is not None:
             pos = [p for p in pos if p.ts_opened >= score_from_ns]
 
+        # Pull account report unconditionally — needed by both the metrics
+        # block (balance series) and the liquidation-detection block.
+        acct_report = eng.trader.generate_account_report(venue)
+
         if acct is None:
             row["error"] = "no account"
             row.update(
@@ -539,10 +594,6 @@ def run_single_backtest(
             a.calculate_statistics(acct, pos)
             currency = instrument.settlement_currency
             balance = float(acct.balance_total(currency))
-
-            # Pull account report once — used for both score_capital
-            # lookup and liquidation detection below.
-            acct_report = eng.trader.generate_account_report(venue)
 
             # When scoring a subset of positions, derive PnL from
             # those positions — not the account (which includes warmup).
@@ -595,16 +646,57 @@ def run_single_backtest(
             else:
                 row["min_balance"] = balance
 
+            # Pull only the trustworthy analyzer stats into the sweep row.
+            # The Returns section (Sharpe, Sortino, Volatility, Returns
+            # Profit Factor, Avg Return, Risk Return Ratio) is deliberately
+            # NOT persisted — it's derived from a zero-padded daily returns
+            # series that biases all returns-derived stats for any strategy
+            # that doesn't trade every day.  See
+            # docs/ANALYZER_RETURNS_CAVEAT.md for the analysis and the list
+            # of stats that will return when upstream lands the fix.
             for stats_name, stats_fn in [
                 ("general", a.get_performance_stats_general),
                 ("PnL", lambda: a.get_performance_stats_pnls(currency)),
-                ("returns", a.get_performance_stats_returns),
             ]:
                 try:
                     for k, v in stats_fn().items():
                         row[k] = v
                 except Exception as e:
                     print(f"  Warning: {stats_name} stats failed for {params}: {e}")
+
+        # ── Trustworthy v2 metrics (see src/backtesting/metrics.py) ──
+        # Computed from closed positions + event-time balance series.
+        # Independent of the broken NT returns-series methodology.
+        # Runs in both the no-account and normal paths so the schema is
+        # uniform across rows even when a backtest produces no fills.
+        try:
+            trades = _trade_records_from_positions(pos)
+            bar_interval_ns = _bar_interval_ns_from_bars(bars)
+            balance_series = (
+                acct_report["total"].astype(float)
+                if not acct_report.empty
+                else pd.Series(dtype=float)
+            )
+            fees_so_far = (
+                float(_sum_commissions(eng, instrument))
+                if acct is not None
+                else 0.0
+            )
+            row.update(
+                compute_all_metrics(
+                    trades,
+                    balance_series,
+                    starting_capital=float(starting_capital),
+                    total_bars=len(bars),
+                    bar_interval_ns=bar_interval_ns,
+                    first_bar_ts_ns=int(bars[0].ts_event) if bars else None,
+                    last_bar_ts_ns=int(bars[-1].ts_event) if bars else None,
+                    total_fees=fees_so_far,
+                    total_pnl=float(row.get("total_pnl", float("nan"))),
+                ),
+            )
+        except Exception as e:
+            print(f"  Warning: v2 metrics failed for {params}: {e}")
 
     except Exception as e:
         row["error"] = str(e)
@@ -623,6 +715,16 @@ def run_single_backtest(
             else None
         )
         row["denied_post_halt"] = liq_state.denied_post_halt
+
+        # Consolidated single-flag indicator — True if EITHER the
+        # account-level alive monitor halted OR balance hit zero
+        # post-hoc (caught via min_balance check, useful when the
+        # liquidation simulator was disabled).  This is the column to
+        # filter on in compare_sweeps / validate_strategy when ranking.
+        row["liquidated"] = bool(
+            row.get("error") == "liquidated"
+            or row.get("liquidated_account", False),
+        )
 
         # Liquidation-stop slippage: trigger vs actual fill, as % of entry.
         # NaN when no liquidations fired (most rows).  Average and max
@@ -741,13 +843,25 @@ def run_sweep(
     t0 = time.monotonic()
 
     for i, params in enumerate(param_combos, 1):
+        # Separate strategy params from metadata.  Any key starting with
+        # "_" is metadata that follows the row into the parquet but is
+        # NOT passed to the user's strategy_factory.  This lets users tag
+        # rows (e.g. ``_kind: "spotlight"``, ``_note: "Fib pair"``) without
+        # the tags leaking into strategy construction.
+        strategy_params = {k: v for k, v in params.items() if not k.startswith("_")}
+
+        # Bind strategy_params at lambda-definition time so closure capture
+        # picks up *this* iteration's value, not the loop variable.
+        def _add(eng: BacktestEngine, p: dict[str, Any] = strategy_params) -> None:
+            strategy_factory(eng, p)
+
         row = run_single_backtest(
             venue=venue,
             instrument=instrument,
             bars=bars,
             starting_capital=starting_capital,
             params=params,
-            add_strategy=lambda eng, p=params: strategy_factory(eng, p),  # type: ignore[misc]
+            add_strategy=_add,
             leverage=leverage,
             log_level=log_level,
             liquidation=liquidation,
@@ -761,9 +875,12 @@ def run_sweep(
             pnl_pct = row.get("total_pnl_pct", float("nan"))
             npos = row.get("num_positions", 0)
             err = f"  !! {row['error']}" if row.get("error") else ""
-            param_str = ", ".join(f"{k}={v}" for k, v in params.items())
+            # Display strategy params; flag spotlight/etc rows visibly.
+            param_str = ", ".join(f"{k}={v}" for k, v in strategy_params.items())
+            kind = params.get("_kind")
+            kind_tag = f" [{kind}]" if kind else ""
             print(
-                f"  [{i}/{total}] {param_str}  "
+                f"  [{i}/{total}]{kind_tag} {param_str}  "
                 f"PnL={pnl:>10.2f} PnL%={pnl_pct:>7.2f}%"
                 f"  positions={npos}{err}"
             )
@@ -785,6 +902,10 @@ def run_sweep(
     df.insert(4, "_data_start", data_start.isoformat())
     df.insert(5, "_data_end", data_end.isoformat())
     df.insert(6, "_swept_at", swept_at.isoformat())
+    # Schema version — bump when columns added/removed.
+    #   v1: original (general + PnL + returns analyzer dump)
+    #   v2: returns analyzer columns dropped (see ANALYZER_RETURNS_CAVEAT.md)
+    df.insert(7, "_schema_version", SWEEP_SCHEMA_VERSION)
 
     # ── Persist to Parquet ────────────────────────────────────────────────
     # Deterministic name: re-running the same strategy+instrument+interval
@@ -845,6 +966,7 @@ def load_sweeps(
         return {}
 
     sweeps: dict[str, pd.DataFrame] = {}
+    schema_warnings: list[str] = []
     for f in files:
         df = pd.read_parquet(f)
 
@@ -856,6 +978,20 @@ def load_sweeps(
         if bar_interval and df["_bar_interval"].iloc[0] != bar_interval:
             continue
 
+        # Schema-version check.  Old files predating ``_schema_version``
+        # are treated as v1 (still loadable but flagged).
+        file_version = (
+            int(df["_schema_version"].iloc[0])
+            if "_schema_version" in df.columns
+            else 1
+        )
+        if file_version != SWEEP_SCHEMA_VERSION:
+            schema_warnings.append(
+                f"  {f.name}: schema v{file_version} "
+                f"(current is v{SWEEP_SCHEMA_VERSION}) — "
+                f"may contain stale columns; re-run sweep to refresh.",
+            )
+
         # Build a readable label from metadata
         strat = df["_strategy"].iloc[0]
         inst = df["_instrument_id"].iloc[0]
@@ -864,6 +1000,10 @@ def load_sweeps(
         sweeps[label] = df
 
     print(f"Loaded {len(sweeps)} sweep(s) from {sweep_path}")
+    if schema_warnings:
+        print("⚠ Some sweeps were loaded with an older schema version:")
+        for warning in schema_warnings:
+            print(warning)
     return sweeps
 
 

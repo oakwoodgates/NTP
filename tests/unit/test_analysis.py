@@ -15,7 +15,9 @@ from src.backtesting.analysis import (
     _compute_window_stats,
     _positions_to_pnl_df,
     performance_by_regime,
+    performance_by_year,
     rolling_performance,
+    run_alt_instrument_check,
     run_fee_sweep,
     tag_regimes,
 )
@@ -312,7 +314,145 @@ class TestPerformanceByRegime:
         assert df.iloc[1]["regime"] == "TRENDING"  # 1 position
 
 
+# ── performance_by_year ──────────────────────────────────────────────────────
+
+
+class TestPerformanceByYear:
+    def test_empty_positions(self) -> None:
+        df = performance_by_year([])
+        assert df.empty
+        # Schema check on empty result
+        expected_cols = {
+            "year", "pnl", "pnl_pct", "num_positions", "win_rate",
+            "avg_winner", "avg_loser", "profit_factor",
+            "avg_duration_hours", "largest_win", "largest_loss",
+        }
+        assert expected_cols.issubset(set(df.columns) | {"year"})
+
+    def test_groups_by_close_year(self) -> None:
+        # _BASE_NS = 2023-01-01 00:00 UTC.  Day offset 365 lands in 2024.
+        positions = [
+            _make_pos(0, 5, "100"),    # closes 2023-01-06
+            _make_pos(10, 15, "-50"),  # closes 2023-01-16
+            _make_pos(365, 370, "200"),  # closes 2024-01-...
+        ]
+        df = performance_by_year(positions, starting_capital=10_000)
+        assert list(df.index) == [2023, 2024]
+
+    def test_pnl_aggregation_per_year(self) -> None:
+        positions = [
+            _make_pos(0, 5, "100"),     # 2023
+            _make_pos(10, 15, "-30"),   # 2023
+            _make_pos(365, 370, "200"), # 2024
+        ]
+        df = performance_by_year(positions, starting_capital=10_000)
+        assert df.loc[2023, "pnl"] == 70.0    # 100 - 30
+        assert df.loc[2024, "pnl"] == 200.0
+        assert df.loc[2023, "num_positions"] == 2
+        assert df.loc[2024, "num_positions"] == 1
+
+    def test_largest_win_and_loss_per_year(self) -> None:
+        positions = [
+            _make_pos(0, 5, "100"),
+            _make_pos(10, 15, "300"),  # largest win
+            _make_pos(20, 25, "-50"),
+            _make_pos(30, 35, "-200"),  # largest loss
+        ]
+        df = performance_by_year(positions, starting_capital=10_000)
+        row = df.loc[2023]
+        assert row["largest_win"] == 300.0
+        assert row["largest_loss"] == -200.0
+
+    def test_pnl_pct_uses_constant_starting_capital(self) -> None:
+        positions = [_make_pos(0, 5, "1000")]
+        df = performance_by_year(positions, starting_capital=10_000)
+        assert df.loc[2023, "pnl_pct"] == 10.0  # 1000 / 10000 * 100
+
+
 # ── run_fee_sweep ────────────────────────────────────────────────────────────
+
+
+class TestRunAltInstrumentCheck:
+    """Smoke tests — heavy NT mocking, just checks the loop + frame shape."""
+
+    def _mock_backtest_result(self, **overrides: Any) -> dict[str, Any]:
+        base: dict[str, Any] = {
+            "total_pnl": 500.0,
+            "total_pnl_pct": 5.0,
+            "num_positions": 50,
+            "final_balance": 10_500.0,
+            "min_balance": 9_800.0,
+            "error": "",
+            "liquidated": False,
+        }
+        base.update(overrides)
+        return base
+
+    def _stub_instrument(self, instrument_id: str) -> Any:
+        class _Stub:
+            id = instrument_id
+        return _Stub()
+
+    @patch("src.backtesting.engine.run_single_backtest")
+    def test_runs_each_instrument(self, mock_backtest: Any) -> None:
+        # Fresh dict per call so the function can mutate without bleeding
+        # state across rows.
+        mock_backtest.side_effect = lambda **kw: self._mock_backtest_result()
+        instruments = [
+            {"label": "BTC", "venue": "V", "instrument": self._stub_instrument("BTC.X"), "bars": []},
+            {"label": "ETH", "venue": "V", "instrument": self._stub_instrument("ETH.X"), "bars": []},
+            {"label": "SOL", "venue": "V", "instrument": self._stub_instrument("SOL.X"), "bars": []},
+        ]
+        df = run_alt_instrument_check(
+            instruments=instruments,
+            params={"fast": 10, "slow": 40},
+            strategy_factory=lambda eng, p: None,
+            verbose=False,
+        )
+        assert mock_backtest.call_count == 3
+        assert list(df["label"]) == ["BTC", "ETH", "SOL"]
+        assert list(df["instrument_id"]) == ["BTC.X", "ETH.X", "SOL.X"]
+        # Identity columns front-loaded
+        assert df.columns[0] == "label"
+        assert df.columns[1] == "instrument_id"
+
+    @patch("src.backtesting.engine.run_single_backtest")
+    def test_per_instrument_starting_capital(self, mock_backtest: Any) -> None:
+        mock_backtest.side_effect = lambda **kw: self._mock_backtest_result()
+        instruments = [
+            {
+                "label": "BTC", "venue": "V",
+                "instrument": self._stub_instrument("BTC.X"),
+                "bars": [], "starting_capital": 10_000,
+            },
+            {
+                "label": "ETH", "venue": "V",
+                "instrument": self._stub_instrument("ETH.X"),
+                "bars": [], "starting_capital": 5_000,
+            },
+        ]
+        run_alt_instrument_check(
+            instruments=instruments,
+            params={"fast": 10},
+            strategy_factory=lambda eng, p: None,
+            verbose=False,
+        )
+        # Inspect the call args of run_single_backtest
+        call1_kwargs = mock_backtest.call_args_list[0].kwargs
+        call2_kwargs = mock_backtest.call_args_list[1].kwargs
+        assert call1_kwargs["starting_capital"] == 10_000
+        assert call2_kwargs["starting_capital"] == 5_000
+
+    @patch("src.backtesting.engine.run_single_backtest")
+    def test_empty_list(self, mock_backtest: Any) -> None:
+        df = run_alt_instrument_check(
+            instruments=[],
+            params={},
+            strategy_factory=lambda eng, p: None,
+            verbose=False,
+        )
+        assert df.empty
+        mock_backtest.assert_not_called()
 
 
 class TestRunFeeSweep:
