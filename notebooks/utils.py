@@ -154,6 +154,111 @@ def save_notebook_html(
     return dest
 
 
+def save_notebook_snapshot(
+    notebook_filename: str,
+    result_name: str,
+    *,
+    save_on_run_all: bool = True,
+    autosave_wait_secs: float = 3.0,
+    freshness_threshold_secs: float = 30.0,
+    category: str = "backtest",
+) -> Path | None:
+    """One-call wrapper around save_notebook + save_notebook_html with smart autosave handling.
+
+    Designed to live in the last cell of a backtest notebook so a single
+    "Run All" produces a complete snapshot without races.
+
+    Three behaviours, picked automatically based on the notebook's
+    on-disk freshness and the ``save_on_run_all`` flag:
+
+    1. **Active wait for autosave** — polls the notebook file's mtime
+       and breaks as soon as the editor's autosave fires (typically
+       ~1s with VS Code's ``files.autoSave: afterDelay`` default).
+       Without this, the cell immediately before the save cell would
+       be missing from the snapshot — autosave hasn't flushed it yet.
+    2. **Fresh file** (mtime within ``freshness_threshold_secs``) →
+       save unconditionally (autosave on, or user just Ctrl+S'd).
+    3. **Stale file** + ``save_on_run_all=True`` → save with a warning.
+    4. **Stale file** + ``save_on_run_all=False`` → skip with a help
+       message ("Ctrl+S, then Shift+Enter on this cell").
+
+    Parameters
+    ----------
+    notebook_filename
+        Source notebook filename (e.g. ``"ema_cross.ipynb"``).  Resolved
+        relative to the kernel's current working directory.
+    result_name
+        Basename for the snapshot files (no extension, no timestamp).
+        A timestamp is appended by the underlying helpers.
+    save_on_run_all
+        If True (default), save even when the on-disk file is stale —
+        warn that the snapshot may be incomplete.  If False, skip the
+        save with a manual-trigger reminder.  Manual re-run after
+        Ctrl+S always works regardless of this flag (Ctrl+S refreshes
+        the file).
+    autosave_wait_secs
+        Maximum seconds to wait for the editor's autosave to fire.
+        Default 3.0 — ample for VS Code's 1000ms debounce default.
+    freshness_threshold_secs
+        On-disk mtime older than this is considered "stale".  Default 30.
+    category
+        Subdirectory under ``reports/notebooks/`` and ``reports/html/``.
+        Default ``"backtest"``.
+
+    Returns
+    -------
+    Path | None
+        Path to the saved .ipynb (HTML is at the parallel path).
+        ``None`` when the save was skipped.
+
+    """
+    import os
+    import time
+
+    if not os.path.exists(notebook_filename):
+        print(f"⚠ Notebook file not found: {notebook_filename}")
+        print("  (CWD: {})".format(os.getcwd()))
+        return None
+
+    # ── 1. Active wait for editor autosave to flush prior cells ─────
+    initial_mtime = os.path.getmtime(notebook_filename)
+    deadline = time.time() + autosave_wait_secs
+    while time.time() < deadline:
+        if os.path.getmtime(notebook_filename) > initial_mtime:
+            break  # autosave fired
+        time.sleep(0.1)
+
+    # ── 2. Decide based on freshness + flag ─────────────────────────
+    file_age_secs = time.time() - os.path.getmtime(notebook_filename)
+    fresh = file_age_secs <= freshness_threshold_secs
+
+    if not fresh:
+        if save_on_run_all:
+            print(
+                f"⚠ Notebook on disk is {file_age_secs:.0f}s old — "
+                "snapshot may be stale.",
+            )
+            print(
+                "  Enable editor autosave (see notebooks/README.md) "
+                "for a complete snapshot.",
+            )
+            # Fall through to save.
+        else:
+            print(
+                f"⏭ Save skipped — save_on_run_all=False and on-disk "
+                f"file is {file_age_secs:.0f}s old.",
+            )
+            print(
+                "To snapshot:  1. Ctrl+S    2. Shift+Enter on this cell",
+            )
+            return None
+
+    # ── 3. Save .ipynb + .html ───────────────────────────────────────
+    nb_path = save_notebook(notebook_filename, result_name, category=category)
+    save_notebook_html(notebook_filename, result_name, category=category)
+    return nb_path
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Backtest setup helpers
 # ─────────────────────────────────────────────────────────────────────────────

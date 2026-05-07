@@ -28,6 +28,7 @@ from utils import (  # type: ignore[import-not-found] # noqa: E402
     print_baselines_verdict,
     print_liquidation_resolution,
     print_sweep_liquidation_diagnostics,
+    save_notebook_snapshot,
 )
 
 # ── Mock objects ─────────────────────────────────────────────────────────────
@@ -362,3 +363,149 @@ class TestSweepLiquidationDiagnostics:
         out = buf.getvalue()
         assert "Fee model cross-check" in out
         assert "Ratio actual/expected" in out
+
+
+# ── save_notebook_snapshot ──────────────────────────────────────────────────
+
+
+def _stub_savers(monkeypatch: pytest.MonkeyPatch, return_path: Path) -> dict[str, bool]:
+    """Replace save_notebook + save_notebook_html with no-op stubs.
+
+    Returns a dict tracking whether each was called.  Both stubs return
+    *return_path* (callers usually pass the test's nb_path).
+    """
+    import utils as _utils
+    called: dict[str, bool] = {"save": False, "html": False}
+
+    def stub_save(*_args: object, **_kwargs: object) -> Path:
+        called["save"] = True
+        return return_path
+
+    def stub_html(*_args: object, **_kwargs: object) -> Path:
+        called["html"] = True
+        return return_path
+
+    monkeypatch.setattr(_utils, "save_notebook", stub_save)
+    monkeypatch.setattr(_utils, "save_notebook_html", stub_html)
+    return called
+
+
+class TestSaveNotebookSnapshotMissingFile:
+    def test_returns_none_with_message(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        result = save_notebook_snapshot(
+            str(tmp_path / "does_not_exist.ipynb"),
+            "test_result",
+            save_on_run_all=True,
+        )
+        assert result is None
+        captured = capsys.readouterr()
+        assert "not found" in captured.out
+
+
+class TestSaveNotebookSnapshotActiveWait:
+    """Verifies the active wait exits as soon as the file mtime changes."""
+
+    def test_wait_breaks_on_mtime_change(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Background thread updates the file mtime; wait should exit early."""
+        import os
+        import threading
+        import time as _time
+
+        nb_path = tmp_path / "fake.ipynb"
+        nb_path.write_text("{}", encoding="utf-8")
+        os.utime(nb_path, None)  # set mtime to NOW so freshness passes
+
+        called = _stub_savers(monkeypatch, nb_path)
+
+        # Bump the mtime after a short delay (simulates editor autosave).
+        def bump() -> None:
+            _time.sleep(0.4)
+            os.utime(nb_path, None)
+
+        t = threading.Thread(target=bump)
+        t.start()
+
+        start = _time.time()
+        result = save_notebook_snapshot(
+            str(nb_path), "test_result",
+            save_on_run_all=True, autosave_wait_secs=3.0,
+        )
+        elapsed = _time.time() - start
+        t.join()
+
+        assert result is not None
+        # Should have exited the wait shortly after the mtime bump.
+        assert 0.3 < elapsed < 1.5
+        assert called["save"] and called["html"]
+
+
+class TestSaveNotebookSnapshotFreshFile:
+    def test_fresh_file_saves(
+        self, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        nb_path = tmp_path / "fresh.ipynb"
+        nb_path.write_text("{}", encoding="utf-8")
+        called = _stub_savers(monkeypatch, nb_path)
+
+        result = save_notebook_snapshot(
+            str(nb_path), "test_result",
+            save_on_run_all=True, autosave_wait_secs=0.3,
+        )
+        assert result is not None
+        assert called["save"]
+        assert called["html"]
+        captured = capsys.readouterr()
+        assert "stale" not in captured.out  # fresh → no warning
+
+
+class TestSaveNotebookSnapshotStaleFile:
+    def _make_stale(self, tmp_path: Path) -> Path:
+        import os
+        import time as _time
+        nb_path = tmp_path / "stale.ipynb"
+        nb_path.write_text("{}", encoding="utf-8")
+        old = _time.time() - 60  # 60s ago — past the 30s freshness threshold
+        os.utime(nb_path, (old, old))
+        return nb_path
+
+    def test_stale_with_flag_true_saves_and_warns(
+        self, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        nb_path = self._make_stale(tmp_path)
+        called = _stub_savers(monkeypatch, nb_path)
+
+        result = save_notebook_snapshot(
+            str(nb_path), "test_result",
+            save_on_run_all=True, autosave_wait_secs=0.3,
+        )
+        assert result is not None
+        assert called["save"] and called["html"]
+        captured = capsys.readouterr()
+        assert "stale" in captured.out
+
+    def test_stale_with_flag_false_skips(
+        self, tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        nb_path = self._make_stale(tmp_path)
+        called = _stub_savers(monkeypatch, nb_path)
+
+        result = save_notebook_snapshot(
+            str(nb_path), "test_result",
+            save_on_run_all=False, autosave_wait_secs=0.3,
+        )
+        assert result is None
+        assert not called["save"]
+        assert not called["html"]
+        captured = capsys.readouterr()
+        assert "skipped" in captured.out.lower()
+        assert "Ctrl+S" in captured.out
