@@ -31,7 +31,9 @@ if str(_NOTEBOOKS_DIR) not in sys.path:
 
 from utils import (  # type: ignore[import-not-found] # noqa: E402
     baselines_for_strategy,
+    build_verdict_matrix,
     load_sweeps_filtered,
+    load_verdict_jsons,
     print_baselines_verdict,
     print_liquidation_resolution,
     print_sweep_liquidation_diagnostics,
@@ -966,6 +968,129 @@ class TestValidationVerdictBootstrap:
         assert "[100, 2,000]" in out
 
 
+class TestValidationVerdictBootstrapCapitalThreshold:
+    """Capital-relative tail check: ✅ requires pct_5 ≥ 10% of capital."""
+
+    def test_high_prob_with_weak_tail_downgrades_to_warn(self) -> None:
+        # P(profit)=95% AND pct_5=$50 — but capital is $1000, so
+        # pct_5 < 10% threshold ($100) → ⚠️ not ✅
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                bootstrap_prob_positive=95.0, n_trades=23,
+                bootstrap_p5=50.0, bootstrap_p95=26000.0,
+                starting_capital=1000.0,
+            )
+        out = buf.getvalue()
+        assert "⚠️ Bootstrap" in out
+        assert "pct_5 < 100" in out  # threshold = 10% × 1000 = 100
+        assert "10% of capital" in out
+
+    def test_high_prob_with_strong_tail_stays_green(self) -> None:
+        # P(profit)=95% AND pct_5=$200 — above 10% × $1000 = $100 → ✅
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                bootstrap_prob_positive=95.0, n_trades=23,
+                bootstrap_p5=200.0, bootstrap_p95=26000.0,
+                starting_capital=1000.0,
+            )
+        out = buf.getvalue()
+        assert "✅ Bootstrap" in out
+        assert "pct_5 <" not in out  # no weak-tail annotation
+
+    def test_no_capital_falls_back_to_legacy_behaviour(self) -> None:
+        # starting_capital=None — capital-relative check is skipped,
+        # so ✅ is determined by P(profit) alone.
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                bootstrap_prob_positive=95.0, n_trades=23,
+                bootstrap_p5=50.0, bootstrap_p95=26000.0,
+                # starting_capital not provided
+            )
+        out = buf.getvalue()
+        assert "✅ Bootstrap" in out  # legacy behaviour
+        assert "10% of capital" not in out
+
+    def test_low_prob_stays_red_regardless_of_capital(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                bootstrap_prob_positive=50.0, n_trades=23,
+                bootstrap_p5=10000.0, bootstrap_p95=20000.0,
+                starting_capital=1000.0,
+            )
+        out = buf.getvalue()
+        assert "🚩 Bootstrap" in out
+
+
+class TestValidationVerdictReturnAndPersist:
+    def test_returns_dict_with_required_keys(self) -> None:
+        result = print_validation_verdict(
+            instrument_id="BTC.HL", bar_interval="1h",
+            params={"fast": 10, "slow": 20},
+        )
+        assert result is not None
+        for key in (
+            "_schema_version", "instrument_id", "bar_interval", "params",
+            "checks", "counts", "verdict", "timestamp",
+        ):
+            assert key in result, f"Missing key: {key}"
+
+    def test_persists_json_when_path_provided(self, tmp_path: Path) -> None:
+        target = tmp_path / "verdict.json"
+        result = print_validation_verdict(
+            instrument_id="BTC.HL", bar_interval="1h",
+            params={"fast": 10, "slow": 20},
+            plateau_score=1.00,
+            verdict_path=target,
+        )
+        assert target.exists()
+        import json
+        loaded = json.loads(target.read_text(encoding="utf-8"))
+        assert loaded["instrument_id"] == "BTC.HL"
+        assert loaded["params"] == {"fast": 10, "slow": 20}
+        assert loaded["_schema_version"] == 1
+        # Returned dict matches written JSON
+        assert loaded["instrument_id"] == result["instrument_id"]
+
+    def test_creates_parent_directory(self, tmp_path: Path) -> None:
+        target = tmp_path / "deep" / "nested" / "verdict.json"
+        print_validation_verdict(
+            instrument_id="BTC.HL", bar_interval="1h", params={},
+            verdict_path=target,
+        )
+        assert target.exists()
+
+    def test_no_path_no_file(self, tmp_path: Path) -> None:
+        # Sanity: when verdict_path is None, no file is created
+        # anywhere in tmp_path (even though the function still returns
+        # the dict).
+        result = print_validation_verdict(
+            instrument_id="BTC.HL", bar_interval="1h", params={},
+        )
+        assert result is not None
+        assert list(tmp_path.iterdir()) == []
+
+    def test_check_outcomes_are_normalised(self) -> None:
+        result = print_validation_verdict(
+            instrument_id="BTC.HL", bar_interval="1h", params={},
+            plateau_score=1.00,
+            walkforward_results=_make_walkforward_df(profitable=1, total=4),
+            yearly_results=_make_yearly_df({2020: 800.0, 2021: 200.0}),
+        )
+        # Each check has an "outcome" string in {"pass", "warn", "fail"}
+        for check in result["checks"]:
+            assert check["outcome"] in {"pass", "warn", "fail"}
+        # And the verdict's outcome string is one of the same set
+        assert result["verdict"]["outcome"] in {"pass", "warn", "fail"}
+
+
 class TestValidationVerdictFee:
     def test_no_breakeven_is_red(self) -> None:
         buf = io.StringIO()
@@ -1263,3 +1388,139 @@ class TestValidationVerdictNoneSkipsCheck:
         assert "ETH-USD-PERP.HYPERLIQUID" in out
         assert "4h" in out
         assert "fast=5, slow=30" in out
+
+
+# ── load_verdict_jsons + build_verdict_matrix ───────────────────────────────
+
+
+def _write_fake_verdict(
+    path: Path, *,
+    instrument: str = "BTC.HL",
+    interval: str = "1d",
+    params: dict[str, Any] | None = None,
+    is_override: bool = False,
+    timestamp: str = "2026-05-07T22:55:00+00:00",
+    verdict_icon: str = "🚩",
+) -> None:
+    import json
+    params = params or {"fast": 10, "slow": 20}
+    data = {
+        "_schema_version": 1,
+        "instrument_id": instrument,
+        "bar_interval": interval,
+        "params": params,
+        "starting_capital": 1000,
+        "checks": [
+            {"icon": "✅", "name": "Plateau", "detail": "x", "outcome": "pass"},
+            {"icon": "⚠️", "name": "Walk-forward", "detail": "x", "outcome": "warn"},
+            {"icon": "🚩", "name": "Param stability", "detail": "x", "outcome": "fail"},
+        ],
+        "counts": {"pass": 1, "warn": 1, "fail": 1},
+        "verdict": {"icon": verdict_icon, "outcome": "fail", "summary": "x"},
+        "timestamp": timestamp,
+    }
+    suffix = (
+        "_" + "_".join(f"{k}{v}" for k, v in params.items())
+        if is_override else ""
+    )
+    fn = f"validate_x_{instrument}_{interval}{suffix}_verdict.json"
+    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # Rename to canonical filename so build_verdict_matrix's
+    # filename-suffix heuristic picks up the override tag.
+    (path.parent / fn).write_text(
+        json.dumps(data, indent=2), encoding="utf-8",
+    )
+
+
+class TestLoadVerdictJsons:
+    def test_empty_dir_returns_empty(self, tmp_path: Path) -> None:
+        assert load_verdict_jsons(tmp_path) == []
+
+    def test_missing_dir_returns_empty(self, tmp_path: Path) -> None:
+        assert load_verdict_jsons(tmp_path / "doesntexist") == []
+
+    def test_loads_and_sorts_by_timestamp_desc(self, tmp_path: Path) -> None:
+        for i, ts in enumerate([
+            "2026-05-07T10:00:00+00:00",
+            "2026-05-07T15:00:00+00:00",
+            "2026-05-07T12:00:00+00:00",
+        ]):
+            _write_fake_verdict(
+                tmp_path / f"v{i}_verdict.json", timestamp=ts,
+            )
+        verdicts = load_verdict_jsons(tmp_path)
+        timestamps = [v["timestamp"] for v in verdicts]
+        # Newest first — but we wrote duplicates via _write_fake_verdict
+        # (which writes BOTH the requested file AND the canonical
+        # filename), so dedupe before checking order.
+        unique = sorted(set(timestamps), reverse=True)
+        assert unique == [
+            "2026-05-07T15:00:00+00:00",
+            "2026-05-07T12:00:00+00:00",
+            "2026-05-07T10:00:00+00:00",
+        ]
+
+    def test_skips_malformed_json(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        (tmp_path / "broken_verdict.json").write_text(
+            "{not valid json", encoding="utf-8",
+        )
+        _write_fake_verdict(tmp_path / "good_verdict.json")
+        verdicts = load_verdict_jsons(tmp_path)
+        # Good file loaded, broken file skipped with a warning
+        assert len(verdicts) >= 1
+        assert "Skipping broken_verdict" in capsys.readouterr().out
+
+    def test_tags_source_filename(self, tmp_path: Path) -> None:
+        _write_fake_verdict(tmp_path / "test_verdict.json")
+        verdicts = load_verdict_jsons(tmp_path)
+        assert all("_source" in v for v in verdicts)
+
+
+class TestBuildVerdictMatrix:
+    def test_empty_returns_empty(self) -> None:
+        df = build_verdict_matrix([])
+        assert df.empty
+
+    def test_columns_in_expected_order(self, tmp_path: Path) -> None:
+        _write_fake_verdict(tmp_path / "v_verdict.json")
+        verdicts = load_verdict_jsons(tmp_path)
+        df = build_verdict_matrix(verdicts)
+        cols = list(df.columns)
+        # First 3 + last 2 columns are stable
+        assert cols[0] == "instrument"
+        assert cols[1] == "interval"
+        assert cols[2] == "pick"
+        assert cols[-2] == "verdict"
+        assert cols[-1] == "timestamp"
+        # Check columns sit between
+        assert "Plateau" in cols
+        assert "Walk-forward" in cols
+        assert "Param stability" in cols
+
+    def test_distinguishes_auto_from_override(self, tmp_path: Path) -> None:
+        # Two runs: one auto (no override suffix), one override
+        _write_fake_verdict(
+            tmp_path / "validate_x_BTC.HL_1d_verdict.json",
+            params={"fast": 20, "slow": 75}, is_override=False,
+            timestamp="2026-05-07T22:00:00+00:00",
+        )
+        _write_fake_verdict(
+            tmp_path / "validate_x_BTC.HL_1d_fast10_slow20_verdict.json",
+            params={"fast": 10, "slow": 20}, is_override=True,
+            timestamp="2026-05-07T22:30:00+00:00",
+        )
+        verdicts = load_verdict_jsons(tmp_path)
+        df = build_verdict_matrix(verdicts)
+        picks = set(df["pick"].tolist())
+        assert "auto" in picks
+        assert any("fast=10" in p for p in picks)
+
+    def test_check_columns_carry_icons(self, tmp_path: Path) -> None:
+        _write_fake_verdict(tmp_path / "v_verdict.json")
+        verdicts = load_verdict_jsons(tmp_path)
+        df = build_verdict_matrix(verdicts)
+        # Every cell in a check column is an icon (✅/⚠️/🚩) or empty
+        for cell in df["Plateau"].dropna().tolist():
+            assert cell in {"✅", "⚠️", "🚩", ""}
