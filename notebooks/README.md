@@ -18,9 +18,15 @@ notebooks/
 
 ## Notebook structure convention (v2)
 
-`notebooks/backtest/ema_cross.ipynb` is the canonical reference.  When
-adding a new backtest notebook (or migrating an existing one), follow
-this structure:
+`notebooks/backtest/ema_cross.ipynb` is the canonical reference for
+**backtest** notebooks; `compare_sweeps.ipynb` and
+`validate_strategy.ipynb` are the canonical references for the
+**analysis** workflow notebooks.  All three use the same conventions
+(markdown section headers, stable kebab-case cell IDs, all-tuneables-in-
+cell-1, save snapshot + scratchpad at the end).  Section structures
+below.
+
+### Backtest notebook (per-strategy)
 
 ```
 # Backtest — <strategy name>          (H1 title + 1-paragraph blurb)
@@ -63,6 +69,78 @@ this structure:
 ## 7. Save & cleanup
 ### 7.1 Save notebook snapshot
 ### 7.2 Cleanup
+```
+
+### Compare-sweeps notebook (`compare_sweeps.ipynb`)
+
+```
+# Compare Parameter Sweeps                  (H1 + 1-paragraph blurb)
+
+## 1. Setup
+### 1.1 Imports & shared config             (filters, PARAM_COLS, RANK_BY)
+### 1.2 Load sweeps + filter                (load_sweeps_filtered)
+
+## 2. Best params per sweep
+### 2.1 Best params table                   (v2 metric columns)
+### 2.2 Sortable HTML cross-sweep table     (generate_cross_sweep_html)
+
+## 3. Side-by-side PnL heatmaps             (plot_pnl_heatmap, exclude_kinds)
+
+## 4. Parameter stability across sweeps
+### 4.1 Stability table                     (per-combo aggregation)
+### 4.2 Average PnL% heatmap                (full-coverage combos)
+
+## 5. Single-sweep deep dive
+
+## 6. Save & cleanup
+### 6.1 Save snapshot                       (category="compare")
+### 6.2 Cleanup
+
+## 7. Scratchpad
+```
+
+### Validate-strategy notebook (`validate_strategy.ipynb`)
+
+```
+# Validate Strategy                          (H1 + 1-paragraph blurb)
+
+## 1. Setup
+### 1.1 Imports & shared config              (strategy selector, fold sizes,
+                                              bootstrap iters, snapshot flag)
+### 1.2 Load data + sweep                    (load_backtest_data +
+                                              load_sweeps_filtered)
+
+## 2. Plateau detection
+### 2.1 Plateau scoring                      (3×3 neighbour-profitability)
+### 2.2 Heatmap with best combo marked       (exclude_kinds defensive)
+
+## 3. Walk-forward analysis
+### 3.1 Run walk-forward                     (run_walk_forward, train/test pct)
+### 3.2 Per-fold results table
+### 3.3 In-sample vs OOS chart
+
+## 4. Bootstrap PnL confidence interval
+### 4.1 Run a single backtest at best params (to extract per-trade PnL)
+### 4.2 Bootstrap CI                         (bootstrap_total_pnl)
+### 4.3 Bootstrap distribution chart         (plot_bootstrap_pnl)
+
+## 5. Rolling performance                    (rolling_performance,
+                                              plot_rolling_pnl)
+
+## 6. Fee sensitivity                        (run_fee_sweep,
+                                              plot_fee_sensitivity)
+
+## 7. Regime breakdown                       (tag_regimes,
+                                              performance_by_regime)
+
+## 8. Go / no-go assessment                  (print_validation_verdict —
+                                              consolidates all six checks)
+
+## 9. Save & cleanup
+### 9.1 Save snapshot                        (category="validate")
+### 9.2 Cleanup
+
+## 10. Scratchpad
 ```
 
 ### Conventions
@@ -161,7 +239,7 @@ Differences from Option A:
 | Notebook completes in <30s and you want max iteration speed | A |
 | You hit a "stale snapshot" problem with A | B
 
-## ⚠ Avoiding the "jumbled cells" problem
+## ⚠️ Avoiding the "jumbled cells" problem
 
 When external tooling (Python scripts, Claude Code, etc.) edits a notebook
 file while Jupyter or VS Code has it open, Jupyter's autosave can

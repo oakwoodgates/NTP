@@ -10,13 +10,19 @@ from __future__ import annotations
 import io
 import math
 import sys
+from collections.abc import Callable
 from contextlib import redirect_stdout
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pytest
+
+# Type alias for the ``stub_load_sweeps`` fixture's return value: a
+# factory that takes a sweep dict and returns the captured-args dict.
+StubLoadSweeps = Callable[[dict[str, pd.DataFrame]], dict[str, Any]]
 
 # notebooks/ is not a package — same trick the test files use.
 _NOTEBOOKS_DIR = Path(__file__).resolve().parents[2] / "notebooks"
@@ -25,10 +31,13 @@ if str(_NOTEBOOKS_DIR) not in sys.path:
 
 from utils import (  # type: ignore[import-not-found] # noqa: E402
     baselines_for_strategy,
+    load_sweeps_filtered,
     print_baselines_verdict,
     print_liquidation_resolution,
     print_sweep_liquidation_diagnostics,
+    print_validation_verdict,
     save_notebook_snapshot,
+    wilson_score_interval,
 )
 
 # ── Mock objects ─────────────────────────────────────────────────────────────
@@ -509,3 +518,748 @@ class TestSaveNotebookSnapshotStaleFile:
         captured = capsys.readouterr()
         assert "skipped" in captured.out.lower()
         assert "Ctrl+S" in captured.out
+
+
+# ── wilson_score_interval ──────────────────────────────────────────────────
+
+
+class TestWilsonScoreInterval:
+    def test_zero_n_returns_nan_pair(self) -> None:
+        lo, hi = wilson_score_interval(0, 0)
+        assert math.isnan(lo) and math.isnan(hi)
+
+    def test_bounds_in_unit_interval(self) -> None:
+        for w, n in [(0, 5), (5, 5), (3, 10), (50, 100), (1, 1000)]:
+            lo, hi = wilson_score_interval(w, n)
+            assert 0.0 <= lo <= hi <= 1.0
+
+    def test_small_sample_wider_than_large_sample(self) -> None:
+        # 50% point estimate at n=4 should be much wider than at n=100.
+        lo_small, hi_small = wilson_score_interval(2, 4)
+        lo_big,   hi_big   = wilson_score_interval(50, 100)
+        assert (hi_small - lo_small) > (hi_big - lo_big)
+
+    def test_all_wins_upper_bound_is_one(self) -> None:
+        lo, hi = wilson_score_interval(5, 5)
+        assert hi == pytest.approx(1.0)
+        assert lo > 0.0  # but lower is meaningfully > 0
+
+    def test_all_losses_lower_bound_is_zero(self) -> None:
+        lo, hi = wilson_score_interval(0, 5)
+        assert lo == pytest.approx(0.0)
+        assert hi < 1.0
+
+    def test_known_4_50pct_interval(self) -> None:
+        # n=4, w=2 (50%) should give roughly [0.15, 0.85] at 95%
+        lo, hi = wilson_score_interval(2, 4)
+        assert 0.10 < lo < 0.20
+        assert 0.80 < hi < 0.90
+
+
+# ── load_sweeps_filtered ────────────────────────────────────────────────────
+
+
+def _make_v2_sweep_df(
+    *,
+    n_healthy: int = 2,
+    n_liq: int = 1,
+    n_spot: int = 1,
+) -> pd.DataFrame:
+    """Build a v2-schema sweep DataFrame with healthy / liquidated / spotlight rows."""
+    base_meta = {
+        "_strategy": "MACross-EMA",
+        "_instrument_id": "BTC-USD-PERP.HYPERLIQUID",
+        "_bar_interval": "1h",
+        "_swept_at": "2025-01-01T00:00:00+00:00",
+        "_schema_version": 2,
+    }
+    rows: list[dict[str, object]] = []
+    for i in range(n_healthy):
+        rows.append({
+            **base_meta, "fast": 5 + i, "slow": 20 + i,
+            "total_pnl": 1000.0 + i * 100,
+            "liquidated": False, "error": "", "_kind": None,
+        })
+    for i in range(n_liq):
+        rows.append({
+            **base_meta, "fast": 40 + i, "slow": 50 + i,
+            "total_pnl": -990.0,
+            "liquidated": True, "error": "liquidated", "_kind": None,
+        })
+    for i in range(n_spot):
+        rows.append({
+            **base_meta, "fast": 9 + i, "slow": 18 + i,
+            "total_pnl": 500.0,
+            "liquidated": False, "error": "", "_kind": "spotlight",
+        })
+    return pd.DataFrame(rows)
+
+
+def _make_v1_sweep_df() -> pd.DataFrame:
+    """Build a v1-schema sweep DataFrame (no `liquidated` bool column)."""
+    return pd.DataFrame([
+        {
+            "_strategy": "MACross-EMA",
+            "_instrument_id": "BTC-USD-PERP.HYPERLIQUID",
+            "_bar_interval": "1h",
+            "fast": 5, "slow": 20, "total_pnl": 1000.0,
+            "error": "",
+        },
+        {
+            "_strategy": "MACross-EMA",
+            "_instrument_id": "BTC-USD-PERP.HYPERLIQUID",
+            "_bar_interval": "1h",
+            "fast": 40, "slow": 50, "total_pnl": -990.0,
+            "error": "liquidated",
+        },
+    ])
+
+
+@pytest.fixture
+def stub_load_sweeps(monkeypatch: pytest.MonkeyPatch) -> StubLoadSweeps:
+    """Replace ``src.backtesting.engine.load_sweeps`` with a controllable stub."""
+    import src.backtesting.engine as _engine
+    captured: dict[str, Any] = {}
+
+    def _factory(return_value: dict[str, pd.DataFrame]) -> dict[str, Any]:
+        def _stub(*args: Any, **kwargs: Any) -> dict[str, pd.DataFrame]:
+            captured["args"] = args
+            captured["kwargs"] = kwargs
+            return return_value
+        monkeypatch.setattr(_engine, "load_sweeps", _stub)
+        return captured
+
+    return _factory
+
+
+class TestLoadSweepsFilteredV2:
+    def test_drops_liquidated_rows(
+        self, stub_load_sweeps: StubLoadSweeps,
+    ) -> None:
+        df = _make_v2_sweep_df(n_healthy=3, n_liq=2, n_spot=0)
+        stub_load_sweeps({"sweep_a": df})
+        result = load_sweeps_filtered()
+        assert len(result["sweep_a"]) == 3
+        assert not result["sweep_a"]["liquidated"].any()
+
+    def test_drops_spotlight_rows(
+        self, stub_load_sweeps: StubLoadSweeps,
+    ) -> None:
+        df = _make_v2_sweep_df(n_healthy=3, n_liq=0, n_spot=2)
+        stub_load_sweeps({"sweep_a": df})
+        result = load_sweeps_filtered()
+        assert len(result["sweep_a"]) == 3
+        assert (result["sweep_a"]["_kind"] != "spotlight").all()
+
+    def test_drops_both_when_default(
+        self, stub_load_sweeps: StubLoadSweeps,
+    ) -> None:
+        df = _make_v2_sweep_df(n_healthy=2, n_liq=1, n_spot=1)
+        stub_load_sweeps({"sweep_a": df})
+        result = load_sweeps_filtered()
+        assert len(result["sweep_a"]) == 2
+
+    def test_keeps_liquidated_when_disabled(
+        self, stub_load_sweeps: StubLoadSweeps,
+    ) -> None:
+        df = _make_v2_sweep_df(n_healthy=2, n_liq=2, n_spot=0)
+        stub_load_sweeps({"sweep_a": df})
+        result = load_sweeps_filtered(filter_liquidated=False)
+        assert len(result["sweep_a"]) == 4
+
+    def test_keeps_spotlight_when_disabled(
+        self, stub_load_sweeps: StubLoadSweeps,
+    ) -> None:
+        df = _make_v2_sweep_df(n_healthy=2, n_liq=0, n_spot=2)
+        stub_load_sweeps({"sweep_a": df})
+        result = load_sweeps_filtered(filter_spotlight=False)
+        assert len(result["sweep_a"]) == 4
+
+    def test_keeps_all_when_both_disabled(
+        self, stub_load_sweeps: StubLoadSweeps,
+    ) -> None:
+        df = _make_v2_sweep_df(n_healthy=2, n_liq=2, n_spot=2)
+        stub_load_sweeps({"sweep_a": df})
+        result = load_sweeps_filtered(
+            filter_liquidated=False, filter_spotlight=False,
+        )
+        assert len(result["sweep_a"]) == 6
+
+
+class TestLoadSweepsFilteredV1Compat:
+    def test_v1_falls_back_to_error_column(
+        self, stub_load_sweeps: StubLoadSweeps,
+    ) -> None:
+        df = _make_v1_sweep_df()  # no `liquidated` column
+        stub_load_sweeps({"old_sweep": df})
+        result = load_sweeps_filtered()
+        assert len(result["old_sweep"]) == 1
+        assert (result["old_sweep"]["error"] != "liquidated").all()
+
+    def test_v1_skips_liquidated_filter_when_disabled(
+        self, stub_load_sweeps: StubLoadSweeps,
+    ) -> None:
+        df = _make_v1_sweep_df()
+        stub_load_sweeps({"old_sweep": df})
+        result = load_sweeps_filtered(filter_liquidated=False)
+        assert len(result["old_sweep"]) == 2
+
+
+class TestLoadSweepsFilteredEmpty:
+    def test_empty_mapping_returned_as_is(
+        self, stub_load_sweeps: StubLoadSweeps,
+    ) -> None:
+        stub_load_sweeps({})
+        result = load_sweeps_filtered()
+        assert result == {}
+
+
+class TestLoadSweepsFilteredForwarding:
+    def test_filter_kwargs_forwarded(
+        self, stub_load_sweeps: StubLoadSweeps,
+    ) -> None:
+        captured = stub_load_sweeps({})
+        load_sweeps_filtered(
+            strategy="MACross-EMA",
+            instrument_id="BTC-USD-PERP.HYPERLIQUID",
+            bar_interval="1h",
+        )
+        kwargs = captured["kwargs"]
+        assert kwargs["strategy"] == "MACross-EMA"
+        assert kwargs["instrument_id"] == "BTC-USD-PERP.HYPERLIQUID"
+        assert kwargs["bar_interval"] == "1h"
+
+    def test_sweep_dir_forwarded_positionally(
+        self, stub_load_sweeps: StubLoadSweeps, tmp_path: Path,
+    ) -> None:
+        captured = stub_load_sweeps({})
+        load_sweeps_filtered(sweep_dir=tmp_path)
+        # When sweep_dir is provided, it goes as the first positional arg.
+        assert captured["args"] == (tmp_path,)
+
+
+class TestLoadSweepsFilteredOutput:
+    def test_prints_filter_counts(
+        self, stub_load_sweeps: StubLoadSweeps,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        df = _make_v2_sweep_df(n_healthy=2, n_liq=1, n_spot=1)
+        stub_load_sweeps({"my_sweep": df})
+        load_sweeps_filtered()
+        captured = capsys.readouterr()
+        assert "my_sweep" in captured.out
+        assert "1 liquidated" in captured.out
+        assert "1 spotlight" in captured.out
+        assert "4 → 2" in captured.out
+
+
+# ── print_validation_verdict ────────────────────────────────────────────────
+
+
+def _make_walkforward_df(*, profitable: int, total: int) -> pd.DataFrame:
+    """Build a walk-forward results DataFrame.
+
+    First ``profitable`` folds get +1000 OOS PnL, the rest get -500.
+    """
+    rows = []
+    for i in range(profitable):
+        rows.append({"fold": i, "oos_pnl": 1000.0})
+    for i in range(profitable, total):
+        rows.append({"fold": i, "oos_pnl": -500.0})
+    return pd.DataFrame(rows)
+
+
+def _make_walkforward_df_with_params(
+    *, picks: list[tuple[int, int]],
+) -> pd.DataFrame:
+    """Build a walk-forward DataFrame including ``best_fast`` / ``best_slow``.
+
+    Each entry in ``picks`` becomes one fold's chosen combo.  All folds
+    are marked profitable so the OOS-PnL check passes (default green).
+    """
+    rows = []
+    for i, (fast, slow) in enumerate(picks):
+        rows.append({
+            "fold": i, "oos_pnl": 1000.0,
+            "best_fast": fast, "best_slow": slow,
+        })
+    return pd.DataFrame(rows)
+
+
+def _make_rolling_df(*, profitable: int, total: int) -> pd.DataFrame:
+    rows = []
+    for i in range(profitable):
+        rows.append({"window": i, "pnl": 100.0})
+    for i in range(profitable, total):
+        rows.append({"window": i, "pnl": -50.0})
+    return pd.DataFrame(rows)
+
+
+def _make_rolling_df_with_inactive(
+    *, profitable: int, losing: int, inactive: int,
+) -> pd.DataFrame:
+    """Rolling DF that includes zero-PnL ('no trade') windows."""
+    rows: list[dict[str, Any]] = []
+    i = 0
+    for _ in range(profitable):
+        rows.append({"window": i, "pnl": 100.0})
+        i += 1
+    for _ in range(losing):
+        rows.append({"window": i, "pnl": -50.0})
+        i += 1
+    for _ in range(inactive):
+        rows.append({"window": i, "pnl": 0.0})
+        i += 1
+    return pd.DataFrame(rows)
+
+
+def _make_yearly_df(year_pnls: dict[int, float]) -> pd.DataFrame:
+    """Build a per-year DataFrame indexed by year (matches performance_by_year)."""
+    return pd.DataFrame(
+        [{"pnl": pnl, "num_positions": 5, "win_rate": 0.5}
+         for pnl in year_pnls.values()],
+        index=list(year_pnls.keys()),
+    )
+
+
+def _make_fee_df(*, max_breakeven_bps: float | None) -> pd.DataFrame:
+    """Build a fee-sweep DataFrame.  ``max_breakeven_bps=None`` means none break even."""
+    rows = []
+    for bps in [0.0, 2.5, 5.0, 7.5, 10.0]:
+        breakeven = (
+            max_breakeven_bps is not None and bps <= max_breakeven_bps
+        )
+        rows.append({"fee_bps": bps, "breakeven": breakeven})
+    return pd.DataFrame(rows)
+
+
+def _make_regime_df(*, trending_pnl: float, ranging_pnl: float) -> pd.DataFrame:
+    return pd.DataFrame([
+        {"regime": "TRENDING", "pnl": trending_pnl},
+        {"regime": "RANGING", "pnl": ranging_pnl},
+    ])
+
+
+class TestValidationVerdictAllGreen:
+    def test_all_checks_pass(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL",
+                bar_interval="1h",
+                params={"fast": 10, "slow": 20},
+                plateau_score=0.85,
+                walkforward_results=_make_walkforward_df(profitable=4, total=4),
+                bootstrap_prob_positive=92.0,
+                bootstrap_p5=200.0,
+                bootstrap_p95=2000.0,
+                n_trades=50,
+                rolling_results=_make_rolling_df(profitable=8, total=10),
+                fee_results=_make_fee_df(max_breakeven_bps=10.0),
+                regime_results=_make_regime_df(
+                    trending_pnl=1500.0, ranging_pnl=-100.0,
+                ),
+            )
+        out = buf.getvalue()
+        assert "VALIDATION SUMMARY" in out
+        assert "READY for paper trading" in out
+        assert "🚩" not in out.split("VERDICT:")[1]
+        assert "⚠️" not in out.split("VERDICT:")[1].split("Remember")[0]
+
+
+class TestValidationVerdictRedFlag:
+    def test_failed_checks_trigger_do_not_trade(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL",
+                bar_interval="1h",
+                params={"fast": 10, "slow": 20},
+                plateau_score=0.30,  # 🚩
+                walkforward_results=_make_walkforward_df(
+                    profitable=1, total=4,
+                ),  # 🚩
+                bootstrap_prob_positive=40.0,  # 🚩
+                n_trades=50,
+            )
+        out = buf.getvalue()
+        assert "DO NOT paper trade yet" in out
+        assert "🚩" in out
+
+
+class TestValidationVerdictWarn:
+    def test_partial_passes_yields_proceed_with_caution(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL",
+                bar_interval="1h",
+                params={"fast": 10, "slow": 20},
+                plateau_score=0.65,  # ⚠️
+                walkforward_results=_make_walkforward_df(
+                    profitable=4, total=4,
+                ),  # ✅
+            )
+        out = buf.getvalue()
+        assert "PROCEED WITH CAUTION" in out
+
+
+class TestValidationVerdictPlateauThresholds:
+    def test_plateau_high_is_green(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h",
+                params={}, plateau_score=0.8,
+            )
+        out = buf.getvalue()
+        assert "✅ Plateau" in out
+        assert "robust region" in out
+
+    def test_plateau_mid_is_warn(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h",
+                params={}, plateau_score=0.5,
+            )
+        out = buf.getvalue()
+        assert "⚠️ Plateau" in out
+        assert "ridge" in out
+
+    def test_plateau_low_is_red(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h",
+                params={}, plateau_score=0.49,
+            )
+        out = buf.getvalue()
+        assert "🚩 Plateau" in out
+        assert "isolated spike" in out
+
+
+class TestValidationVerdictBootstrap:
+    def test_too_few_trades_warns(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                bootstrap_prob_positive=95.0, n_trades=3,
+            )
+        out = buf.getvalue()
+        assert "⚠️ Bootstrap" in out
+        assert "Only 3 trades" in out
+
+    def test_high_prob_positive_is_green(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                bootstrap_prob_positive=92.0, n_trades=50,
+                bootstrap_p5=100.0, bootstrap_p95=2000.0,
+            )
+        out = buf.getvalue()
+        assert "✅ Bootstrap" in out
+        assert "P(profit)=92%" in out
+        # CI is rendered with thousands separator and zero decimals.
+        assert "[100, 2,000]" in out
+
+
+class TestValidationVerdictFee:
+    def test_no_breakeven_is_red(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                fee_results=_make_fee_df(max_breakeven_bps=None),
+            )
+        out = buf.getvalue()
+        assert "🚩 Fee sensitivity" in out
+        assert "Not profitable at any fee level" in out
+
+    def test_high_breakeven_is_green(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                fee_results=_make_fee_df(max_breakeven_bps=10.0),
+            )
+        out = buf.getvalue()
+        assert "✅ Fee sensitivity" in out
+        assert "10.0 bps" in out
+
+
+class TestValidationVerdictRegime:
+    def test_trending_dominates_is_green(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                regime_results=_make_regime_df(
+                    trending_pnl=2000.0, ranging_pnl=-100.0,
+                ),
+            )
+        out = buf.getvalue()
+        assert "✅ Regime" in out
+
+    def test_no_edge_is_red(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                regime_results=_make_regime_df(
+                    trending_pnl=-200.0, ranging_pnl=100.0,
+                ),
+            )
+        out = buf.getvalue()
+        assert "🚩 Regime" in out
+        assert "no clear edge" in out
+
+
+class TestValidationVerdictParamStability:
+    def test_all_folds_pick_same_combo_is_green(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                walkforward_results=_make_walkforward_df_with_params(
+                    picks=[(20, 75), (20, 75), (20, 75), (20, 75)],
+                ),
+            )
+        out = buf.getvalue()
+        assert "✅ Param stability" in out
+        assert "All 4 folds picked fast=20, slow=75" in out
+
+    def test_three_of_four_folds_same_is_warn(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                walkforward_results=_make_walkforward_df_with_params(
+                    picks=[(20, 75), (20, 75), (20, 75), (10, 30)],
+                ),
+            )
+        out = buf.getvalue()
+        assert "⚠️ Param stability" in out
+        assert "3/4 folds picked fast=20, slow=75" in out
+
+    def test_two_of_four_folds_same_is_drifting_warn(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                walkforward_results=_make_walkforward_df_with_params(
+                    picks=[(20, 75), (20, 75), (10, 30), (5, 100)],
+                ),
+            )
+        out = buf.getvalue()
+        assert "⚠️ Param stability" in out
+        assert "drifting" in out
+
+    def test_all_folds_different_is_red(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                walkforward_results=_make_walkforward_df_with_params(
+                    picks=[(5, 30), (10, 75), (20, 100), (75, 200)],
+                ),
+            )
+        out = buf.getvalue()
+        assert "🚩 Param stability" in out
+        assert "fitting noise" in out
+        # And the overall verdict should now flag.
+        assert "DO NOT paper trade yet" in out
+
+    def test_no_best_columns_skips_param_check(self) -> None:
+        # Plain walkforward DF (no best_* cols) — only the OOS check
+        # fires; no Param-stability line appears.
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                walkforward_results=_make_walkforward_df(
+                    profitable=4, total=4,
+                ),
+            )
+        out = buf.getvalue()
+        assert "Walk-forward" in out
+        assert "Param stability" not in out
+
+
+class TestValidationVerdictRollingActiveWindows:
+    def test_active_windows_used_as_denominator(self) -> None:
+        # 5 profitable + 3 losing + 6 inactive (zero-PnL).  Old logic
+        # would say 5/14 = 36% (would flag 🚩).  New logic says
+        # 5/8 active = 63% (✅).
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                rolling_results=_make_rolling_df_with_inactive(
+                    profitable=5, losing=3, inactive=6,
+                ),
+            )
+        out = buf.getvalue()
+        assert "5/8 active windows profitable (62%)" in out or \
+               "5/8 active windows profitable (63%)" in out
+        assert "6 no-trade windows excluded" in out
+        # Above 60% → ✅
+        assert "✅ Rolling" in out
+
+    def test_inactive_count_only_appended_when_present(self) -> None:
+        # All windows active → no "no-trade windows excluded" annotation
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                rolling_results=_make_rolling_df_with_inactive(
+                    profitable=8, losing=2, inactive=0,
+                ),
+            )
+        out = buf.getvalue()
+        assert "no-trade windows excluded" not in out
+
+    def test_zero_active_windows_warns(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                rolling_results=_make_rolling_df_with_inactive(
+                    profitable=0, losing=0, inactive=10,
+                ),
+            )
+        out = buf.getvalue()
+        assert "⚠️ Rolling" in out
+        assert "No active windows" in out
+
+
+class TestValidationVerdictYearlyConcentration:
+    def test_high_concentration_one_year_is_red(self) -> None:
+        # 80% of total in 2021 → 🚩
+        yearly = _make_yearly_df({2020: 100.0, 2021: 800.0, 2022: 100.0})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                yearly_results=yearly,
+            )
+        out = buf.getvalue()
+        assert "🚩 Yearly concentration" in out
+        assert "2021" in out
+        assert "80%" in out
+        assert "one-trick pony" in out
+
+    def test_moderate_concentration_is_warn(self) -> None:
+        # 60% in one year → ⚠️
+        yearly = _make_yearly_df({2020: 200.0, 2021: 600.0, 2022: 200.0})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                yearly_results=yearly,
+            )
+        out = buf.getvalue()
+        assert "⚠️ Yearly concentration" in out
+        assert "heavy single-year skew" in out
+
+    def test_low_concentration_is_green(self) -> None:
+        # 40% in top year → ✅
+        yearly = _make_yearly_df({2020: 400.0, 2021: 300.0, 2022: 300.0})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                yearly_results=yearly,
+            )
+        out = buf.getvalue()
+        assert "✅ Yearly concentration" in out
+
+    def test_single_year_warns(self) -> None:
+        yearly = _make_yearly_df({2025: 1000.0})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                yearly_results=yearly,
+            )
+        out = buf.getvalue()
+        assert "⚠️ Yearly concentration" in out
+        assert "Only 1 year(s)" in out
+
+    def test_zero_total_pnl_warns(self) -> None:
+        # Total PnL == 0 → can't compute share → warn
+        yearly = _make_yearly_df({2020: 500.0, 2021: -500.0})
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                yearly_results=yearly,
+            )
+        out = buf.getvalue()
+        assert "⚠️ Yearly concentration" in out
+        assert "insufficient" in out
+
+    def test_empty_yearly_df_warns(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h", params={},
+                yearly_results=pd.DataFrame(),
+            )
+        out = buf.getvalue()
+        assert "⚠️ Yearly concentration" in out
+        assert "No per-year data" in out
+
+    def test_btc_real_run_2021_dominates(self) -> None:
+        # Replicate the real BTC validate run: 76% of $11,086 in 2021.
+        yearly = _make_yearly_df({
+            2020:  -714.0,
+            2021:  8490.0,
+            2022:  -155.0,
+            2023:   755.0,
+            2024:  1463.0,
+            2025:   474.0,
+            2026:   773.0,
+        })
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTCUSDT-PERP.BINANCE", bar_interval="1d",
+                params={"fast": 20, "slow": 75},
+                yearly_results=yearly,
+            )
+        out = buf.getvalue()
+        assert "🚩 Yearly concentration" in out
+        assert "2021" in out
+        assert "DO NOT paper trade yet" in out  # the verdict triggers
+
+
+class TestValidationVerdictNoneSkipsCheck:
+    def test_all_none_yields_only_header_and_green_verdict(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="BTC.HL", bar_interval="1h",
+                params={"fast": 10},
+            )
+        out = buf.getvalue()
+        # Header is always printed.
+        assert "VALIDATION SUMMARY" in out
+        assert "fast=10" in out
+        # No checks → no flags → ready verdict.
+        assert "READY for paper trading" in out
+
+    def test_header_includes_instrument_and_interval(self) -> None:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            print_validation_verdict(
+                instrument_id="ETH-USD-PERP.HYPERLIQUID",
+                bar_interval="4h",
+                params={"fast": 5, "slow": 30},
+            )
+        out = buf.getvalue()
+        assert "ETH-USD-PERP.HYPERLIQUID" in out
+        assert "4h" in out
+        assert "fast=5, slow=30" in out

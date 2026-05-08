@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -216,7 +217,7 @@ def save_notebook_snapshot(
     import time
 
     if not os.path.exists(notebook_filename):
-        print(f"⚠ Notebook file not found: {notebook_filename}")
+        print(f"⚠️ Notebook file not found: {notebook_filename}")
         print("  (CWD: {})".format(os.getcwd()))
         return None
 
@@ -235,7 +236,7 @@ def save_notebook_snapshot(
     if not fresh:
         if save_on_run_all:
             print(
-                f"⚠ Notebook on disk is {file_age_secs:.0f}s old — "
+                f"⚠️ Notebook on disk is {file_age_secs:.0f}s old — "
                 "snapshot may be stale.",
             )
             print(
@@ -358,7 +359,7 @@ def print_setup_summary(
         print(f"First bar   : {pd.Timestamp(bars[0].ts_event, unit='ns', tz='UTC')}")
         print(f"Last bar    : {pd.Timestamp(bars[-1].ts_event, unit='ns', tz='UTC')}")
     if data_source != exec_venue:
-        print(f"⚠ Cross-venue simulation: {data_source} data → {exec_venue} fees")
+        print(f"⚠️ Cross-venue simulation: {data_source} data → {exec_venue} fees")
 
 
 def print_liquidation_resolution(
@@ -443,7 +444,7 @@ def print_run_diagnostics(
         ]
         n_denied = len(denied)
         if n_denied > 0:
-            print(f"\n⚠ {n_denied} orders were denied or rejected:")
+            print(f"\n⚠️ {n_denied} orders were denied or rejected:")
             try:
                 from IPython.display import display
                 display(denied[["ts_init", "side", "quantity", "status"]])
@@ -469,7 +470,7 @@ def print_run_diagnostics(
     print(f"Max balance:   {max_bal:,.4f}")
     print(f"Final balance: {final_bal:,.4f}")
     if min_bal <= 0:
-        print(f"\n⚠ LIQUIDATED — min balance was {min_bal:.2f}")
+        print(f"\n⚠️ LIQUIDATED — min balance was {min_bal:.2f}")
         print("PnL results after liquidation are meaningless.")
     else:
         print("Would flag liquidated: False")
@@ -727,7 +728,7 @@ def print_sweep_liquidation_diagnostics(
     ]
     if len(inconsistent) > 0:
         print(
-            f"\n⚠ {len(inconsistent)} rows with min_balance ≤ 0 but "
+            f"\n⚠️ {len(inconsistent)} rows with min_balance ≤ 0 but "
             f"liquidated_account=False — actor missed equity breach.",
         )
         display(inconsistent[available])
@@ -769,7 +770,7 @@ def print_sweep_liquidation_diagnostics(
                 f"(2 × ${float(trade_notional):.0f} × "
                 f"{float(liq_resolved.fee_rate):.5f})",
             )
-            tag = "✓ within 10%" if 0.90 <= ratio <= 1.10 else "⚠ outside 10%"
+            tag = "✓ within 10%" if 0.90 <= ratio <= 1.10 else "⚠️ outside 10%"
             print(f"Ratio actual/expected : {ratio:.3f}  ({tag})")
             if 1.02 <= ratio <= 1.10:
                 print(
@@ -805,3 +806,465 @@ def print_sweep_liquidation_diagnostics(
             ]
             print("\nTop 5 worst slippage events (gap risk surfaced):")
             display(liq_rows.nlargest(5, "liq_slippage_max_pct")[worst_cols])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Statistics helpers (consumed by validate_strategy)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def wilson_score_interval(
+    successes: int, n: int, *, confidence: float = 0.95,
+) -> tuple[float, float]:
+    """95% Wilson score interval for a binomial proportion.
+
+    More honest than the naive ``successes / n ± z·√(p(1-p)/n)``
+    interval at small ``n`` — Wilson is closer to nominal coverage and
+    the bounds stay in [0, 1].  At ``n=4`` a naive 50% point estimate
+    gives a CI of [0.0, 1.0]; Wilson gives ~[0.15, 0.85] which honestly
+    reflects the tiny sample.
+
+    Used to put confidence bounds on win-rate and similar binomial
+    proportions in the validate notebook so a 4-trade win-rate doesn't
+    get reported with the same gravitas as a 100-trade win-rate.
+
+    Parameters
+    ----------
+    successes
+        Count of successes (e.g. winning trades).
+    n
+        Sample size (e.g. total trades).  Returns ``(nan, nan)`` if 0.
+    confidence
+        Two-sided confidence level (default 0.95 → z = 1.96).
+
+    Returns
+    -------
+    (lower, upper)
+        Lower and upper bounds, both in [0, 1].
+
+    """
+    if n <= 0:
+        return float("nan"), float("nan")
+
+    # Two-sided z from inverse normal CDF.  scipy is available
+    # transitively via pandas; falling back to the 95% constant 1.96
+    # avoids an explicit dependency for the common case.
+    if abs(confidence - 0.95) < 1e-9:
+        z = 1.96
+    else:
+        from scipy.stats import norm
+        z = float(norm.ppf(1 - (1 - confidence) / 2))
+
+    p = successes / n
+    z2 = z * z
+    centre = (p + z2 / (2 * n)) / (1 + z2 / n)
+    half = (z * math.sqrt((p * (1 - p) + z2 / (4 * n)) / n)) / (1 + z2 / n)
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sweep loading + filtering (consumed by compare_sweeps + validate_strategy)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def load_sweeps_filtered(
+    sweep_dir: str | Path | None = None,
+    *,
+    strategy: str | None = None,
+    instrument_id: str | None = None,
+    bar_interval: str | None = None,
+    filter_liquidated: bool = True,
+    filter_spotlight: bool = True,
+) -> dict[str, Any]:
+    """Load v2 sweep parquets with the standard filters applied.
+
+    Wraps :func:`src.backtesting.engine.load_sweeps` (which itself does
+    the schema-version warning) and applies two filters that almost
+    every consumer wants:
+
+    1. **Liquidated rows** — drop rows where the consolidated v2
+       ``liquidated`` boolean is True.  Falls back to v1's
+       ``error == "liquidated"`` check when the bool column is absent
+       (so old sweeps still filter correctly).
+    2. **Spotlight rows** — drop rows where ``_kind == "spotlight"``
+       (off-grid combos that otherwise pollute heatmaps and
+       ranking tables).
+
+    Both filters can be turned off independently.
+
+    Parameters
+    ----------
+    sweep_dir
+        Directory containing sweep parquet files.  ``None`` uses the
+        engine's default (``data/sweeps/``).
+    strategy, instrument_id, bar_interval
+        Forwarded to the underlying ``load_sweeps`` filters.
+    filter_liquidated
+        Drop liquidated rows.  Default True.
+    filter_spotlight
+        Drop ``_kind == "spotlight"`` rows.  Default True.
+
+    Returns
+    -------
+    dict[str, pd.DataFrame]
+        Same shape as ``load_sweeps`` returns (label → DataFrame).
+        Filtered counts are printed per sweep.
+
+    """
+    from src.backtesting.engine import load_sweeps
+
+    kwargs: dict[str, Any] = {}
+    if strategy is not None:
+        kwargs["strategy"] = strategy
+    if instrument_id is not None:
+        kwargs["instrument_id"] = instrument_id
+    if bar_interval is not None:
+        kwargs["bar_interval"] = bar_interval
+    if sweep_dir is not None:
+        sweeps = load_sweeps(sweep_dir, **kwargs)
+    else:
+        sweeps = load_sweeps(**kwargs)
+
+    if not sweeps:
+        return sweeps
+
+    for label, df in list(sweeps.items()):
+        n_total = len(df)
+        n_liq = 0
+        n_spot = 0
+
+        if filter_liquidated:
+            if "liquidated" in df.columns:
+                # v2 path: bool column.  NaN treated as not-liquidated.
+                mask = df["liquidated"].fillna(False).astype(bool)
+                n_liq = int(mask.sum())
+                df = df[~mask].copy()
+            elif "error" in df.columns:
+                # v1 fallback.
+                mask = (df["error"].fillna("") == "liquidated")
+                n_liq = int(mask.sum())
+                df = df[~mask].copy()
+
+        if filter_spotlight and "_kind" in df.columns:
+            mask = (df["_kind"] == "spotlight")
+            n_spot = int(mask.sum())
+            df = df[~mask].copy()
+
+        sweeps[label] = df
+
+        notes = []
+        if n_liq:
+            notes.append(f"{n_liq} liquidated")
+        if n_spot:
+            notes.append(f"{n_spot} spotlight")
+        if notes:
+            print(f"  {label}: filtered {' + '.join(notes)} ({n_total} → {len(df)})")
+
+    return sweeps
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Validation verdict (consumed by validate_strategy)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def print_validation_verdict(
+    *,
+    instrument_id: str,
+    bar_interval: str,
+    params: dict[str, Any],
+    plateau_score: float | None = None,
+    walkforward_results: Any | None = None,
+    bootstrap_prob_positive: float | None = None,
+    bootstrap_p5: float | None = None,
+    bootstrap_p95: float | None = None,
+    n_trades: int | None = None,
+    rolling_results: Any | None = None,
+    fee_results: Any | None = None,
+    regime_results: Any | None = None,
+    yearly_results: Any | None = None,
+) -> None:
+    """Print the consolidated go / no-go assessment for a strategy.
+
+    Aggregates up to six PnL-based checks (plateau, walk-forward,
+    bootstrap, rolling-window, fee sensitivity, regime split) into a
+    single ✅ / ⚠️ / 🚩 verdict.  Skips checks whose inputs are
+    ``None`` (e.g. if you don't run rolling-performance, pass
+    ``rolling_results=None`` and that check is omitted).
+
+    All thresholds are PnL-based — no Sharpe / Sortino /
+    returns-derived metrics are used (see
+    ``docs/ANALYZER_RETURNS_CAVEAT.md``).
+
+    Parameters
+    ----------
+    instrument_id, bar_interval
+        For the header.
+    params
+        Dict of best-params (e.g. ``{"fast": 10, "slow": 40}``).
+    plateau_score
+        Neighbour-profitability score in [0, 1] for the chosen combo.
+        Thresholds: ≥0.8 ✅, ≥0.5 ⚠️, <0.5 🚩.  ``None`` to skip.
+    walkforward_results
+        DataFrame from :func:`src.backtesting.engine.run_walk_forward`.
+        Expected columns: ``oos_pnl``.  Pass ``None`` to skip.
+    bootstrap_prob_positive
+        Percentage of bootstrap resamples with positive total PnL.
+        Thresholds: ≥90% ✅, ≥70% ⚠️, <70% 🚩.
+    bootstrap_p5, bootstrap_p95
+        For display in the bootstrap line.  Both required if either
+        is provided.
+    n_trades
+        Number of trades the bootstrap operated on.  Used to gate
+        whether the bootstrap check is meaningful (≥5 required).
+    rolling_results
+        DataFrame from :func:`src.backtesting.analysis.rolling_performance`.
+        Expected column: ``pnl``.  Pass ``None`` to skip.
+    fee_results
+        DataFrame from :func:`src.backtesting.analysis.run_fee_sweep`.
+        Expected columns: ``fee_bps``, ``breakeven``.  Pass ``None`` to skip.
+    regime_results
+        DataFrame from :func:`src.backtesting.analysis.performance_by_regime`.
+        Expected columns: ``regime``, ``pnl``.  Pass ``None`` to skip.
+
+    """
+    param_str = ", ".join(f"{k}={v}" for k, v in params.items())
+    print("=" * 60)
+    print("  VALIDATION SUMMARY")
+    print(f"  {instrument_id}  {bar_interval}")
+    print(f"  {param_str}")
+    print("=" * 60)
+
+    checks: list[tuple[str, str, str]] = []
+
+    # 1. Plateau
+    if plateau_score is not None:
+        if plateau_score >= 0.8:
+            checks.append(("✅", "Plateau", f"Score {plateau_score:.2f} — robust region"))
+        elif plateau_score >= 0.5:
+            checks.append(("⚠️", "Plateau", f"Score {plateau_score:.2f} — ridge, moderate risk"))
+        else:
+            checks.append(("🚩", "Plateau", f"Score {plateau_score:.2f} — isolated spike, high overfit risk"))
+
+    # 2. Walk-forward — OOS profitability
+    if walkforward_results is not None:
+        if hasattr(walkforward_results, "empty") and walkforward_results.empty:
+            checks.append(("⚠️", "Walk-forward", "No folds completed — need more data"))
+        else:
+            oos_profitable = int((walkforward_results["oos_pnl"] > 0).sum())
+            oos_total = len(walkforward_results)
+            oos_total_pnl = float(walkforward_results["oos_pnl"].sum())
+            detail = (
+                f"{oos_profitable}/{oos_total} folds profitable, "
+                f"total OOS PnL {oos_total_pnl:,.2f}"
+            )
+            if oos_profitable == oos_total and oos_total_pnl > 0:
+                checks.append(("✅", "Walk-forward", detail))
+            elif oos_profitable >= oos_total * 0.5 and oos_total_pnl > 0:
+                checks.append(("⚠️", "Walk-forward", detail))
+            else:
+                checks.append(("🚩", "Walk-forward", detail))
+
+    # 2b. Walk-forward — parameter stability across folds.
+    # If the optimiser picks different params on each fold the strategy
+    # is fitting noise rather than a real signal — even if the OOS PnL
+    # check above looks OK.  We grade by the fraction of folds that
+    # share the most-common combo: ≥75% (3/4) → ✅, ≥50% (2/4) → ⚠️,
+    # else 🚩.
+    if walkforward_results is not None and not (
+        hasattr(walkforward_results, "empty") and walkforward_results.empty
+    ):
+        param_cols = [
+            c for c in walkforward_results.columns if c.startswith("best_")
+        ]
+        if param_cols and len(walkforward_results) >= 2:
+            # Build a tuple per fold for the chosen params; count how
+            # many folds share the most-common combo.
+            combos = [
+                tuple(row[c] for c in param_cols)
+                for _, row in walkforward_results[param_cols].iterrows()
+            ]
+            from collections import Counter
+            most_common_combo, most_common_count = Counter(combos).most_common(1)[0]
+            n_folds = len(combos)
+            stable_pct = most_common_count / n_folds
+            combo_str = ", ".join(
+                f"{c.removeprefix('best_')}={v}"
+                for c, v in zip(param_cols, most_common_combo, strict=True)
+            )
+            if most_common_count == n_folds:
+                checks.append((
+                    "✅", "Param stability",
+                    f"All {n_folds} folds picked {combo_str}",
+                ))
+            elif stable_pct >= 0.75:
+                checks.append((
+                    "⚠️", "Param stability",
+                    f"{most_common_count}/{n_folds} folds picked {combo_str}",
+                ))
+            elif stable_pct >= 0.50:
+                checks.append((
+                    "⚠️", "Param stability",
+                    f"Most-common combo only {most_common_count}/{n_folds} folds — drifting",
+                ))
+            else:
+                checks.append((
+                    "🚩", "Param stability",
+                    f"Different combo nearly every fold ({n_folds} folds, "
+                    f"top combo only {most_common_count}) — fitting noise",
+                ))
+
+    # 3. Bootstrap
+    if bootstrap_prob_positive is not None:
+        if n_trades is not None and n_trades < 5:
+            checks.append(("⚠️", "Bootstrap", f"Only {n_trades} trades — insufficient"))
+        else:
+            ci_str = ""
+            if bootstrap_p5 is not None and bootstrap_p95 is not None:
+                ci_str = f", 90% CI [{bootstrap_p5:,.0f}, {bootstrap_p95:,.0f}]"
+            detail = f"P(profit)={bootstrap_prob_positive:.0f}%{ci_str}"
+            if bootstrap_prob_positive >= 90:
+                checks.append(("✅", "Bootstrap", detail))
+            elif bootstrap_prob_positive >= 70:
+                checks.append(("⚠️", "Bootstrap", detail))
+            else:
+                checks.append(("🚩", "Bootstrap", detail))
+
+    # 4. Rolling windows — use ACTIVE windows (where the strategy
+    # actually traded) as the denominator.  Sparse strategies have
+    # many no-trade windows that shouldn't count against them, and
+    # this also keeps the verdict consistent with what the rolling
+    # cell prints to the notebook.
+    if rolling_results is not None:
+        if hasattr(rolling_results, "empty") and rolling_results.empty:
+            checks.append(("⚠️", "Rolling", "No rolling-window results"))
+        else:
+            active = rolling_results[rolling_results["pnl"] != 0.0]
+            n_active = len(active)
+            if n_active == 0:
+                checks.append((
+                    "⚠️", "Rolling",
+                    "No active windows — strategy traded zero closed positions",
+                ))
+            else:
+                pos_active = int((active["pnl"] > 0).sum())
+                pct = pos_active / n_active * 100
+                n_total = len(rolling_results)
+                detail = (
+                    f"{pos_active}/{n_active} active windows profitable "
+                    f"({pct:.0f}%)"
+                )
+                if n_active < n_total:
+                    detail += f"  [{n_total - n_active} no-trade windows excluded]"
+                if pct >= 60:
+                    checks.append(("✅", "Rolling", detail))
+                elif pct >= 40:
+                    checks.append(("⚠️", "Rolling", detail))
+                else:
+                    checks.append(("🚩", "Rolling", f"{detail} — concentrated"))
+
+    # 5. Fee sensitivity
+    if fee_results is not None:
+        if hasattr(fee_results, "empty") and fee_results.empty:
+            checks.append(("⚠️", "Fee sensitivity", "No fee-sweep results"))
+        else:
+            breakeven_rows = fee_results[fee_results["breakeven"]]
+            if breakeven_rows.empty:
+                checks.append(("🚩", "Fee sensitivity", "Not profitable at any fee level"))
+            else:
+                max_fee = float(breakeven_rows["fee_bps"].max())
+                if max_fee >= 7.5:
+                    checks.append(("✅", "Fee sensitivity", f"Profitable up to {max_fee:.1f} bps — strong margin"))
+                elif max_fee >= 4:
+                    checks.append(("⚠️", "Fee sensitivity", f"Profitable up to {max_fee:.1f} bps — moderate margin"))
+                else:
+                    checks.append(("🚩", "Fee sensitivity", f"Breakeven at {max_fee:.1f} bps — thin margin"))
+
+    # 6. Regime
+    if regime_results is not None:
+        if hasattr(regime_results, "empty") and regime_results.empty:
+            checks.append(("⚠️", "Regime", "No regime breakdown available"))
+        else:
+            ranging = regime_results[regime_results["regime"] == "RANGING"]
+            trending = regime_results[regime_results["regime"] == "TRENDING"]
+            if not ranging.empty and not trending.empty:
+                ranging_pnl = float(ranging["pnl"].iloc[0])
+                trending_pnl = float(trending["pnl"].iloc[0])
+                if trending_pnl > 0 and trending_pnl > abs(ranging_pnl):
+                    checks.append(("✅", "Regime", f"Trending +{trending_pnl:,.0f} > Ranging {ranging_pnl:,.0f}"))
+                elif trending_pnl > 0:
+                    checks.append(("⚠️", "Regime", f"Trending +{trending_pnl:,.0f}, Ranging {ranging_pnl:,.0f} — net depends on mix"))
+                else:
+                    checks.append(("🚩", "Regime", f"Trending {trending_pnl:,.0f}, Ranging {ranging_pnl:,.0f} — no clear edge"))
+            else:
+                checks.append(("⚠️", "Regime", "Trending or ranging regime missing from results"))
+
+    # 7. Yearly concentration — if a single calendar year accounts for
+    # the majority of total PnL, the strategy is a regime trade dressed
+    # up.  This is the most diagnostic signal in any 5+ year backtest
+    # and is invisible to the other checks (plateau, walk-forward,
+    # bootstrap, regime — none of them look at the year-over-year
+    # distribution of PnL).  Thresholds: ≥75% in one year → 🚩,
+    # ≥50% → ⚠️, else ✅.
+    if yearly_results is not None:
+        if hasattr(yearly_results, "empty") and yearly_results.empty:
+            checks.append(("⚠️", "Yearly concentration", "No per-year data"))
+        elif "pnl" not in yearly_results.columns:
+            checks.append(("⚠️", "Yearly concentration", "Missing 'pnl' column"))
+        else:
+            total_pnl_yearly = float(yearly_results["pnl"].sum())
+            n_years = len(yearly_results)
+            if abs(total_pnl_yearly) < 1e-6 or n_years < 2:
+                checks.append((
+                    "⚠️", "Yearly concentration",
+                    f"Only {n_years} year(s) of data — insufficient",
+                ))
+            else:
+                # Use absolute share for the dominant year — for a
+                # mostly-profitable strategy this is the share of total
+                # gains coming from one year; for a net-loser the
+                # concentration question still applies symmetrically.
+                # ``performance_by_year`` indexes by year (int), so
+                # idxmax returns the year directly.
+                year_shares = (yearly_results["pnl"] / total_pnl_yearly).abs()
+                top_idx = year_shares.idxmax()
+                top_share = float(year_shares.loc[top_idx])
+                top_year = int(top_idx)
+                detail = (
+                    f"{top_year}: {top_share * 100:.0f}% of total PnL "
+                    f"(over {n_years} years)"
+                )
+                if top_share >= 0.75:
+                    checks.append((
+                        "🚩", "Yearly concentration",
+                        f"{detail} — one-trick pony risk",
+                    ))
+                elif top_share >= 0.50:
+                    checks.append((
+                        "⚠️", "Yearly concentration",
+                        f"{detail} — heavy single-year skew",
+                    ))
+                else:
+                    checks.append((
+                        "✅", "Yearly concentration",
+                        f"top year {top_year}: {top_share * 100:.0f}% "
+                        f"(over {n_years} years)",
+                    ))
+
+    print()
+    for icon, name, detail in checks:
+        print(f"  {icon} {name:15s} {detail}")
+
+    n_fail = sum(1 for icon, _, _ in checks if icon == "🚩")
+    n_warn = sum(1 for icon, _, _ in checks if icon == "⚠️")
+
+    print()
+    if n_fail > 0:
+        print("  VERDICT: 🚩 DO NOT paper trade yet.  Address the red flags first.")
+    elif n_warn > 0:
+        print("  VERDICT: ⚠️ PROCEED WITH CAUTION.  Monitor closely in paper trading.")
+    else:
+        print("  VERDICT: ✅ READY for paper trading.")
+    print()
+    print("  Remember: expect 30–40% haircut from backtest to live.")
+    print("=" * 60)

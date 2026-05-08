@@ -1001,7 +1001,7 @@ def load_sweeps(
 
     print(f"Loaded {len(sweeps)} sweep(s) from {sweep_path}")
     if schema_warnings:
-        print("⚠ Some sweeps were loaded with an older schema version:")
+        print("⚠️ Some sweeps were loaded with an older schema version:")
         for warning in schema_warnings:
             print(warning)
     return sweeps
@@ -1184,7 +1184,7 @@ def run_walk_forward(
                 errors = train_df["error"].dropna()
                 errors = errors[errors != ""]
                 first_err = errors.iloc[0] if not errors.empty else "unknown"
-                print("  ⚠ No valid results in training — skipping fold")
+                print("  ⚠️ No valid results in training — skipping fold")
                 print(f"    First error: {first_err}")
             start += step_size
             continue
@@ -1223,7 +1223,7 @@ def run_walk_forward(
                 f"PnL%={oos_pnl_pct:.2f}%  positions={oos_npos}"
             )
             if oos_row.get("error"):
-                print(f"    ⚠ OOS error: {oos_row['error']}")
+                print(f"    ⚠️ OOS error: {oos_row['error']}")
 
         fold_result: dict[str, Any] = {
             "fold": fold_num,
@@ -1291,7 +1291,11 @@ def run_walk_forward(
             else:
                 print("  Params:         UNSTABLE (different params per fold)")
                 for c in param_cols:
-                    unique = sorted(result_df[c].unique())
+                    # .tolist() converts numpy scalars (e.g. np.int64) to
+                    # plain Python primitives so the printed list reads as
+                    # ``[5, 10, 20, 75]`` rather than ``[np.int64(5), …]``
+                    # under NumPy 2.x.
+                    unique = sorted(result_df[c].dropna().unique().tolist())
                     print(f"    {c}: {unique}")
 
     return result_df
