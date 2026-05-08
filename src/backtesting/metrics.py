@@ -444,6 +444,103 @@ def bootstrap_total_pnl(
     }
 
 
+def bootstrap_max_drawdown(
+    trade_pnls: list[float],
+    *,
+    n_iterations: int = 10_000,
+    seed: int | None = 42,
+) -> dict[str, float]:
+    """Bootstrap a confidence interval on max drawdown.
+
+    Companion to :func:`bootstrap_total_pnl` — same resampling
+    procedure, but for each resample we build a synthetic equity curve
+    by cumulative-summing the resampled trades and record the worst
+    peak-to-trough drawdown.  Returns the distribution as summary
+    stats (95th percentile is the "bad-luck" tail you want for
+    position-sizing decisions).
+
+    Why this matters: PnL CI tells you "what could the total return
+    be?" but drawdown CI tells you "what's the worst hole I might
+    have to climb out of?".  Pros size positions to survive their
+    drawdown CI, not their PnL CI.
+
+    Caveat: same IID assumption as ``bootstrap_total_pnl``.  Real
+    strategies cluster losers (e.g. choppy regime → run of stops),
+    which produces deeper drawdowns than IID resampling captures.
+    Treat the 95th-percentile drawdown as a **lower bound** on
+    realistic worst-case, not a true upper bound.
+
+    All drawdown values are returned as **negative** dollar amounts
+    (the worst peak-to-trough loss along the synthetic equity curve);
+    a flat or always-positive curve returns 0.
+
+    Parameters
+    ----------
+    trade_pnls
+        Per-trade realized PnL (one float per closed trade).
+    n_iterations
+        Number of bootstrap samples.  Default 10,000.
+    seed
+        RNG seed for reproducibility.  Default 42.
+
+    Returns
+    -------
+    dict[str, float]
+        Keys: ``mean``, ``std``, ``pct_5``, ``pct_25``, ``median``,
+        ``pct_75``, ``pct_95``, ``min``, ``max``, ``n_iterations``,
+        ``n_trades``, ``actual_max_drawdown``.  All drawdowns are
+        non-positive; the **worst-case tail** is ``pct_5`` (most-
+        negative), the **least-bad tail** is ``pct_95``.
+
+    """
+    keys = [
+        "mean", "std", "pct_5", "pct_25", "median", "pct_75", "pct_95",
+        "min", "max", "n_iterations", "n_trades", "actual_max_drawdown",
+    ]
+    if not trade_pnls:
+        return dict.fromkeys(keys, float("nan"))
+
+    arr = np.asarray(trade_pnls, dtype=float)
+    n = len(arr)
+    rng = np.random.default_rng(seed)
+    idx = rng.integers(0, n, size=(n_iterations, n))
+    resampled = arr[idx]                              # (n_iterations, n)
+    equity = np.cumsum(resampled, axis=1)             # synthetic curves
+    # Running peak per-row, then drawdown = equity - running_peak.
+    # For peak-from-zero start, prepend zero so initial losses register
+    # as drawdown from the starting balance.
+    equity_with_zero = np.concatenate(
+        [np.zeros((n_iterations, 1)), equity], axis=1,
+    )
+    running_peak = np.maximum.accumulate(equity_with_zero, axis=1)
+    drawdowns = equity_with_zero - running_peak       # ≤ 0 everywhere
+    max_dd = drawdowns.min(axis=1)                    # most-negative per resample
+
+    # Actual MDD on the historical trade order (no resampling)
+    actual_equity = np.concatenate([[0.0], np.cumsum(arr)])
+    actual_peak = np.maximum.accumulate(actual_equity)
+    actual_mdd = float((actual_equity - actual_peak).min())
+
+    # All drawdowns ≤ 0, so pct_5 is the *worst* tail (most negative)
+    # and pct_95 is the *least bad* tail (closest to zero).  Display
+    # code labels pct_5 as "worst case" — same convention as
+    # bootstrap_total_pnl where pct_5 is the bad tail of total PnL.
+    return {
+        "mean": float(max_dd.mean()),
+        "std": float(max_dd.std(ddof=1)) if n_iterations > 1 else 0.0,
+        "pct_5": float(np.percentile(max_dd, 5)),
+        "pct_25": float(np.percentile(max_dd, 25)),
+        "median": float(np.median(max_dd)),
+        "pct_75": float(np.percentile(max_dd, 75)),
+        "pct_95": float(np.percentile(max_dd, 95)),
+        "min": float(max_dd.min()),
+        "max": float(max_dd.max()),
+        "n_iterations": int(n_iterations),
+        "n_trades": int(n),
+        "actual_max_drawdown": actual_mdd,
+    }
+
+
 def compute_drawdown_periods(
     balance: pd.Series,
 ) -> list[dict[str, Any]]:

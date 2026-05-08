@@ -1108,7 +1108,7 @@ def plot_drawdown_distribution(
     if durations_secs.max() > long_dd_threshold_secs:
         ax.text(
             0.5, 0.95,
-            f"⚠ longest drawdown: "
+            f"⚠️ longest drawdown: "
             f"{durations_secs.max() / 86400:.0f} days",
             transform=ax.transAxes, ha="center", va="top",
             fontsize=9, color="#b35900",
@@ -1216,6 +1216,109 @@ def plot_bootstrap_pnl(
     ax.set_xlabel(f"Total PnL ({currency})")
     ax.set_ylabel("Density (synthetic shape)")
     ax.legend(loc="upper right", fontsize=9)
+    ax.grid(True, alpha=0.2)
+
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_bootstrap_drawdown(
+    bootstrap_dist: dict[str, float],
+    *,
+    title: str = "Bootstrap max-drawdown distribution",
+    currency: str = "USDC",
+) -> None:
+    """Visualise a bootstrap max-drawdown CI as a synthetic histogram.
+
+    Companion to :func:`plot_bootstrap_pnl`.  Drawdowns are non-positive
+    so the x-axis spans negative values; the **worst-case tail** is
+    ``pct_5`` (left edge), the **least-bad tail** is ``pct_95`` (right
+    edge).  The actual-historical drawdown is overlaid as a red line —
+    if it sits in the right tail (less bad than median), the historical
+    path was relatively gentle; if it's in the left tail, the historical
+    path was unusually rough and the realistic forward worst-case is
+    deeper.
+
+    See :func:`plot_bootstrap_pnl` for caveats — the IID resampling
+    assumption underestimates real drawdown clustering.
+
+    Calls ``plt.show()`` directly — designed for inline notebook use.
+
+    Parameters
+    ----------
+    bootstrap_dist
+        Output of ``src.backtesting.metrics.bootstrap_max_drawdown(...)``.
+    title
+        Suptitle for the figure.
+    currency
+        Currency label for the x-axis.
+
+    """
+    if not bootstrap_dist or math.isnan(bootstrap_dist.get("mean", float("nan"))):
+        print("No bootstrap-drawdown distribution to plot.")
+        return
+
+    mean = bootstrap_dist["mean"]
+    std = bootstrap_dist["std"]
+    actual = bootstrap_dist["actual_max_drawdown"]
+    pct5 = bootstrap_dist["pct_5"]      # WORST tail (most negative)
+    pct25 = bootstrap_dist["pct_25"]
+    median = bootstrap_dist["median"]
+    pct75 = bootstrap_dist["pct_75"]
+    pct95 = bootstrap_dist["pct_95"]    # LEAST-BAD tail (closest to zero)
+    n_iter = bootstrap_dist.get("n_iterations", 0)
+    n_trades = bootstrap_dist.get("n_trades", 0)
+
+    fig, ax = plt.subplots(figsize=(12, 4.5))
+    fig.suptitle(
+        f"{title}  ·  {n_iter:,} resamples of {n_trades} trades",
+        fontsize=13,
+    )
+
+    # Synthetic Gaussian shape — same trick as plot_bootstrap_pnl
+    rng = np.random.default_rng(seed=0)
+    synth = rng.normal(mean, std, 5000) if std > 0 else np.full(5000, mean)
+    ax.hist(synth, bins=60, color="#d62728", alpha=0.35, edgecolor="#7f1f1f",
+            label="approx. distribution shape")
+
+    # Percentile bands — note pct5 < pct95 numerically (both negative)
+    ax.axvspan(pct5, pct95, alpha=0.10, color="#d62728",
+               label="5–95 pct band")
+    ax.axvspan(pct25, pct75, alpha=0.20, color="#d62728",
+               label="25–75 pct band")
+    ax.axvline(median, color="#7f1f1f", linestyle="-", linewidth=1.5,
+               label=f"Median = {median:,.0f}")
+    ax.axvline(pct5, color="#7f1f1f", linestyle="--", linewidth=1.2,
+               label=f"Worst 5% = {pct5:,.0f}")
+    ax.axvline(actual, color="#0f4c81", linestyle="-", linewidth=2.0,
+               label=f"Actual = {actual:,.0f}")
+
+    # Verdict — flipped vs PnL because more-negative is worse
+    if actual <= pct5:
+        verdict = "Actual MDD is in the WORST 5% of resamples — bad path?"
+        verdict_color = "#b35900"
+    elif actual <= pct25:
+        verdict = "Actual MDD is in the 5–25th pct — worse than median path."
+        verdict_color = "#444"
+    elif actual <= pct75:
+        verdict = "Actual MDD is within the central 50% — typical path."
+        verdict_color = "#444"
+    elif actual <= pct95:
+        verdict = "Actual MDD is in the 75–95th pct — better than median path."
+        verdict_color = "#26a69a"
+    else:
+        verdict = "Actual MDD is in the BEST 5% — unusually shallow drawdown."
+        verdict_color = "#26a69a"
+    ax.text(
+        0.02, 0.95, verdict,
+        transform=ax.transAxes, ha="left", va="top",
+        fontsize=10, color=verdict_color,
+        bbox={"facecolor": "#f0f0f0", "alpha": 0.85, "edgecolor": verdict_color},
+    )
+
+    ax.set_xlabel(f"Max drawdown ({currency})")
+    ax.set_ylabel("Density (synthetic shape)")
+    ax.legend(loc="upper left", fontsize=9)
     ax.grid(True, alpha=0.2)
 
     plt.tight_layout()
@@ -1652,7 +1755,7 @@ def plot_trade_distributions(
     # Annotate concentration risk
     if metrics_y[1] > 50:  # top 3 wins > 50% of total |PnL|
         ax.text(
-            0.5, 0.95, "⚠ top-3 wins > 50% of total |PnL|",
+            0.5, 0.95, "⚠️ top-3 wins > 50% of total |PnL|",
             transform=ax.transAxes, ha="center", va="top",
             fontsize=9, color="#b35900",
             bbox={"facecolor": "#fff8e1", "alpha": 0.9, "edgecolor": "#b35900"},
@@ -2099,6 +2202,144 @@ def _compute_stats(position_rows: list[dict], starting_capital: float) -> dict:
 
 
 # ── Analysis tool charts ──────────────────────────────────────────────────────
+
+
+def plot_walkforward_oos_equity(
+    wf_results: pd.DataFrame,
+    *,
+    title: str = "Walk-forward stitched OOS equity",
+    currency: str = "USDC",
+) -> None:
+    """Stitched cumulative OOS PnL line across walk-forward folds.
+
+    The canonical "what if I'd actually traded the WF picks live"
+    chart.  Plots a single piecewise-linear line over calendar time:
+    each fold contributes a segment from ``(test_start, prior_cum)``
+    to ``(test_end, prior_cum + oos_pnl)``, so the slope of each
+    segment shows that fold's per-day OOS rate of return.
+
+    Steeper slope = better fold; flat = breakeven; downward = lossy
+    fold.  Fold boundaries are marked with vertical guides annotated
+    with the fold's chosen params, so it's instantly visible whether
+    drift in the picks coincided with degraded OOS performance.
+
+    Calls ``plt.show()`` directly — designed for inline notebook use.
+
+    Parameters
+    ----------
+    wf_results
+        DataFrame from :func:`src.backtesting.engine.run_walk_forward`.
+        Required columns: ``fold``, ``test_start``, ``test_end``,
+        ``oos_pnl``.  Optional: any ``best_*`` columns are used to
+        annotate fold boundaries.
+    title
+        Chart title.
+    currency
+        Currency label for the y-axis.
+
+    """
+    if wf_results.empty:
+        print("No walk-forward results to plot.")
+        return
+
+    required = {"fold", "test_start", "test_end", "oos_pnl"}
+    missing = required - set(wf_results.columns)
+    if missing:
+        print(f"Missing required columns: {missing}")
+        return
+
+    import matplotlib.dates as mdates
+
+    # Sort folds by test_start so the cumulative chain is monotonic
+    # in calendar time even if the input rows aren't ordered.
+    folds = wf_results.sort_values("test_start").reset_index(drop=True)
+    test_starts = pd.to_datetime(folds["test_start"], utc=True)
+    test_ends   = pd.to_datetime(folds["test_end"],   utc=True)
+    oos_pnls = folds["oos_pnl"].astype(float).to_numpy()
+    cum_after = np.cumsum(oos_pnls)            # cumulative AFTER each fold
+    cum_before = np.concatenate([[0.0], cum_after[:-1]])  # cumulative BEFORE
+
+    # Best-* columns for annotations
+    param_cols = [c for c in folds.columns if c.startswith("best_")]
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+    fig.patch.set_facecolor(_BG)
+    ax.set_facecolor(_BG)
+
+    # Stitched line: alternate (test_start, prior_cum) → (test_end, new_cum)
+    xs: list[Any] = []
+    ys: list[float] = []
+    for ts, te, c0, c1 in zip(test_starts, test_ends, cum_before, cum_after, strict=True):
+        xs.extend([ts, te])
+        ys.extend([c0, c1])
+    ax.plot(
+        xs, ys,
+        color="#26a69a", linewidth=2.0,
+        label="Cumulative OOS PnL",
+    )
+    # Markers at fold boundaries
+    ax.scatter(
+        test_ends, cum_after,
+        color="#26a69a", s=40, zorder=3, edgecolor=_BORDER, linewidth=0.5,
+    )
+
+    # Zero-PnL guide
+    ax.axhline(0, color="white", linewidth=0.5, alpha=0.3)
+
+    # Vertical fold-boundary guides at test_end of every fold except the last
+    # (so the rightmost edge isn't crowded).  Annotated with chosen params.
+    y_top = max(cum_after.max(), 0.0)
+    y_bot = min(cum_after.min(), 0.0)
+    y_range = max(y_top - y_bot, 1e-9)
+    for i, (te, fold_id, c1) in enumerate(zip(
+        test_ends, folds["fold"], cum_after, strict=True,
+    )):
+        ax.axvline(te, color=_GRID, linewidth=0.6, alpha=0.4, linestyle="--")
+        # Annotate with picked params + fold OOS PnL
+        if param_cols:
+            param_label = ", ".join(
+                f"{c.removeprefix('best_')}={folds.iloc[i][c]}"
+                for c in param_cols
+            )
+            anno = f"#{int(fold_id)}: {param_label}\n+{oos_pnls[i]:,.0f}" \
+                if oos_pnls[i] >= 0 \
+                else f"#{int(fold_id)}: {param_label}\n{oos_pnls[i]:,.0f}"
+        else:
+            anno = f"#{int(fold_id)}\n{oos_pnls[i]:+,.0f}"
+        ax.annotate(
+            anno,
+            xy=(te, c1),
+            xytext=(0, 8 if c1 >= 0 else -22),
+            textcoords="offset points",
+            ha="right", va="bottom" if c1 >= 0 else "top",
+            fontsize=8, color=_TEXT, alpha=0.85,
+        )
+
+    # Headline number — final cumulative OOS PnL
+    final_pnl = cum_after[-1]
+    headline_color = "#26a69a" if final_pnl >= 0 else "#ef5350"
+    ax.text(
+        0.02, 0.95,
+        f"Total OOS: {final_pnl:+,.0f} {currency}",
+        transform=ax.transAxes, ha="left", va="top",
+        fontsize=11, color=headline_color, weight="bold",
+        bbox={"facecolor": _BG, "alpha": 0.85, "edgecolor": headline_color},
+    )
+
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%b\n%Y"))
+    ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+    ax.set_ylabel(f"Cumulative OOS PnL ({currency})", color=_TEXT)
+    ax.set_title(title, color=_TEXT, fontsize=13)
+    ax.tick_params(colors=_TEXT)
+    for spine in ax.spines.values():
+        spine.set_color(_BORDER)
+    ax.grid(axis="y", color=_GRID, alpha=0.3)
+    ax.legend(
+        loc="lower right", facecolor=_BG, edgecolor=_BORDER, labelcolor=_TEXT,
+    )
+
+    plt.tight_layout()
+    plt.show()
 
 
 def plot_rolling_pnl(
@@ -3636,6 +3877,489 @@ _SWEEP_HTML_TEMPLATE = r"""<!DOCTYPE html>
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Public: cross-sweep sortable HTML (multi-sweep comparison)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def generate_cross_sweep_html(
+    sweeps: dict[str, pd.DataFrame],
+    *,
+    output_dir: str | Path | None = None,
+    filename: str | None = None,
+    title: str | None = None,
+    extra_columns: list[str] | None = None,
+    open_browser: bool = False,
+) -> Path:
+    """Render a single sortable HTML table that combines rows from many sweeps.
+
+    Companion to :func:`generate_sweep_html` for cross-sweep
+    (multi-instrument / multi-timeframe / multi-strategy) comparison.
+    Each input sweep contributes its rows to one combined table; an
+    extra ``Sweep`` column identifies which sweep each row came from.
+
+    Parameters
+    ----------
+    sweeps
+        Mapping from sweep label to a sweep DataFrame (the same shape
+        returned by :func:`run_sweep` / :func:`load_sweeps`).  The
+        label is shown verbatim in the ``Sweep`` column and is used to
+        construct the default title.
+    output_dir
+        Directory to write the HTML file.  Default ``reports/sweeps/``
+        relative to the project root.
+    filename
+        Custom filename (with or without ``.html``).  Default
+        ``cross_sweep.html``.
+    title
+        Custom title shown in the HTML header.  Default ``Cross-sweep
+        comparison — N sweeps``.
+    extra_columns
+        Additional column names to include beyond the v2 default set.
+        Useful for sweep-specific stats not in the default list.
+    open_browser
+        If True, opens the generated HTML in the default browser.
+
+    Returns
+    -------
+    pathlib.Path
+        Absolute path to the generated HTML file.
+
+    Notes
+    -----
+    Param columns vary across strategies (e.g. ``fast_period`` vs
+    ``length``).  The function takes the **union** of all param
+    columns; rows from a sweep that doesn't have a given param render
+    as empty cells in that column.
+
+    Schema-version mismatches across input sweeps are surfaced in the
+    header subtitle (``schema vMixed`` if not all the same).
+
+    """
+    if not sweeps:
+        msg = "Cannot generate cross-sweep HTML from empty sweeps mapping."
+        raise ValueError(msg)
+
+    # ── Filter out empty inputs and tag rows with their sweep label ──────
+    tagged: list[pd.DataFrame] = []
+    schema_versions: set[int] = set()
+    for label, df in sweeps.items():
+        if df is None or df.empty:
+            print(f"  skipping empty sweep '{label}'")
+            continue
+        tagged_df = df.copy()
+        tagged_df["_sweep_label"] = str(label)
+        tagged.append(tagged_df)
+        if "_schema_version" in tagged_df.columns:
+            try:
+                schema_versions.add(int(tagged_df["_schema_version"].iloc[0]))
+            except (ValueError, TypeError):
+                pass
+
+    if not tagged:
+        msg = "All input sweeps are empty — nothing to render."
+        raise ValueError(msg)
+
+    # Concat with outer join so missing param columns become NaN.
+    combined = pd.concat(tagged, ignore_index=True, sort=False)
+    n_sweeps = len(tagged)
+
+    if title is None:
+        title = f"{n_sweeps} sweeps"
+
+    if len(schema_versions) == 1:
+        schema_str = f"v{next(iter(schema_versions))}"
+    elif schema_versions:
+        schema_str = "vMixed"
+    else:
+        schema_str = "v?"
+
+    # ── Resolve output path ──────────────────────────────────────────────
+    if output_dir is None:
+        proj_root = Path(__file__).resolve().parent.parent
+        output_dir = proj_root / "reports" / "sweeps"
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if filename is None:
+        filename = "cross_sweep.html"
+    if not filename.endswith(".html"):
+        filename = f"{filename}.html"
+    out_path = output_dir / filename
+
+    # ── Determine columns ────────────────────────────────────────────────
+    metric_cols = {col[0] for col in _SWEEP_DEFAULT_COLUMNS}
+    skip_cols = metric_cols | {"error", "_sweep_label"}
+    skip_prefix = "_"
+
+    # Union of strategy param columns across all sweeps, preserving
+    # first-seen order.
+    seen: set[str] = set()
+    param_cols: list[str] = []
+    for df in tagged:
+        for c in df.columns:
+            if c in skip_cols or c.startswith(skip_prefix):
+                continue
+            if c not in seen:
+                seen.add(c)
+                param_cols.append(c)
+
+    metric_specs = [
+        spec
+        for spec in _SWEEP_DEFAULT_COLUMNS
+        if spec[0] in combined.columns
+    ]
+
+    extra_specs: list[tuple[str, str, str, str]] = []
+    if extra_columns:
+        for col in extra_columns:
+            if col in combined.columns and col not in skip_cols:
+                extra_specs.append((col, col, "raw", "num"))
+
+    has_kind_column = (
+        "_kind" in combined.columns and combined["_kind"].notna().any()
+    )
+
+    # ── Stats bar ────────────────────────────────────────────────────────
+    n_combos = len(combined)
+    n_liq = (
+        int(combined["liquidated"].sum())
+        if "liquidated" in combined.columns
+        else 0
+    )
+    n_grid = (
+        int((combined["_kind"] != "spotlight").sum())
+        if has_kind_column
+        else n_combos
+    )
+    n_spot = n_combos - n_grid
+    median_dd = (
+        float(combined["max_drawdown_pct"].median())
+        if "max_drawdown_pct" in combined.columns
+        else float("nan")
+    )
+    best_pnl = (
+        float(combined["total_pnl"].max())
+        if "total_pnl" in combined.columns
+        else float("nan")
+    )
+
+    # ── Header row: Sweep | [Kind] | params... | metrics... | extras... ─
+    header_cells: list[str] = ["<th>Sweep</th>"]
+    if has_kind_column:
+        header_cells.append("<th>Kind</th>")
+    for col in param_cols:
+        header_cells.append(f"<th>{html.escape(str(col))}</th>")
+    for _col, label, _kind, _cls in metric_specs:
+        header_cells.append(f"<th>{html.escape(label)}</th>")
+    for _col, label, _kind, _cls in extra_specs:
+        header_cells.append(f"<th>{html.escape(label)}</th>")
+
+    # ── Body rows ────────────────────────────────────────────────────────
+    body_rows: list[str] = []
+    for _idx, row in combined.iterrows():
+        is_liq = bool(row.get("liquidated", False))
+        kind_val = row.get("_kind") if has_kind_column else None
+        is_spot = kind_val == "spotlight"
+        row_cls_parts: list[str] = []
+        if is_liq:
+            row_cls_parts.append("liquidated")
+        if is_spot:
+            row_cls_parts.append("spotlight")
+        row_cls = f' class="{" ".join(row_cls_parts)}"' if row_cls_parts else ""
+
+        cells: list[str] = [
+            f"<td>{html.escape(str(row.get('_sweep_label', '')))}</td>",
+        ]
+        if has_kind_column:
+            if is_spot:
+                cells.append(
+                    '<td><span class="badge badge-spotlight">SPOT</span></td>',
+                )
+            elif kind_val:
+                cells.append(f"<td>{html.escape(str(kind_val))}</td>")
+            else:
+                cells.append("<td></td>")
+        for col in param_cols:
+            cells.append(
+                f"<td>{html.escape(_fmt_sweep_auto(row.get(col)))}</td>",
+            )
+        for col, _label, kind, css in metric_specs:
+            formatted = _fmt_sweep_cell(row.get(col), kind)
+            cells.append(f'<td class="{css}">{formatted}</td>')
+        for col, _label, kind, css in extra_specs:
+            formatted = _fmt_sweep_cell(row.get(col), kind)
+            cells.append(f'<td class="{css}">{formatted}</td>')
+
+        body_rows.append(f'<tr{row_cls}>{"".join(cells)}</tr>')
+
+    # ── Default sort: total_pnl desc if present ──────────────────────────
+    sort_col_idx = 0
+    sort_target = "total_pnl"
+    if sort_target in {spec[0] for spec in metric_specs}:
+        # offset = leading Sweep column + (Kind column?) + param columns
+        offset = 1 + (1 if has_kind_column else 0) + len(param_cols)
+        for i, (col, *_rest) in enumerate(metric_specs):
+            if col == sort_target:
+                sort_col_idx = offset + i
+                break
+
+    # ── Render ───────────────────────────────────────────────────────────
+    html_doc = _CROSS_SWEEP_HTML_TEMPLATE.format(
+        title=html.escape(title),
+        schema_str=html.escape(schema_str),
+        n_sweeps=n_sweeps,
+        n_combos=n_combos,
+        n_grid=n_grid,
+        n_spot=n_spot,
+        n_liq=n_liq,
+        best_pnl=f"{best_pnl:,.2f}" if math.isfinite(best_pnl) else "—",
+        median_dd=(
+            f"{median_dd * 100:.2f}%" if math.isfinite(median_dd) else "—"
+        ),
+        header_cells="\n".join(header_cells),
+        body_rows="\n".join(body_rows),
+        sort_col_idx=sort_col_idx,
+        csv_filename=Path(filename).stem,
+    )
+
+    out_path.write_text(html_doc, encoding="utf-8")
+    print(f"✓ Cross-sweep HTML written → {out_path}")
+
+    if open_browser:
+        webbrowser.open(out_path.as_uri())
+
+    return out_path
+
+
+_CROSS_SWEEP_HTML_TEMPLATE = r"""<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Cross-sweep — {title}</title>
+  <link rel="stylesheet" href="https://cdn.datatables.net/2.1.8/css/dataTables.dataTables.min.css">
+  <link rel="stylesheet" href="https://cdn.datatables.net/buttons/3.2.0/css/buttons.dataTables.min.css">
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <script src="https://cdn.datatables.net/2.1.8/js/dataTables.min.js"></script>
+  <script src="https://cdn.datatables.net/buttons/3.2.0/js/dataTables.buttons.min.js"></script>
+  <script src="https://cdn.datatables.net/buttons/3.2.0/js/buttons.html5.min.js"></script>
+  <style>
+    body {{
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      background: #0f1116;
+      color: #d1d4dc;
+      margin: 0;
+      padding: 24px;
+    }}
+    h1 {{
+      font-size: 18px;
+      margin: 0 0 4px 0;
+      color: #fff;
+    }}
+    .subtitle {{
+      color: #888;
+      font-size: 12px;
+      margin-bottom: 16px;
+    }}
+    .stats-bar {{
+      background: #1a1d24;
+      padding: 12px 16px;
+      margin-bottom: 16px;
+      border-radius: 6px;
+      display: flex;
+      gap: 24px;
+      flex-wrap: wrap;
+    }}
+    .stat-item {{
+      font-size: 12px;
+    }}
+    .stat-label {{
+      color: #888;
+      margin-right: 6px;
+    }}
+    .stat-value {{
+      font-weight: bold;
+      color: #fff;
+    }}
+    table.dataTable {{
+      font-family: "Menlo", "Monaco", "Consolas", monospace;
+      font-size: 11px;
+      background: #1a1d24;
+      color: #d1d4dc;
+      border-collapse: collapse;
+    }}
+    table.dataTable thead th {{
+      background: #232730;
+      border-bottom: 1px solid #383b45;
+      padding: 8px 12px;
+      color: #fff;
+      font-weight: bold;
+      cursor: pointer;
+    }}
+    table.dataTable tbody td {{
+      padding: 6px 12px;
+      border-bottom: 1px solid #2a2d36;
+    }}
+    table.dataTable tbody tr {{
+      background: #1a1d24;
+    }}
+    table.dataTable tbody tr:hover {{
+      background: #232730;
+    }}
+    table.dataTable tbody tr.liquidated {{
+      background: rgba(214, 39, 40, 0.10);
+    }}
+    table.dataTable tbody tr.liquidated:hover {{
+      background: rgba(214, 39, 40, 0.20);
+    }}
+    table.dataTable tbody tr.spotlight {{
+      background: rgba(255, 200, 0, 0.07);
+    }}
+    table.dataTable tbody tr.spotlight:hover {{
+      background: rgba(255, 200, 0, 0.14);
+    }}
+    .num {{
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }}
+    .num-positive {{
+      color: #2ca02c;
+    }}
+    .num-negative {{
+      color: #d62728;
+    }}
+    .badge {{
+      display: inline-block;
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 9px;
+      font-weight: bold;
+      letter-spacing: 0.5px;
+    }}
+    .badge-spotlight {{
+      background: #ffc800;
+      color: #000;
+    }}
+    .badge-liquidated {{
+      background: #d62728;
+      color: #fff;
+    }}
+    .dataTables_wrapper {{
+      color: #d1d4dc;
+    }}
+    .dataTables_filter input,
+    .dataTables_length select {{
+      background: #1a1d24;
+      color: #d1d4dc;
+      border: 1px solid #383b45;
+      padding: 4px 8px;
+      border-radius: 3px;
+    }}
+    .dataTables_paginate .paginate_button {{
+      color: #d1d4dc !important;
+    }}
+    .dataTables_paginate .paginate_button.current {{
+      background: #2962ff !important;
+      color: #fff !important;
+      border: 0 !important;
+    }}
+    button.dt-button {{
+      background: #2962ff !important;
+      color: #fff !important;
+      border: 0 !important;
+      padding: 6px 12px !important;
+      font-size: 11px !important;
+      margin-bottom: 8px !important;
+    }}
+    .legend {{
+      font-size: 11px;
+      color: #888;
+      margin-top: 12px;
+    }}
+    .legend .swatch {{
+      display: inline-block;
+      width: 12px;
+      height: 12px;
+      vertical-align: middle;
+      margin-right: 6px;
+      margin-left: 12px;
+      border-radius: 2px;
+    }}
+    .swatch.liq {{ background: rgba(214, 39, 40, 0.30); }}
+    .swatch.spot {{ background: rgba(255, 200, 0, 0.30); }}
+  </style>
+</head>
+<body>
+  <h1>Cross-sweep — {title}</h1>
+  <div class="subtitle">
+    Schema {schema_str} · {n_sweeps} sweeps combined
+  </div>
+
+  <div class="stats-bar">
+    <div class="stat-item">
+      <span class="stat-label">Sweeps:</span><span class="stat-value">{n_sweeps}</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Combos:</span><span class="stat-value">{n_combos}</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Grid:</span><span class="stat-value">{n_grid}</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Spotlight:</span><span class="stat-value">{n_spot}</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Liquidated:</span><span class="stat-value">{n_liq}</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Best PnL:</span><span class="stat-value">{best_pnl}</span>
+    </div>
+    <div class="stat-item">
+      <span class="stat-label">Median DD:</span><span class="stat-value">{median_dd}</span>
+    </div>
+  </div>
+
+  <table id="sweepTable" class="display compact" style="width: 100%">
+    <thead>
+      <tr>
+{header_cells}
+      </tr>
+    </thead>
+    <tbody>
+{body_rows}
+    </tbody>
+  </table>
+
+  <div class="legend">
+    Click headers to sort · Shift-click for multi-column · Filter by Sweep column to drill into one
+    <span class="swatch liq"></span>liquidated
+    <span class="swatch spot"></span>spotlight (off-grid)
+  </div>
+
+  <script>
+    $(document).ready(function() {{
+      $('#sweepTable').DataTable({{
+        order: [[ {sort_col_idx}, 'desc' ]],
+        pageLength: 25,
+        lengthMenu: [[25, 50, 100, -1], [25, 50, 100, 'All']],
+        layout: {{
+          topStart: ['buttons'],
+        }},
+        buttons: [
+          {{
+            extend: 'csv',
+            text: 'Download CSV',
+            filename: '{csv_filename}',
+          }}
+        ],
+      }});
+    }});
+  </script>
+</body>
+</html>
+"""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Public: self-contained v2 tearsheet (replaces the broken NT tearsheet)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -3818,7 +4542,7 @@ def _render_trade_distributions_png(
         s.set_color("#383b45")
     if values[1] > 50:
         ax.text(
-            0.5, 0.95, "⚠ top-3 wins > 50% of total |PnL|",
+            0.5, 0.95, "⚠️ top-3 wins > 50% of total |PnL|",
             transform=ax.transAxes, ha="center", va="top",
             fontsize=8, color="#000",
             bbox={"facecolor": "#ffc800", "alpha": 0.9, "edgecolor": "#b35900"},
@@ -4205,7 +4929,7 @@ def generate_v2_tearsheet(
             f" at {liquidated_at}" if liquidated_at else ""
         )
         liq_banner = (
-            f'<div class="liq-banner">⚠ ACCOUNT LIQUIDATED{ts_str} '
+            f'<div class="liq-banner">⚠️ ACCOUNT LIQUIDATED{ts_str} '
             f'— equity hit zero or below during the run.</div>'
         )
 

@@ -14,6 +14,7 @@ import pytest
 
 from src.backtesting.metrics import (
     TradeRecord,
+    bootstrap_max_drawdown,
     bootstrap_total_pnl,
     compute_activity_metrics,
     compute_all_metrics,
@@ -392,6 +393,85 @@ class TestBootstrapTotalPnL:
 
     def test_empty_returns_all_nan(self) -> None:
         out = bootstrap_total_pnl([], n_iterations=100)
+        assert all(math.isnan(v) for v in out.values())
+
+
+# ── bootstrap_max_drawdown ──────────────────────────────────────────────────
+
+
+class TestBootstrapMaxDrawdown:
+    def test_returns_required_keys(self) -> None:
+        out = bootstrap_max_drawdown(
+            [10.0, -5.0, 20.0, -3.0, 15.0],
+            n_iterations=200, seed=1,
+        )
+        expected = {
+            "mean", "std", "pct_5", "pct_25", "median", "pct_75", "pct_95",
+            "min", "max", "n_iterations", "n_trades", "actual_max_drawdown",
+        }
+        assert expected.issubset(out.keys())
+
+    def test_drawdowns_are_non_positive(self) -> None:
+        out = bootstrap_max_drawdown(
+            [10.0, -5.0, 20.0, -3.0, 15.0],
+            n_iterations=500, seed=1,
+        )
+        # Every percentile + actual must be ≤ 0
+        for k in ("mean", "pct_5", "pct_25", "median", "pct_75", "pct_95",
+                  "min", "max", "actual_max_drawdown"):
+            assert out[k] <= 0.0, f"{k} should be ≤ 0, got {out[k]}"
+
+    def test_pct5_is_worst_pct95_is_least_bad(self) -> None:
+        # Drawdowns are negative, so pct_5 (worst) < pct_95 (best)
+        out = bootstrap_max_drawdown(
+            [10.0, -5.0, 20.0, -3.0, 15.0, 7.0, -2.0, 8.0],
+            n_iterations=2000, seed=1,
+        )
+        assert out["pct_5"] <= out["pct_25"] <= out["median"]
+        assert out["median"] <= out["pct_75"] <= out["pct_95"]
+        assert out["pct_5"] <= out["pct_95"]  # worst <= least-bad
+
+    def test_actual_max_drawdown_matches_input_path(self) -> None:
+        # 10 → -10 → 5 → 25 → 15 (cumulative starting from 0)
+        # peaks: 0,10,10,15,40,40 → drawdowns: 0,0,0,-5,0,-25 → MDD = -25
+        # Wait: cumsum([10,-20,15,20,-25]) = [10,-10,5,25,0]
+        # equity_with_zero = [0,10,-10,5,25,0]
+        # running peak    = [0,10,10,10,25,25]
+        # drawdowns       = [0, 0,-20,-5, 0,-25]  → MDD = -25
+        pnls = [10.0, -20.0, 15.0, 20.0, -25.0]
+        out = bootstrap_max_drawdown(pnls, n_iterations=100, seed=1)
+        assert out["actual_max_drawdown"] == pytest.approx(-25.0)
+
+    def test_all_winners_zero_drawdown(self) -> None:
+        # Every trade is positive — no drawdown ever, regardless of order
+        out = bootstrap_max_drawdown(
+            [10.0, 20.0, 5.0, 15.0],
+            n_iterations=100, seed=1,
+        )
+        assert out["actual_max_drawdown"] == 0.0
+        # Resampling can only produce positive trades → max DD = 0 in
+        # every resample (peak from 0 always rises monotonically).
+        assert out["pct_5"] == 0.0
+        assert out["pct_95"] == 0.0
+
+    def test_all_losers_max_drawdown_is_total(self) -> None:
+        # All losses → equity is monotonically decreasing → MDD = total loss
+        out = bootstrap_max_drawdown(
+            [-10.0, -5.0, -20.0],
+            n_iterations=100, seed=1,
+        )
+        assert out["actual_max_drawdown"] == pytest.approx(-35.0)
+
+    def test_seed_determinism(self) -> None:
+        pnls = [10.0, -5.0, 20.0, -3.0, 15.0, 7.0, -2.0]
+        a = bootstrap_max_drawdown(pnls, n_iterations=500, seed=42)
+        b = bootstrap_max_drawdown(pnls, n_iterations=500, seed=42)
+        assert a["mean"] == b["mean"]
+        assert a["pct_5"] == b["pct_5"]
+        assert a["pct_95"] == b["pct_95"]
+
+    def test_empty_returns_all_nan(self) -> None:
+        out = bootstrap_max_drawdown([], n_iterations=100)
         assert all(math.isnan(v) for v in out.values())
 
 

@@ -1,5 +1,6 @@
 from src.backtesting.analysis import (
     performance_by_regime,
+    performance_by_year,
     rolling_performance,
     run_fee_sweep,
     tag_regimes,
@@ -16,6 +17,7 @@ __all__ = [
     "load_sweeps",
     "make_engine",
     "performance_by_regime",
+    "performance_by_year",
     "rolling_performance",
     "run_fee_sweep",
     "run_single_backtest",
