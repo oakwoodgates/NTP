@@ -1409,6 +1409,11 @@ def _write_fake_verdict(
         "instrument_id": instrument,
         "bar_interval": interval,
         "params": params,
+        # New v1-extended field — explicit override marker.  Keep it
+        # present (None or dict) on every fake verdict so the matrix's
+        # primary "auto vs override" path is exercised, not the legacy
+        # filename-suffix fallback.
+        "override_params": dict(params) if is_override else None,
         "starting_capital": 1000,
         "checks": [
             {"icon": "✅", "name": "Plateau", "detail": "x", "outcome": "pass"},
@@ -1524,3 +1529,85 @@ class TestBuildVerdictMatrix:
         # Every cell in a check column is an icon (✅/⚠️/🚩) or empty
         for cell in df["Plateau"].dropna().tolist():
             assert cell in {"✅", "⚠️", "🚩", ""}
+
+    def test_uses_override_params_field_over_filename(
+        self, tmp_path: Path,
+    ) -> None:
+        # Filename has no override suffix, but override_params field
+        # is set — should still mark as override (new schema path).
+        import json
+        data = {
+            "_schema_version": 1,
+            "instrument_id": "BTC.HL", "bar_interval": "1d",
+            "params": {"fast": 10, "slow": 20},
+            "override_params": {"fast": 10, "slow": 20},
+            "starting_capital": 1000,
+            "checks": [
+                {"icon": "✅", "name": "Plateau", "detail": "x", "outcome": "pass"},
+            ],
+            "counts": {"pass": 1, "warn": 0, "fail": 0},
+            "verdict": {"icon": "✅", "outcome": "pass", "summary": "x"},
+            "timestamp": "2026-05-07T22:00:00+00:00",
+        }
+        # Note: filename is the AUTO-pick form (no override suffix)
+        (tmp_path / "validate_x_BTC.HL_1d_verdict.json").write_text(
+            json.dumps(data, indent=2), encoding="utf-8",
+        )
+        verdicts = load_verdict_jsons(tmp_path)
+        df = build_verdict_matrix(verdicts)
+        # Should be marked as override despite the auto-style filename
+        assert any("fast=10" in p for p in df["pick"].tolist())
+
+    def test_legacy_filename_fallback_for_pre_field_jsons(
+        self, tmp_path: Path,
+    ) -> None:
+        # Old-format JSON without override_params field — falls back
+        # to filename-suffix detection.
+        import json
+        data = {
+            "_schema_version": 1,
+            "instrument_id": "BTC.HL", "bar_interval": "1d",
+            "params": {"fast": 10, "slow": 20},
+            # NO override_params field — pre-schema
+            "starting_capital": 1000,
+            "checks": [
+                {"icon": "✅", "name": "Plateau", "detail": "x", "outcome": "pass"},
+            ],
+            "counts": {"pass": 1, "warn": 0, "fail": 0},
+            "verdict": {"icon": "✅", "outcome": "pass", "summary": "x"},
+            "timestamp": "2026-05-07T22:00:00+00:00",
+        }
+        # Filename has the override suffix → fallback heuristic picks up
+        (tmp_path / "validate_x_BTC.HL_1d_fast10_slow20_verdict.json").write_text(
+            json.dumps(data, indent=2), encoding="utf-8",
+        )
+        verdicts = load_verdict_jsons(tmp_path)
+        df = build_verdict_matrix(verdicts)
+        # Legacy path should detect override via filename
+        assert any("fast=10" in p for p in df["pick"].tolist())
+
+    def test_legacy_filename_fallback_with_short_tag(
+        self, tmp_path: Path,
+    ) -> None:
+        # New short-tag filenames (_f10_s20 instead of _fast10_slow20)
+        # also need to be picked up by the legacy fallback path for
+        # pre-field JSONs.
+        import json
+        data = {
+            "_schema_version": 1,
+            "instrument_id": "BTC.HL", "bar_interval": "1d",
+            "params": {"fast": 10, "slow": 20},
+            "starting_capital": 1000,
+            "checks": [
+                {"icon": "✅", "name": "Plateau", "detail": "x", "outcome": "pass"},
+            ],
+            "counts": {"pass": 1, "warn": 0, "fail": 0},
+            "verdict": {"icon": "✅", "outcome": "pass", "summary": "x"},
+            "timestamp": "2026-05-07T22:00:00+00:00",
+        }
+        (tmp_path / "validate_x_BTC.HL_1d_f10_s20_verdict.json").write_text(
+            json.dumps(data, indent=2), encoding="utf-8",
+        )
+        verdicts = load_verdict_jsons(tmp_path)
+        df = build_verdict_matrix(verdicts)
+        assert any("fast=10" in p for p in df["pick"].tolist())

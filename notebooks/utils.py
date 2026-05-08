@@ -894,16 +894,30 @@ def build_verdict_matrix(
 
     for v in verdicts:
         params = v.get("params", {}) or {}
-        # Heuristic for "auto" vs "override": auto-pick rows include
-        # the chosen combo as params with no explicit marker, but the
-        # snapshot filename has no override suffix.  Inspect the
-        # _source filename for the suffix.
-        src = v.get("_source", "")
-        is_override = "_fast" in src or "_bb_period" in src or "_dc_period" in src or "_length" in src
-        pick_str = (
-            ", ".join(f"{k}={vv}" for k, vv in params.items())
-            if is_override else "auto"
-        )
+        # "auto" vs "override" determination — prefer the explicit
+        # ``override_params`` field on the verdict dict (v1 schema
+        # forward), then fall back to the legacy filename-suffix
+        # heuristic for older JSONs that predate the field.
+        override = v.get("override_params")
+        if override:
+            pick_str = ", ".join(f"{k}={vv}" for k, vv in override.items())
+        elif override is None and "override_params" in v:
+            # Explicit None — auto-pick run on the new schema
+            pick_str = "auto"
+        else:
+            # Legacy fallback: sniff the source filename for known
+            # override-tag prefixes.
+            src = v.get("_source", "")
+            is_override = (
+                "_fast" in src or "_f10" in src or "_f5" in src
+                or "_bb_period" in src or "_bp" in src
+                or "_dc_period" in src or "_dp" in src
+                or "_length" in src
+            )
+            pick_str = (
+                ", ".join(f"{k}={vv}" for k, vv in params.items())
+                if is_override else "auto"
+            )
 
         check_icons = {c["name"]: c["icon"] for c in v.get("checks", [])}
         verdict_icon = v.get("verdict", {}).get("icon", "")
@@ -1103,6 +1117,7 @@ def print_validation_verdict(
     yearly_results: Any | None = None,
     starting_capital: float | None = None,
     verdict_path: str | Path | None = None,
+    override_params: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Print the consolidated go / no-go assessment for a strategy.
 
@@ -1426,6 +1441,12 @@ def print_validation_verdict(
         "instrument_id": instrument_id,
         "bar_interval": bar_interval,
         "params": dict(params),
+        # When ``override_params`` is set, the run validated a
+        # specific user-supplied combo (typically the cross-sweep
+        # robust pick) instead of the per-sweep best.  Persisting
+        # it explicitly lets validate_all distinguish "auto" from
+        # "override" rows without filename-suffix sniffing.
+        "override_params": dict(override_params) if override_params else None,
         "starting_capital": starting_capital,
         "checks": [
             {

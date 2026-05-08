@@ -27,6 +27,8 @@ from _validate_helpers import (  # type: ignore[import-not-found] # noqa: E402
     make_strategy_factory,
     parse_pnl,
     plateau_scores,
+    short_param_key,
+    short_params_tag,
 )
 
 # ── STRATEGIES registry ─────────────────────────────────────────────────────
@@ -262,3 +264,60 @@ class TestEnrichRegimeWithWilson:
         cols_before = list(df.columns)
         enrich_regime_with_wilson(df)
         assert list(df.columns) == cols_before  # original DF untouched
+
+
+# ── short_param_key + short_params_tag ──────────────────────────────────────
+
+
+class TestShortParamKey:
+    def test_single_word(self) -> None:
+        assert short_param_key("fast") == "f"
+        assert short_param_key("slow") == "s"
+
+    def test_underscore_separated(self) -> None:
+        assert short_param_key("bb_period") == "bp"
+        assert short_param_key("bb_std") == "bs"
+        assert short_param_key("dc_period") == "dp"
+        assert short_param_key("atr_sl") == "as"
+        assert short_param_key("atr_tp") == "at"
+        assert short_param_key("trailing_mult") == "tm"
+
+    def test_collisions_within_strategy(self) -> None:
+        # Within each strategy's grid, the short keys must be unique
+        # (otherwise a filename like "bb20_bb2.0" can't round-trip).
+        for strategy in STRATEGIES:
+            combos, _, _ = get_param_grid(strategy)
+            keys = list(combos[0].keys())
+            short = [short_param_key(k) for k in keys]
+            assert len(short) == len(set(short)), (
+                f"{strategy}: short-key collision in "
+                f"{dict(zip(keys, short, strict=True))}"
+            )
+
+    def test_empty_string(self) -> None:
+        assert short_param_key("") == ""
+
+
+class TestShortParamsTag:
+    def test_ma_cross_format(self) -> None:
+        assert short_params_tag({"fast": 10, "slow": 20}) == "f10_s20"
+
+    def test_bb_meanrev_format(self) -> None:
+        assert short_params_tag(
+            {"bb_period": 20, "bb_std": 2.0},
+        ) == "bp20_bs2.0"
+
+    def test_donchian_format(self) -> None:
+        assert short_params_tag({"dc_period": 20}) == "dp20"
+
+    def test_empty_dict(self) -> None:
+        assert short_params_tag({}) == ""
+
+    def test_preserves_dict_order(self) -> None:
+        # Python 3.7+ dicts preserve insertion order; we rely on that
+        # for stable filenames.  Verify reordering produces a different
+        # tag (would be a problem if the function silently sorted).
+        a = short_params_tag({"fast": 10, "slow": 20})
+        b = short_params_tag({"slow": 20, "fast": 10})
+        assert a == "f10_s20"
+        assert b == "s20_f10"
