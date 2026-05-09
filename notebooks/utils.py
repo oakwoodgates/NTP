@@ -216,10 +216,25 @@ def save_notebook_snapshot(
     import os
     import time
 
-    if not os.path.exists(notebook_filename):
+    # ── 0. Resolve the source notebook filename ─────────────────────
+    # Try, in order:
+    #   1. The path as-given (handles absolute paths and CWD-relative).
+    #   2. notebooks/backtest/<filename>  (the most common case).
+    #   3. notebooks/<filename>           (workflow notebooks at root).
+    # Robust to whatever CWD the kernel was launched from.
+    _candidates = [
+        Path(notebook_filename),
+        _PROJECT_ROOT / "notebooks" / "backtest" / notebook_filename,
+        _PROJECT_ROOT / "notebooks" / notebook_filename,
+    ]
+    _resolved = next((p for p in _candidates if p.is_file()), None)
+    if _resolved is None:
         print(f"⚠️ Notebook file not found: {notebook_filename}")
-        print("  (CWD: {})".format(os.getcwd()))
+        print(f"  Tried (CWD={os.getcwd()}):")
+        for _c in _candidates:
+            print(f"    - {_c}")
         return None
+    notebook_filename = str(_resolved)
 
     # ── 1. Active wait for editor autosave to flush prior cells ─────
     initial_mtime = os.path.getmtime(notebook_filename)

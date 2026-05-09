@@ -28,7 +28,25 @@ from src.core.protective_stop_mixin import PROTECTIVE_STOP_TAG, ProtectiveStopAw
 # ── Mixin-only test harness ────────────────────────────────────────────────
 
 
-class _MixinHarness(ProtectiveStopAware):
+class _ChainEnd:
+    """No-op sentinel — sits at the end of the test MRO chain.
+
+    ``ProtectiveStopAware`` calls ``super().on_*()`` in every event handler
+    (the cooperative-super pattern that lets the mixin compose with
+    ``LiquidationAware`` and other mixins downstream).  In production the
+    chain ends at NT's ``Strategy`` which has concrete no-op stubs; in
+    these standalone tests we use this lightweight sentinel so the super()
+    calls don't ``AttributeError`` against ``object``.
+    """
+
+    def on_position_opened(self, event: object) -> None: ...
+    def on_position_changed(self, event: object) -> None: ...
+    def on_position_closed(self, event: object) -> None: ...
+    def on_order_filled(self, event: object) -> None: ...
+    def on_reset(self) -> None: ...
+
+
+class _MixinHarness(ProtectiveStopAware, _ChainEnd):
     """Concrete subclass to test mixin methods in isolation.
 
     Skipping ``Strategy`` here is deliberate — these tests don't need NT's
@@ -283,3 +301,108 @@ class TestTagConstant:
         If you rename it, update the v2 tearsheet + notebook code that
         filters orders by tag."""
         assert PROTECTIVE_STOP_TAG == "protective_stop"
+
+
+# ── Cooperative super() chain ─────────────────────────────────────────────
+
+
+class _SpyParent:
+    """Records every event-handler call for assertion in chain tests.
+
+    Used as the parent class in ``(ProtectiveStopAware, _SpyParent)`` test
+    fixtures so we can verify ``super().on_*()`` calls actually fire — and
+    that they fire EVEN WHEN the mixin is disabled (``stop_pct=None``).
+
+    This is the regression case for the bug where ``ProtectiveStopAware``
+    would silently swallow events when disabled, never propagating them
+    to downstream mixins like ``LiquidationAware``.
+    """
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, object]] = []
+
+    def on_position_opened(self, event: object) -> None:
+        self.calls.append(("on_position_opened", event))
+
+    def on_position_changed(self, event: object) -> None:
+        self.calls.append(("on_position_changed", event))
+
+    def on_position_closed(self, event: object) -> None:
+        self.calls.append(("on_position_closed", event))
+
+    def on_order_filled(self, event: object) -> None:
+        self.calls.append(("on_order_filled", event))
+
+    def on_reset(self) -> None:
+        self.calls.append(("on_reset", None))
+
+
+class _ChainHarness(ProtectiveStopAware, _SpyParent):
+    """Test harness with a spy parent for verifying super() calls."""
+
+
+class TestSuperChain:
+    """Regression: ``ProtectiveStopAware`` MUST call super() in every event
+    handler so downstream mixins (e.g. ``LiquidationAware``) still receive
+    the event when this mixin is disabled.
+
+    Without this, a strategy declared as
+    ``(ProtectiveStopAware, LiquidationAware, Strategy)`` with
+    ``stop_pct=None`` silently bypasses ``LiquidationAware`` — meaning no
+    per-position cross-margin liq stop gets placed.  The
+    ``AccountAliveMonitor`` actor still halts on equity breaches (it's a
+    separate Actor, not affected by the strategy's MRO), but min_balance
+    can go sub-zero before that happens because the per-position safety
+    net is gone.
+    """
+
+    def test_disabled_propagates_position_opened(self) -> None:
+        h = _ChainHarness()
+        h._init_protective_stop(None)  # disabled
+        sentinel = object()
+        h.on_position_opened(sentinel)
+        assert h.calls == [("on_position_opened", sentinel)]
+
+    def test_disabled_propagates_position_changed(self) -> None:
+        h = _ChainHarness()
+        h._init_protective_stop(None)
+        sentinel = object()
+        h.on_position_changed(sentinel)
+        assert h.calls == [("on_position_changed", sentinel)]
+
+    def test_disabled_propagates_position_closed(self) -> None:
+        h = _ChainHarness()
+        h._init_protective_stop(None)
+        sentinel = object()
+        h.on_position_closed(sentinel)
+        assert h.calls == [("on_position_closed", sentinel)]
+
+    def test_disabled_propagates_order_filled(self) -> None:
+        h = _ChainHarness()
+        h._init_protective_stop(None)
+        sentinel = object()
+        h.on_order_filled(sentinel)
+        assert h.calls == [("on_order_filled", sentinel)]
+
+    def test_disabled_propagates_reset(self) -> None:
+        h = _ChainHarness()
+        h._init_protective_stop(None)
+        h.on_reset()
+        assert h.calls == [("on_reset", None)]
+
+    def test_enabled_also_propagates(self) -> None:
+        """When enabled, super() must STILL be called — the mixin doesn't
+        get to be selfish about events.  Order in the chain matters: super()
+        is called first, then this mixin's logic runs.
+
+        Without an instrument cache + order factory we can't exercise the
+        full enabled path (the ``_protective_issue_stop`` call would
+        AttributeError), so we just verify the super() chain fires for
+        ``on_reset`` which has no I/O side-effects."""
+        h = _ChainHarness()
+        h._init_protective_stop(0.05)  # enabled
+        h.on_reset()
+        assert h.calls == [("on_reset", None)]
+        # And the mixin's own reset still happened.
+        assert h._protective_order_ids == {}
+        assert h._protective_count == 0

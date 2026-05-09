@@ -207,9 +207,18 @@ class ProtectiveStopAware:
             self.cancel_order(order)  # type: ignore[attr-defined]
 
     # ── Position lifecycle handlers ─────────────────────────────────────────
+    #
+    # Each handler calls ``super().on_*()`` FIRST so events propagate down
+    # the MRO chain (e.g. to ``LiquidationAware``) even when this mixin is
+    # disabled (``stop_pct=None``).  Without this, a strategy declared as
+    # ``(ProtectiveStopAware, LiquidationAware, Strategy)`` with stop_pct
+    # set to None would silently bypass ``LiquidationAware`` — meaning no
+    # per-position cross-margin liq stop gets placed.  Cooperative super()
+    # is what makes the mixin chain composable.
 
     def on_position_opened(self, event: PositionOpened) -> None:
         """Submit a reduce-only stop at ``entry × (1 ± stop_pct)``."""
+        super().on_position_opened(event)  # type: ignore[misc]
         if not self._protective_enabled():
             return
         self._protective_issue_stop(
@@ -227,6 +236,7 @@ class ProtectiveStopAware:
         change — important for adds/scale-ins where the average shifts.
         For close-and-reverse flips, the new average is the new entry.
         """
+        super().on_position_changed(event)  # type: ignore[misc]
         if not self._protective_enabled():
             return
         self._protective_cancel_stop(event.position_id)
@@ -240,6 +250,7 @@ class ProtectiveStopAware:
 
     def on_position_closed(self, event: PositionClosed) -> None:
         """Cancel any remaining protective order for this position."""
+        super().on_position_closed(event)  # type: ignore[misc]
         if not self._protective_enabled():
             return
         self._protective_cancel_stop(event.position_id)
@@ -252,6 +263,7 @@ class ProtectiveStopAware:
         Notebooks reading the ``fills_report`` can do the same lookup
         for close-cause analysis.
         """
+        super().on_order_filled(event)  # type: ignore[misc]
         if not self._protective_enabled():
             return
 
@@ -276,5 +288,6 @@ class ProtectiveStopAware:
         own override or this clear never fires — iteration N+1 would
         inherit stale ``_protective_order_ids`` from iteration N.
         """
+        super().on_reset()  # type: ignore[misc]
         self._protective_order_ids = {}
         self._protective_count = 0
