@@ -99,12 +99,12 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │   │   ├── ma_cross.ipynb           # MA crossover backtest + sweep — covers all
 │   │   │                            #   6 MA types (EMA/SMA/HMA/DEMA/AMA/VIDYA)
 │   │   │                            #   via MA_TYPE selector in cell 1.1
-│   │   ├── ema_cross_atr.ipynb      # MA crossover + ATR bracket (all MA types)
-│   │   ├── ema_cross_bracket.ipynb  # MA regime + ATR bracket (all MA types)
-│   │   ├── ema_cross_long_only.ipynb
-│   │   ├── ema_cross_stop_entry.ipynb
-│   │   ├── ema_cross_tp.ipynb
-│   │   ├── ema_cross_trailing_stop.ipynb
+│   │   ├── ma_cross_atr.ipynb       # MA crossover + ATR bracket (TP + SL)
+│   │   ├── ma_cross_bracket.ipynb   # MA crossover + symmetric ATR bracket
+│   │   ├── ma_cross_long_only.ipynb # MA crossover, long-only variant
+│   │   ├── ma_cross_stop_entry.ipynb # MA cross + stop-entry confirmation + trailing stop
+│   │   ├── ma_cross_tp.ipynb        # MA crossover + percentage take-profit
+│   │   ├── ma_cross_trailing_stop.ipynb # MA crossover + ATR-multiple trailing stop
 │   │   ├── bb_meanrev.ipynb
 │   │   ├── macd_rsi.ipynb
 │   │   └── donchian_breakout.ipynb
