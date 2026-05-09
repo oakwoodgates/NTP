@@ -23,6 +23,7 @@ from nautilus_trader.trading.strategy import Strategy
 # resolves these as field types on the StrategyConfig at struct-build time.
 from src.core.liquidation import LiquidationConfig  # noqa: TC001
 from src.core.liquidation_mixin import LiquidationAware
+from src.core.protective_stop_mixin import ProtectiveStopAware
 from src.core.sizing import (
     SizingConfig,  # noqa: TC001
     compute_notional,
@@ -81,6 +82,18 @@ class MACrossConfig(StrategyConfig, frozen=True):
         Liquidation simulator config. When ``None`` the
         ``LiquidationAware`` mixin is inert. ``mm_rate`` is resolved by
         ``make_engine`` from ``VenueConfig`` before being passed in.
+    stop_pct : float | None, default None
+        Protective stop-loss as a fraction of entry price (``0.05`` = 5%).
+        When set, the ``ProtectiveStopAware`` mixin places a reduce-only
+        ``StopMarketOrder`` at ``entry × (1 - stop_pct)`` for longs (or
+        ``× (1 + stop_pct)`` for shorts) on every position open, and
+        cancels/replaces it on flips.  Composes with ``liquidation``;
+        whichever stop fires first reduces the position.
+
+        For **isolated-margin equivalence under cross-margin** accounting,
+        set ``stop_pct = 1 / venue_leverage`` (e.g. ``0.05`` at 20×) — this
+        makes the worst-case loss per trade equal the initial margin
+        committed.  See ``docs/LIQUIDATION_AND_SIZING.md``.
 
     """
 
@@ -95,19 +108,26 @@ class MACrossConfig(StrategyConfig, frozen=True):
     ama_alpha_slow: PositiveInt = 30
     close_positions_on_stop: bool = True
     liquidation: LiquidationConfig | None = None
+    stop_pct: float | None = None
 
 
-class MACross(LiquidationAware, Strategy):
+class MACross(ProtectiveStopAware, LiquidationAware, Strategy):
     """Moving-average crossover strategy using MovingAverageFactory.
 
     Goes long when fast MA crosses above slow MA.
     Goes short when fast MA crosses below slow MA.
     Designed for perpetual futures (supports both directions).
 
-    Inheritance order: ``LiquidationAware`` MUST come first. NT calls the
+    Inheritance order: mixins MUST come before ``Strategy``. NT calls the
     typed handlers (``on_position_opened`` etc.) by name; ``Strategy`` defines
-    those as concrete no-op stubs, so ``(Strategy, LiquidationAware)`` order
-    finds the stubs first via MRO and the mixin silently never runs.
+    those as concrete no-op stubs, so ``(Strategy, ...mixins)`` order finds
+    the stubs first via MRO and the mixins silently never run.
+
+    The two mixins compose: ``ProtectiveStopAware`` places a fixed-pct
+    reduce-only stop and ``LiquidationAware`` places a cross-margin
+    reduce-only stop at a (typically wider) liq price.  Whichever fires
+    first reduces the position; NT's reduce-only logic cancels the other
+    on fill.
 
     Parameters
     ----------
@@ -120,6 +140,8 @@ class MACross(LiquidationAware, Strategy):
         If `config.fast_period` is not less than `config.slow_period`.
         If `config.ma_type` is not a recognized type.
         If neither `config.sizing` nor `config.trade_notional` is set.
+        If `config.stop_pct` is set but >= 1 (likely a percentage-vs-fraction
+        unit error — pass 0.05 for 5%, not 5.0).
 
     """
 
@@ -131,6 +153,7 @@ class MACross(LiquidationAware, Strategy):
         PyCondition.is_in(config.ma_type, _MA_TYPE_LOOKUP, "config.ma_type", "_MA_TYPE_LOOKUP")
         super().__init__(config)
         self._init_liquidation(config.liquidation)
+        self._init_protective_stop(config.stop_pct)
 
         # Resolve sizing: explicit SizingConfig wins; else build a fixed-mode
         # config from trade_notional for back-compat.

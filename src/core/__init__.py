@@ -45,6 +45,7 @@ from src.core.liquidation import (
     is_account_alive,
 )
 from src.core.liquidation_mixin import LiquidationAware
+from src.core.protective_stop_mixin import PROTECTIVE_STOP_TAG, ProtectiveStopAware
 from src.core.sizing import (
     SizingConfig,
     compute_notional,
@@ -76,7 +77,9 @@ __all__ = [
     "AccountLiquidated",
     "LiquidationAware",
     "LiquidationConfig",
+    "PROTECTIVE_STOP_TAG",
     "PositionLiquidated",
+    "ProtectiveStopAware",
     "SizingConfig",
     "VENUE_CONFIGS",
     "VenueConfig",

@@ -1822,10 +1822,12 @@ def plot_pnl_heatmap(
     col_label: str | None = None,
     title: str = "Total PnL (USDC)",
     fmt: str = ",.0f",
-    flag_col: str | None = "error",
+    flag_col: str | None = "liquidated",
     flag_value: str = "liquidated",
     flag_label: str = "hit zero equity",
     exclude_kinds: tuple[str, ...] | None = ("spotlight",),
+    figsize: tuple[float, float] = (10, 7),
+    cell_fontsize: int = 8,
 ) -> None:
     """Diverging RdYlGn heatmap from sweep results DataFrame.
 
@@ -1850,19 +1852,31 @@ def plot_pnl_heatmap(
     fmt
         Format string for cell annotations.
     flag_col
-        Column containing error/flag strings. Cells matching *flag_value*
-        are underlined to indicate unreliable results. Set to ``None``
-        to disable flagging. Default ``"error"``.
+        Column whose truthy/matching rows render as greyed-out + underlined
+        cells (visually distinguishes wipeouts from small losses on the
+        diverging colormap).  When the column is bool-dtype, True values
+        flag.  When string-dtype, rows matching *flag_value* flag.  Set to
+        ``None`` to disable flagging.  Default ``"liquidated"`` (the v2
+        sweep schema's account-liquidation bool).  Use ``"error"`` for v1
+        sweep parquets.
     flag_value
-        The string value in *flag_col* that triggers the underline.
+        The string value in *flag_col* that triggers the flag — only used
+        when *flag_col* is a string-dtype column (bool columns ignore this).
         Default ``"liquidated"``.
     flag_label
-        Legend label for the underline marker. Default ``"hit zero equity"``.
+        Footnote text for the flag legend. Default ``"hit zero equity"``.
     exclude_kinds
         Tuple of ``_kind`` values to drop before pivoting.  Default
         ``("spotlight",)`` — keeps the heatmap a clean regular grid even
         when off-grid spotlight combos are mixed into the sweep.  Pass
         an empty tuple to disable filtering and include everything.
+    figsize
+        Matplotlib figure size in inches.  Default ``(10, 7)`` — sized to
+        keep cell annotations readable for grids up to 12×12 with
+        comma-formatted values up to 6 digits.
+    cell_fontsize
+        Font size for the per-cell annotation text.  Default ``8``.
+        Reduce further (e.g. 7) for grids with 7+ digit values.
 
     """
     df = results_df
@@ -1889,7 +1903,7 @@ def plot_pnl_heatmap(
             index=row_col, columns=col_col, values="_flag",
         )
 
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=figsize)
 
     vmax = max(abs(np.nanmin(pivot.values)), abs(np.nanmax(pivot.values)))
     im = ax.imshow(
@@ -1932,7 +1946,7 @@ def plot_pnl_heatmap(
                 text_color = "white" if abs(val) > vmax * 0.6 else "black"
 
             ax.text(j, i, f"{val:{fmt}}", ha="center", va="center",
-                    fontsize=10, color=text_color, zorder=3)
+                    fontsize=cell_fontsize, color=text_color, zorder=3)
 
             if is_flagged:
                 ax.plot(
