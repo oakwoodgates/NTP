@@ -57,7 +57,8 @@ Three distinctions worth internalising:
 | File | Role |
 |---|---|
 | `src/core/liquidation.py` | `LiquidationConfig` (msgspec), `PositionLiquidated`/`AccountLiquidated` events, topic constants, `compute_liquidation_price`, `is_account_alive` |
-| `src/core/liquidation_mixin.py` | `LiquidationAware` strategy mixin. Submits and maintains the per-position reduce-only stop. |
+| `src/core/liquidation_mixin.py` | `LiquidationAware` strategy mixin. Submits and maintains the per-position reduce-only stop at the cross-margin liq price. |
+| `src/core/protective_stop_mixin.py` | `ProtectiveStopAware` strategy mixin. Submits and maintains a fixed-pct reduce-only stop at `entry × (1 ± stop_pct)`. Composes with `LiquidationAware`. |
 | `src/core/sizing.py` | `SizingConfig` (msgspec), `compute_notional`, resolvers (`resolve_min_trade_notional`, `resolve_sizing_from_strategy_config`) |
 | `src/actors/account_alive.py` | `AccountAliveMonitor` actor + `AccountAliveMonitorConfig`. Subscribes to `AccountState`, fires the halt callback. |
 | `src/backtesting/engine.py` | `make_engine` wiring (BACKTEST-only via `environment` param), `resolve_strategy_liquidation_config` helper, `liquidation_for_environment` per-env adjuster, `_LiquidationCounters` (sweep telemetry), sweep schema columns. |
@@ -165,6 +166,88 @@ SIZING = SizingConfig(
 The strategy reads its sizing via `compute_notional(equity, sizing, instrument)` at entry. Strategies still accept the legacy `trade_notional: Decimal` field — when set and `sizing` is `None`, the strategy builds a fixed-mode `SizingConfig` from `trade_notional` for back-compat.
 
 The equity-fraction formula (`notional = (risk_frac × equity) / stop_pct`) keeps IM as a fixed fraction of equity (~10% under target params), so the account is never IM-constrained until the dynamic notional collapses to the `min_notional` floor.
+
+## Protective stop loss (`ProtectiveStopAware`)
+
+The `LiquidationAware` mixin places its stop at the **cross-margin liquidation price** — typically far from entry (e.g. ~49.5% with $1000 equity / $2000 notional / 20× leverage / 0.5% mm_rate).  That's the venue-enforced floor; it does NOT cap per-trade loss to your intended risk budget.
+
+`ProtectiveStopAware` fills that gap.  It maintains a fixed-pct reduce-only stop at `entry × (1 ± stop_pct)` for every open position, independent of any other exit logic the strategy has.  The two mixins compose:
+
+```python
+class MACross(ProtectiveStopAware, LiquidationAware, Strategy):
+    # mixins first; reverse order silently disables them
+```
+
+Both stops are reduce-only on the same position; whichever triggers first reduces the position and NT's reduce-only logic cancels the other on fill.
+
+### Isolated-margin equivalence under cross margin
+
+The headline use case for the protective stop is replicating isolated-margin behavior on a cross-margin account.  Recall that initial margin (IM) and risk budget coincide only when:
+
+```
+stop_pct_protective × venue_leverage = 1
+```
+
+So at 20× leverage the magic number is `stop_pct = 0.05`.  At that setting, the worst-case loss per trade equals the IM committed:
+
+```
+risk = notional × stop_pct = notional / leverage = IM
+```
+
+Concrete: $1000 equity, $2000 notional, 20× leverage:
+
+| Stop mechanism | Trigger | Worst-case loss |
+|---|---|---|
+| Cross-margin liq stop (`LiquidationAware` only) | ~49.5% adverse | ~$990 (whole account) |
+| Protective stop @ `stop_pct=0.05` | 5% adverse | $100 (= IM) |
+| Protective stop @ `stop_pct=0.025` | 2.5% adverse | $50 |
+
+Setting `stop_pct = 1/leverage` is the cleanest way to backtest "what if my position got isolated-margin-liquidated" without modifying the engine or fighting NT's cross-margin model.
+
+### Config
+
+`MACrossConfig` exposes `stop_pct: float | None = None` directly.  Strategies that want protective stops opt in by:
+
+1. Adding `ProtectiveStopAware` to their MRO (mixin first)
+2. Adding `stop_pct: float | None = None` to their Config
+3. Calling `self._init_protective_stop(config.stop_pct)` from `__init__`
+
+Notebook usage:
+
+```python
+# Cell 1.1
+STOP_PCT: float | None = 0.05    # 5% — isolated-margin equivalent at 20× lev
+# or None to disable (only the cross-margin liq stop fires)
+
+# Cell 2.3
+config = MACrossConfig(
+    ...,
+    liquidation=LIQ_RESOLVED,
+    stop_pct=STOP_PCT,
+)
+```
+
+### Bar-backtest caveat
+
+The protective stop is a NT `StopMarketOrder` (reduce-only), so it triggers on bar OHLC crossings in NT's `SimulatedExchange`.  Same fill optimism as the cross-margin liq stop: NT fills at the trigger price even when the bar wicks past it (no gap modeling).  In live trading on a gap-down day, fills will be worse than the trigger and the realised loss may exceed the intended risk budget by 10–50%.
+
+This is the same caveat that applies to the cross-margin liq stop — see `docs/BAR_BACKTESTING_GOTCHAS.md`.
+
+### Identifying protective-stop fills in analysis
+
+Orders are tagged `["protective_stop"]` for downstream identification.  In a notebook, after the run:
+
+```python
+from src.core import PROTECTIVE_STOP_TAG
+
+protective_fills = [
+    o for o in engine.cache.orders()
+    if o.is_filled and PROTECTIVE_STOP_TAG in (o.tags or [])
+]
+print(f"Protective stops fired: {len(protective_fills)}")
+```
+
+`notebooks/backtest/ma_cross_stop_loss.ipynb` includes a §4.6 close-cause table that splits position closes by source (natural exit / protective stop / liq stop) using this pattern.
 
 ## Configuring a notebook
 
