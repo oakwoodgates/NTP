@@ -96,12 +96,9 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │   └── dashboards/          # Dashboard JSON (committed)
 ├── notebooks/               # Jupyter research + validation
 │   ├── backtest/             # Per-strategy backtest + sweep notebooks
-│   │   ├── ema_cross.ipynb          # EMA crossover backtest + sweep
-│   │   ├── sma_cross.ipynb          # SMA crossover
-│   │   ├── hma_cross.ipynb          # HMA (Hull) crossover
-│   │   ├── dema_cross.ipynb         # DEMA (Double EMA) crossover
-│   │   ├── ama_cross.ipynb          # AMA (Kaufman Adaptive) crossover
-│   │   ├── vidya_cross.ipynb        # VIDYA crossover
+│   │   ├── ma_cross.ipynb           # MA crossover backtest + sweep — covers all
+│   │   │                            #   6 MA types (EMA/SMA/HMA/DEMA/AMA/VIDYA)
+│   │   │                            #   via MA_TYPE selector in cell 1.1
 │   │   ├── ema_cross_atr.ipynb      # MA crossover + ATR bracket (all MA types)
 │   │   ├── ema_cross_bracket.ipynb  # MA regime + ATR bracket (all MA types)
 │   │   ├── ema_cross_long_only.ipynb

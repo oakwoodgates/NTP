@@ -8,7 +8,7 @@ Writes the executed notebook + a rendered HTML copy to:
   reports/html/<category>/<name>_<UTC_TIMESTAMP>.html
 
 Where <category> is the parent directory name of the input notebook
-(so e.g. notebooks\backtest\ema_cross.ipynb -> category=backtest).
+(so e.g. notebooks\backtest\ma_cross.ipynb -> category=backtest).
 
 Why this exists: when you click "Run All" inside Jupyter / VS Code /
 Cursor, the in-notebook "save" cell runs against the *stale* on-disk
@@ -25,10 +25,10 @@ Optional: custom basename for the output files (no extension).
 Default: derived from the input filename.
 
 .EXAMPLE
-.\scripts\snapshot-notebook.ps1 notebooks\backtest\ema_cross.ipynb
+.\scripts\snapshot-notebook.ps1 notebooks\backtest\ma_cross.ipynb
 
 .EXAMPLE
-.\scripts\snapshot-notebook.ps1 notebooks\backtest\ema_cross.ipynb my_run
+.\scripts\snapshot-notebook.ps1 notebooks\backtest\ma_cross.ipynb my_run
 
 .NOTES
 Requires: jupyter (already in the project venv).  Activate the venv

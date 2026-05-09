@@ -6,7 +6,7 @@
 #   reports/html/<category>/<name>_<UTC_TIMESTAMP>.html         (rendered)
 #
 # Where <category> is the parent directory name of the input notebook
-# (so e.g. notebooks/backtest/ema_cross.ipynb → category=backtest).
+# (so e.g. notebooks/backtest/ma_cross.ipynb → category=backtest).
 #
 # Why this exists: when you click "Run All" inside Jupyter / VS Code /
 # Cursor, the in-notebook "save" cell runs against the *stale* on-disk
@@ -16,10 +16,10 @@
 # atomically.
 #
 # Usage:
-#   ./scripts/snapshot-notebook.sh notebooks/backtest/ema_cross.ipynb
+#   ./scripts/snapshot-notebook.sh notebooks/backtest/ma_cross.ipynb
 #
 # Or with a custom output basename:
-#   ./scripts/snapshot-notebook.sh notebooks/backtest/ema_cross.ipynb my_run
+#   ./scripts/snapshot-notebook.sh notebooks/backtest/ma_cross.ipynb my_run
 #
 # Requires: jupyter (already in the project venv).
 set -euo pipefail

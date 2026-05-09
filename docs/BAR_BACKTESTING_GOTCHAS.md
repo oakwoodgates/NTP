@@ -207,7 +207,7 @@ Built into the project as a strategy mixin + actor + halt callback. Opt in by pa
 - Watches account equity on `AccountState` events and halts the `RiskEngine` when equity falls below the IM+fee floor for a min-size entry (`AccountAliveMonitor` actor).
 - Adds six telemetry columns to sweep results: `liquidated_positions`, `liquidated_account`, `liquidated_at_ts`, `denied_post_halt`, `liq_slippage_avg/max_pct`, `total_fees`.
 
-See `docs/LIQUIDATION_AND_SIZING.md` for architecture, terminology, and the notebook configuration pattern. The `ema_cross.ipynb` notebook is the canonical example.
+See `docs/LIQUIDATION_AND_SIZING.md` for architecture, terminology, and the notebook configuration pattern. The `ma_cross.ipynb` notebook is the canonical example.
 
 ### Bar-fill caveat for liquidation stops
 
