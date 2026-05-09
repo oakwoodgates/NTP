@@ -49,8 +49,8 @@ _MA_TYPE_LOOKUP: dict[str, MovingAverageType] = {
 }
 
 
-class MACrossTPConfig(StrategyConfig, frozen=True):
-    """Configuration for MACrossTP strategy.
+class MACrossTakeProfitConfig(StrategyConfig, frozen=True):
+    """Configuration for MACrossTakeProfit strategy.
 
     Parameters
     ----------
@@ -94,7 +94,7 @@ class MACrossTPConfig(StrategyConfig, frozen=True):
     close_positions_on_stop: bool = True
 
 
-class MACrossTP(Strategy):
+class MACrossTakeProfit(Strategy):
     """MA crossover strategy with percentage take-profit exit.
 
     Enters long on bullish MA crossover, enters short on bearish
@@ -107,7 +107,7 @@ class MACrossTP(Strategy):
 
     Parameters
     ----------
-    config : MACrossTPConfig
+    config : MACrossTakeProfitConfig
         The configuration for the instance.
 
     Raises
@@ -118,7 +118,7 @@ class MACrossTP(Strategy):
 
     """
 
-    def __init__(self, config: MACrossTPConfig) -> None:
+    def __init__(self, config: MACrossTakeProfitConfig) -> None:
         PyCondition.is_true(
             config.fast_period < config.slow_period,
             f"{config.fast_period=} must be less than {config.slow_period=}",

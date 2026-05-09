@@ -26,7 +26,7 @@ from src.strategies.ma_cross_atr import MACrossATR, MACrossATRConfig
 from src.strategies.ma_cross_bracket import MACrossBracket, MACrossBracketConfig
 from src.strategies.ma_cross_long_only import MACrossLongOnly, MACrossLongOnlyConfig
 from src.strategies.ma_cross_stop_entry import MACrossStopEntry, MACrossStopEntryConfig
-from src.strategies.ma_cross_tp import MACrossTP, MACrossTPConfig
+from src.strategies.ma_cross_take_profit import MACrossTakeProfit, MACrossTakeProfitConfig
 from src.strategies.ma_cross_trailing_stop import (
     MACrossTrailingStop,
     MACrossTrailingStopConfig,
@@ -68,7 +68,7 @@ STRATEGIES: dict[str, StrategyEntry] = {
     "MACrossLongOnly":     (MACrossLongOnly,     MACrossLongOnlyConfig,     {"fast": "fast_period", "slow": "slow_period"}, {"ma_type": "EMA"}),
     "MACrossTrailingStop": (MACrossTrailingStop, MACrossTrailingStopConfig, {"fast": "fast_period", "slow": "slow_period", "trailing_mult": "trailing_atr_multiple"}, {"ma_type": "EMA"}),
     "MACrossATR":          (MACrossATR,          MACrossATRConfig,          {"fast": "fast_period", "slow": "slow_period", "atr_sl": "atr_sl_multiplier", "atr_tp": "atr_tp_multiplier"}, {"ma_type": "EMA"}),
-    "MACrossTP":           (MACrossTP,           MACrossTPConfig,           {"fast": "fast_period", "slow": "slow_period"}, {"ma_type": "EMA"}),
+    "MACrossTakeProfit":           (MACrossTakeProfit,           MACrossTakeProfitConfig,           {"fast": "fast_period", "slow": "slow_period"}, {"ma_type": "EMA"}),
     "MACrossStopEntry":    (MACrossStopEntry,    MACrossStopEntryConfig,    {"fast": "fast_period", "slow": "slow_period", "trail_mult": "trailing_atr_multiple"}, {"ma_type": "EMA"}),
     "MACrossBracket":      (MACrossBracket,      MACrossBracketConfig,      {"fast": "fast_period", "slow": "slow_period", "bracket_dist": "bracket_distance_atr"}, {"ma_type": "EMA"}),
     "BBMeanRev":           (BBMeanRev,           BBMeanRevConfig,           {"rsi_buy": "rsi_buy_threshold", "rsi_sell": "rsi_sell_threshold"}, {}),
@@ -160,7 +160,7 @@ def get_param_grid(strategy: str) -> ParamGrid:
     match strategy:
         case ("MACross-EMA" | "MACross-SMA" | "MACross-HMA"
               | "MACross-DEMA" | "MACross-AMA" | "MACross-VIDYA"
-              | "MACrossLongOnly" | "MACrossATR" | "MACrossTP"):
+              | "MACrossLongOnly" | "MACrossATR" | "MACrossTakeProfit"):
             fast = [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 75, 100]
             slow = [10, 15, 20, 25, 30, 35, 40, 45, 50, 75, 100, 200]
             combos = [{"fast": f, "slow": s} for f in fast for s in slow if f < s]
