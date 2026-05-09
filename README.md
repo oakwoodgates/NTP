@@ -87,9 +87,14 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │   ├── config/              # Pydantic Settings
 │   │   └── settings.py      # get_settings() — single source of truth
 │   ├── api/                 # FastAPI application (Phase 3b)
-│   └── core/                # Type aliases, constants, instruments, pure utils
+│   └── core/                # Type aliases, constants, instruments, mixins, pure utils
 │       ├── constants.py
 │       ├── instruments.py
+│       ├── liquidation.py             # LiquidationConfig, PositionLiquidated/AccountLiquidated events
+│       ├── liquidation_mixin.py       # LiquidationAware — places cross-margin liq stop per position
+│       ├── protective_stop_mixin.py   # ProtectiveStopAware — places fixed-pct protective stop per position
+│       ├── sizing.py                  # SizingConfig, compute_notional (fixed / equity_frac modes)
+│       ├── venues.py                  # VenueConfig + per-venue defaults (mm_rate, fees)
 │       └── utils.py
 ├── grafana/
 │   ├── provisioning/        # Declarative datasource + dashboard config
@@ -105,6 +110,8 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │   │   ├── ma_cross_stop_entry.ipynb # MA cross + stop-entry confirmation + trailing stop
 │   │   ├── ma_cross_take_profit.ipynb        # MA crossover + percentage take-profit
 │   │   ├── ma_cross_trailing_stop.ipynb # MA crossover + ATR-multiple trailing stop
+│   │   ├── ma_cross_stop_loss.ipynb     # MA crossover + protective stop-loss sensitivity
+│   │   │                                #   (5% default = isolated-margin equivalent at 20× lev)
 │   │   ├── bb_meanrev.ipynb
 │   │   ├── macd_rsi.ipynb
 │   │   └── donchian_breakout.ipynb

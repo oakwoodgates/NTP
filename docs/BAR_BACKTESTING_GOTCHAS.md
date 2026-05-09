@@ -209,9 +209,11 @@ Built into the project as a strategy mixin + actor + halt callback. Opt in by pa
 
 See `docs/LIQUIDATION_AND_SIZING.md` for architecture, terminology, and the notebook configuration pattern. The `ma_cross.ipynb` notebook is the canonical example.
 
-### Bar-fill caveat for liquidation stops
+### Bar-fill caveat for liquidation stops (and protective stops)
 
 NT's bar matching engine fills `StopMarketOrder`s at the **trigger price** during synthetic-tick processing — even when the bar's wick gaps far past the trigger. Real venues fill at "next available price", which on a big-gap day is materially worse. Liquidation losses in the simulator are systematically best-case. The `liq_slippage_*` sweep columns measure this: currently always `0.0%`, confirming NT's optimistic fill behavior.
+
+The same caveat applies to the **protective stop** (`ProtectiveStopAware` mixin, `src/core/protective_stop_mixin.py`) — it submits the same `StopMarketOrder` order type with the `protective_stop` tag. In real trading, gap-through events will fill at worse prices than the trigger, so the realised loss can exceed the intended risk budget. Empirically observed in SOL 1d EMA(10/40) backtests: at `STOP_PCT = 0.05` (target $100 risk) the max single loser was -$151.50, ~50% over budget — the cross-margin liq stop fired after price gapped past the protective stop. See `docs/LIQUIDATION_AND_SIZING.md` §"Protective stop loss" → "Bar-backtest caveat" for the full discussion.
 
 ### Live-mode caveat
 
