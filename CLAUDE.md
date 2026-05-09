@@ -217,7 +217,9 @@ notebooks/            # Jupyter research + charts.py plotting helpers
 ├── backtest/                # Per-strategy backtest + sweep notebooks
 │   ├── ma_cross.ipynb       # All 6 base MA types (EMA/SMA/HMA/DEMA/AMA/VIDYA)
 │   │                        # — pick via MA_TYPE in cell 1.1
-│   ├── ema_cross_atr.ipynb, ema_cross_bracket.ipynb, ...   # specialised variants
+│   ├── ma_cross_atr.ipynb, ma_cross_bracket.ipynb, ma_cross_long_only.ipynb,
+│   │   ma_cross_stop_entry.ipynb, ma_cross_tp.ipynb, ma_cross_trailing_stop.ipynb
+│   │                        # specialised variants — same MA_TYPE selector pattern
 │   ├── bb_meanrev.ipynb, macd_rsi.ipynb, donchian_breakout.ipynb
 │   └── ...
 ├── verify/                  # Data pipeline + signal verification
