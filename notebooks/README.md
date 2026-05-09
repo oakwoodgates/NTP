@@ -7,9 +7,16 @@ Research notebooks for strategy development, backtesting, and validation.
 ```
 notebooks/
   backtest/                — per-strategy backtest + sweep notebooks
-                             (ma_cross.ipynb is the v2 reference notebook —
-                             covers all 6 base MA types via MA_TYPE selector:
-                             EMA / SMA / HMA / DEMA / AMA / VIDYA)
+                             ma_cross.ipynb is the v2 reference notebook —
+                             covers all 6 base MA types via MA_TYPE selector
+                             (EMA / SMA / HMA / DEMA / AMA / VIDYA).
+                             Specialised variants: ma_cross_atr,
+                             ma_cross_bracket, ma_cross_long_only,
+                             ma_cross_stop_entry, ma_cross_take_profit,
+                             ma_cross_trailing_stop, ma_cross_stop_loss
+                             (protective stop sensitivity sweep).
+                             Other strategies: bb_meanrev, donchian_breakout,
+                             macd_rsi.
   verify/                  — data-pipeline + signal verification
   compare_sweeps.ipynb     — cross-instrument / cross-timeframe comparison
   validate_strategy.ipynb  — walk-forward, plateau, bootstrap, regime, fee
