@@ -6,15 +6,31 @@ Research notebooks for strategy development, backtesting, and validation.
 
 ```
 notebooks/
-  backtest/           — per-strategy backtest + sweep notebooks
-                        (ema_cross.ipynb is the v2 reference notebook)
-  verify/             — data-pipeline + signal verification
-  compare_sweeps.ipynb    — cross-instrument / cross-timeframe comparison
-  validate_strategy.ipynb — walk-forward, plateau, bootstrap validation
-  review_live_run.ipynb   — post-run analysis of live/paper trades
-  charts.py           — shared plotting helpers
-  utils.py            — shared notebook utilities
+  backtest/                — per-strategy backtest + sweep notebooks
+                             (ema_cross.ipynb is the v2 reference notebook)
+  verify/                  — data-pipeline + signal verification
+  compare_sweeps.ipynb     — cross-instrument / cross-timeframe comparison
+  validate_strategy.ipynb  — walk-forward, plateau, bootstrap, regime, fee
+                             sensitivity, yearly concentration → 8-check
+                             go / no-go verdict per (instrument, combo)
+  validate_all.ipynb       — consolidator: reads every reports/validate/
+                             *_verdict.json and renders a strategy-level
+                             comparison matrix + per-check failure-rate
+  review_live_run.ipynb    — post-run analysis of live/paper trades
+  charts.py                — shared plotting helpers (public)
+  utils.py                 — shared notebook utilities (public)
+  _compare_helpers.py      — notebook-private helpers for compare_sweeps
+                             (build_stability_df, short_sweep_label)
+  _validate_helpers.py     — notebook-private helpers for validate_strategy
+                             (STRATEGIES registry, make_strategy_factory,
+                              get_param_grid, plateau_scores,
+                              short_params_tag, parse_pnl, …)
 ```
+
+The leading-underscore `_module.py` files are **notebook-private** —
+not part of the project's public API.  They hold code extracted from
+the notebooks to keep cells short, tested in `tests/unit/test_*_helpers.py`
+but not imported anywhere outside `notebooks/`.
 
 ## Notebook structure convention (v2)
 
@@ -74,26 +90,27 @@ below.
 ### Compare-sweeps notebook (`compare_sweeps.ipynb`)
 
 ```
-# Compare Parameter Sweeps                  (H1 + 1-paragraph blurb)
+# Compare Parameter Sweeps                   (H1 + 1-paragraph blurb)
 
 ## 1. Setup
-### 1.1 Imports & shared config             (filters, PARAM_COLS, RANK_BY)
-### 1.2 Load sweeps + filter                (load_sweeps_filtered)
+### 1.1 Imports & shared config              (filters, PARAM_COLS, RANK_BY)
+### 1.2 Load sweeps + filter                 (load_sweeps_filtered)
 
 ## 2. Best params per sweep
-### 2.1 Best params table                   (v2 metric columns)
-### 2.2 Sortable HTML cross-sweep table     (generate_cross_sweep_html)
+### 2.1 Best params table                    (v2 metric columns)
+### 2.2 Sortable HTML cross-sweep table      (generate_cross_sweep_html)
 
-## 3. Side-by-side PnL heatmaps             (plot_pnl_heatmap, exclude_kinds)
+## 3. Side-by-side PnL heatmaps              (plot_pnl_heatmap, exclude_kinds)
 
 ## 4. Parameter stability across sweeps
-### 4.1 Stability table                     (per-combo aggregation)
-### 4.2 Average PnL% heatmap                (full-coverage combos)
+### 4.1 Stability table                      (per-combo aggregation +
+                                              cv_pnl_pct = std/|mean|)
+### 4.2 Average PnL% heatmap                 (full-coverage combos)
 
 ## 5. Single-sweep deep dive
 
 ## 6. Save & cleanup
-### 6.1 Save snapshot                       (category="compare")
+### 6.1 Save snapshot                        (category="compare")
 ### 6.2 Cleanup
 
 ## 7. Scratchpad
@@ -105,42 +122,89 @@ below.
 # Validate Strategy                          (H1 + 1-paragraph blurb)
 
 ## 1. Setup
-### 1.1 Imports & shared config              (strategy selector, fold sizes,
-                                              bootstrap iters, snapshot flag)
+### 1.1 Imports & shared config              (strategy selector, leverage,
+                                              filters, OVERRIDE_PARAMS,
+                                              fold sizes, bootstrap iters,
+                                              snapshot flag)
 ### 1.2 Load data + sweep                    (load_backtest_data +
-                                              load_sweeps_filtered)
+                                              load_sweeps_filtered;
+                                              picks best by total_pnl_pct
+                                              OR uses OVERRIDE_PARAMS)
 
 ## 2. Plateau detection
-### 2.1 Plateau scoring                      (3×3 neighbour-profitability)
-### 2.2 Heatmap with best combo marked       (exclude_kinds defensive)
+### 2.1 Plateau scoring                      (3×3 neighbour-profitability,
+                                              with survival-rate accounting)
+### 2.2 Heatmap with liquidated cells flagged
 
 ## 3. Walk-forward analysis
 ### 3.1 Run walk-forward                     (run_walk_forward, train/test pct)
 ### 3.2 Per-fold results table
 ### 3.3 In-sample vs OOS chart
+### 3.4 Stitched OOS equity curve            (plot_walkforward_oos_equity)
 
-## 4. Bootstrap PnL confidence interval
-### 4.1 Run a single backtest at best params (to extract per-trade PnL)
-### 4.2 Bootstrap CI                         (bootstrap_total_pnl)
-### 4.3 Bootstrap distribution chart         (plot_bootstrap_pnl)
+## 4. Single-config performance
+### 4.1 Run a single backtest at best params (captures positions, fills,
+                                              account_report, trade_pnls)
+### 4.2 Price chart with trade markers       (plot_ma_cross)
+### 4.3 Equity & drawdown                    (plot_equity_curve)
+### 4.4 Per-year breakdown                   (performance_by_year)
+### 4.5 Trade distributions                  (plot_trade_distributions)
 
-## 5. Rolling performance                    (rolling_performance,
-                                              plot_rolling_pnl)
+## 5. Bootstrap analysis
+### 5.1 Bootstrap PnL CI                     (bootstrap_total_pnl, with
+                                              IID caveat)
+### 5.2 Bootstrap PnL distribution chart     (plot_bootstrap_pnl)
+### 5.3 Bootstrap max-drawdown CI            (bootstrap_max_drawdown +
+                                              plot_bootstrap_drawdown)
 
-## 6. Fee sensitivity                        (run_fee_sweep,
+## 6. Rolling performance                    (rolling_performance — splits
+                                              active vs inactive windows)
+
+## 7. Fee sensitivity                        (run_fee_sweep,
                                               plot_fee_sensitivity)
 
-## 7. Regime breakdown                       (tag_regimes,
-                                              performance_by_regime)
+## 8. Regime breakdown                       (tag_regimes,
+                                              performance_by_regime,
+                                              + Wilson CI on win-rate)
 
-## 8. Go / no-go assessment                  (print_validation_verdict —
-                                              consolidates all six checks)
+## 9. Go / no-go assessment                  (print_validation_verdict —
+                                              8 checks: plateau, walk-forward,
+                                              param-stability, bootstrap,
+                                              rolling, fee, regime, yearly
+                                              concentration.  Persists JSON
+                                              to reports/validate/.)
 
-## 9. Save & cleanup
-### 9.1 Save snapshot                        (category="validate")
-### 9.2 Cleanup
+## 10. Save & cleanup
+### 10.1 Save snapshot                       (category="validate")
+### 10.2 Cleanup
 
-## 10. Scratchpad
+## 11. Scratchpad
+```
+
+### Validate-all notebook (`validate_all.ipynb`)
+
+```
+# Validate All — strategy-level verdict matrix  (H1 + 1-paragraph blurb)
+
+## 1. Setup
+### 1.1 Imports & filters                    (FILTER_INSTRUMENT,
+                                              FILTER_INTERVAL,
+                                              LATEST_PER_PICK)
+### 1.2 Load all verdict JSONs               (load_verdict_jsons)
+
+## 2. Comparison matrix                      (build_verdict_matrix —
+                                              row per (instrument, pick),
+                                              cols are check icons)
+
+## 3. Per-check failure rate across runs     (% red flag per check, sorted)
+
+## 4. Single-run drill-down                  (DRILL_INDEX picker)
+
+## 5. Save & cleanup
+### 5.1 Save snapshot                        (category="validate_all")
+### 5.2 Cleanup
+
+## 6. Scratchpad
 ```
 
 ### Conventions
@@ -158,20 +222,105 @@ below.
   consider splitting.
 - **No "Cell N:" comments inside code cells.**  They go stale instantly
   when cells are added/removed.
+- **Notebook-private helpers go in `_<notebook>_helpers.py`.**
+  Functions extracted purely to keep cells short — not reusable across
+  notebooks — live in a `_module.py` (leading underscore = private)
+  next to the notebook that uses them.  Tested in
+  `tests/unit/test_<notebook>_helpers.py`.  Truly reusable helpers go
+  in `notebooks/utils.py` or `notebooks/charts.py` (no prefix).
+- **Suppress Jupyter auto-display of return values with a trailing
+  semicolon.**  `print_validation_verdict(...)` and
+  `save_notebook_snapshot(...)` both return values that aren't useful
+  to display in cell output (already printed in formatted form +
+  written to disk).  End the call with `;` to suppress the auto-echo.
 
 ## File naming conventions
 
-For HTML reports the notebook generates:
-
-| Generator             | Output                                              | Behavior              |
-|-----------------------|-----------------------------------------------------|-----------------------|
-| `run_sweep`           | `data/sweeps/{SWEEP_NAME}.parquet`                  | overwrites on re-run  |
-| `generate_sweep_html` | `reports/sweeps/{SWEEP_NAME}_sweep.html`            | overwrites on re-run  |
+| Generator | Output | Behavior |
+|---|---|---|
+| `run_sweep` | `data/sweeps/{SWEEP_NAME}.parquet` | overwrites on re-run |
+| `generate_sweep_html` | `reports/sweeps/{SWEEP_NAME}_sweep.html` | overwrites on re-run |
+| `generate_cross_sweep_html` | `reports/sweeps/{filename}.html` | overwrites on re-run |
 | `generate_backtest_html` (TVLC) | `reports/charts/{RESULT_NAME}_chart_{ts}.html` | snapshot, accumulates |
 | `generate_v2_tearsheet` | `reports/tearsheets/{RESULT_NAME}_tearsheet_{ts}.html` | snapshot, accumulates |
+| `save_notebook_snapshot` | `reports/notebooks/<category>/{RESULT_NAME}_{ts}.ipynb` + `.html` | snapshot, accumulates |
+| `print_validation_verdict` (with `verdict_path=`) | `reports/validate/{RESULT_NAME}_verdict.json` | overwrites per RESULT_NAME |
 
-`SWEEP_NAME` and `RESULT_NAME` are derived in Cell 1.1 — see the comment
-block above the assignments for the convention.
+### `RESULT_NAME` skeleton
+
+Both backtest and validate notebooks build `RESULT_NAME` from the
+same skeleton:
+
+```
+{prefix}_{strategy}_{ASSET}_{EXEC_VENUE}_{interval}[_{params_tag}]
+```
+
+| Notebook | prefix | Example |
+|---|---|---|
+| Backtest (per-strategy) | `(none)` | `MACross-EMA_BTC_HYPERLIQUID_PERP_1d_f10_s40` |
+| Validate (auto-pick) | `validate_` | `validate_MACross-EMA_BTC_HYPERLIQUID_PERP_1d` |
+| Validate (override) | `validate_` | `validate_MACross-EMA_BTC_HYPERLIQUID_PERP_1d_f10_s20` |
+| Validate-all | `(none)` | `validate_all` |
+
+The `params_tag` uses **first-letter-of-each-word compaction**:
+`fast` → `f`, `slow` → `s`, `bb_period` → `bp`, `bb_std` → `bs`,
+`dc_period` → `dp`, `atr_sl` → `as`.  See `_validate_helpers.short_param_key`
+(asserted unique within every registered strategy's grid).
+
+## Strategy validation workflow
+
+The full per-strategy validation flow has three stages and writes
+into three different `reports/` subtrees.
+
+### 1. Sweep + compare (across instruments)
+
+```bash
+# In each backtest notebook (e.g. notebooks/backtest/ema_cross.ipynb):
+#   Run All → run_sweep() writes data/sweeps/{strategy}_{instr}_{interval}.parquet
+
+# Then in compare_sweeps.ipynb:
+#   Run All → reads every sweep parquet, surfaces:
+#     - Best per sweep (cross-instrument-fair via total_pnl_pct rank)
+#     - Sortable HTML cross-sweep table (DataTables.js)
+#     - Cross-sweep robust combos: profitable across all instruments
+#       (low cv_pnl_pct = stable; high = sign-flipping)
+```
+
+### 2. Validate (per-instrument)
+
+For each instrument you want to validate, edit cell 1.1 of
+`validate_strategy.ipynb`:
+
+```python
+ASSET = "BTC"            # or "ETH", "SOL", ...
+OVERRIDE_PARAMS = None   # auto-pick by total_pnl_pct
+# or:
+OVERRIDE_PARAMS = {"fast": 10, "slow": 20}   # validate a specific combo
+```
+
+Run All → 8-check verdict prints to cell output AND drops a JSON to
+`reports/validate/{RESULT_NAME}_verdict.json`.  The `RESULT_NAME` tag
+distinguishes auto-pick from override runs.
+
+Common pattern: validate the **per-instrument best** (auto-pick) AND
+the **cross-instrument robust pick** (override) on each instrument.
+That's 2N runs for N instruments — for BTC/ETH/SOL it's 6 runs total.
+
+### 3. Validate-all (across instruments + picks)
+
+`validate_all.ipynb` reads every `reports/validate/*_verdict.json` and
+renders a comparison matrix (one row per run, columns are check
+icons) plus a per-check failure-rate analysis.  Use this to answer
+strategy-level questions:
+
+- *"Does the cross-sweep robust pick beat per-instrument bests on
+  every instrument I tested?"*
+- *"Which check is the most consistent red flag — strategy-level
+  signal vs instrument-specific noise?"*
+- *"Which combo passes on more instruments than others?"*
+
+Re-runs are cheap (no compute — just reads JSONs).  Snapshot lands in
+`reports/notebooks/validate_all/`.
 
 ## Snapshotting a notebook run
 

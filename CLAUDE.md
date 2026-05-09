@@ -116,9 +116,10 @@ React Frontend ←WebSocket/REST→ FastAPI Gateway        ← Phase 3b (future)
 ### What We Build (NT doesn't provide)
 - **Sweep orchestration:** `run_sweep()` runs a parameter grid across any strategy, persists full analyzer stats to Parquet. `load_sweeps()` reads them back for comparison.
 - **Walk-forward analysis:** `run_walk_forward()` trains on sliding windows, tests best params out-of-sample. Catches overfitting before paper trading.
-- **Validation notebook:** plateau detection (are best params robust or fragile?), bootstrap confidence intervals (how much depends on a few lucky trades?), go/no-go assessment.
-- **Post-backtest analysis:** `rolling_performance()` checks PnL consistency across time windows, `tag_regimes()` + `performance_by_regime()` quantifies strategy behavior in trending vs ranging markets, `run_fee_sweep()` measures fee resilience and breakeven points.
-- **Comparison notebook:** cross-instrument, cross-timeframe sweep comparison. Parameter stability analysis across sweeps.
+- **Validation notebook:** 8-check go/no-go verdict per (instrument, combo) — plateau (with survival-rate accounting), walk-forward (OOS PnL + param-stability), bootstrap (PnL CI + max-drawdown CI, with capital-relative thresholds), rolling (active vs inactive windows), fee sensitivity, regime breakdown (Wilson CI on win-rate), yearly concentration. Override the auto-pick to validate cross-sweep robust combos. Persists each verdict as JSON for the consolidator.
+- **Validate-all consolidator:** `validate_all.ipynb` reads every `reports/validate/*_verdict.json` and renders a strategy-level comparison matrix + per-check failure-rate. Answers "does this combo generalise across instruments?" without re-running validate.
+- **Post-backtest analysis:** `rolling_performance()` checks PnL consistency across time windows, `tag_regimes()` + `performance_by_regime()` quantifies strategy behavior in trending vs ranging markets, `run_fee_sweep()` measures fee resilience and breakeven points, `bootstrap_total_pnl()` + `bootstrap_max_drawdown()` give per-trade resampling CIs.
+- **Comparison notebook:** cross-instrument, cross-timeframe sweep comparison. Parameter stability analysis across sweeps including coefficient-of-variation (CV = std/|mean| per combo across instruments — low = stable, high = sign-flipping).
 - **Interactive HTML reports:** TradingView Lightweight Charts with buy/sell markers, hover tooltips, trade table with click-to-zoom, stats bar. Self-contained HTML files in `reports/`.
 - **PersistenceActor:** custom Actor inside TradingNode that subscribes to NT MessageBus events and writes fills, positions, and account snapshots to PostgreSQL.
 - **AlertActor:** custom Actor inside TradingNode that sends Telegram notifications on fills, position changes, and drawdown threshold breaches.
@@ -170,11 +171,13 @@ React Frontend ←WebSocket/REST→ FastAPI Gateway        ← Phase 3b (future)
 
 ### Notebook conventions
 
-- **Subdirectory grouping.** Backtest notebooks live in `notebooks/backtest/`, verification notebooks in `notebooks/verify/`. Workflow notebooks (`compare_sweeps`, `validate_strategy`, `review_live_run`) and shared helpers (`charts.py`, `utils.py`) stay in the `notebooks/` root. Subdirectory notebooks add `sys.path.insert(0, str(__import__("pathlib").Path("..").resolve()))` in Cell 1 so `charts` and `utils` imports resolve.
+- **Subdirectory grouping.** Backtest notebooks live in `notebooks/backtest/`, verification notebooks in `notebooks/verify/`. Workflow notebooks (`compare_sweeps`, `validate_strategy`, `validate_all`, `review_live_run`) and shared helpers (`charts.py`, `utils.py`) stay in the `notebooks/` root. Subdirectory notebooks add `sys.path.insert(0, str(__import__("pathlib").Path("..").resolve()))` in Cell 1 so `charts` and `utils` imports resolve.
+- **Notebook-private helpers go in `_<notebook>_helpers.py`.** Functions extracted purely to keep cells short — not reusable across notebooks — live in a leading-underscore module next to the notebook (`notebooks/_compare_helpers.py`, `notebooks/_validate_helpers.py`). Tested in `tests/unit/test_<notebook>_helpers.py`. Truly reusable helpers go in `notebooks/utils.py` or `notebooks/charts.py` (no prefix).
 - **Sweep results auto-persist to Parquet.** Use `run_sweep()` instead of manual `run_single_backtest` loops. Results land in `data/sweeps/` with deterministic filenames.
-- **Strategy factory pattern.** Each backtest notebook defines a `strategy_factory(engine, params)` callable that `run_sweep` and `run_walk_forward` use. This keeps sweep/validation code strategy-agnostic.
-- **Shared config in Cell 1.** All tuneable values live in Cell 1: `EXCHANGE`, `ASSET`, `INSTRUMENT_ID` (via `make_instrument_id(ASSET, EXCHANGE)`), `BAR_INTERVAL`, `SAVE_TEARSHEET`, `RESULT_NAME`, etc. `RESULT_NAME` is the canonical filename stem used by tearsheet save, TradingView HTML export, and notebook snapshot save.
-- **`notebooks/utils.py` helpers.** `make_instrument_id(asset, exchange)` builds the correct instrument ID format per exchange (Hyperliquid vs Binance). `save_tearsheet(html, result_name)` saves tearsheet HTML to `reports/tearsheets/`. `save_notebook` and `save_notebook_html` copy/export notebooks to `reports/notebooks/{category}/` and `reports/html/{category}/` respectively (default `category="backtest"`).
+- **Strategy factory pattern.** Each backtest notebook defines a `strategy_factory(engine, params)` callable that `run_sweep` and `run_walk_forward` use. This keeps sweep/validation code strategy-agnostic. Validate notebooks build the same callable via `_validate_helpers.make_strategy_factory(strategy, instrument_id, bar_type_str, trade_notional)` — uses the central `STRATEGIES` registry (also in `_validate_helpers.py`).
+- **Shared config in Cell 1.** All tuneable values live in Cell 1: `STRATEGY`, `DATA_SOURCE`, `EXEC_VENUE`, `ASSET`, `INSTRUMENT_ID` (via `make_instrument_id(ASSET, DATA_SOURCE)`), `BAR_INTERVAL`, `OVERRIDE_PARAMS`, `RESULT_NAME`, etc. `RESULT_NAME` is the canonical filename stem; format is `{prefix}_{strategy}_{ASSET}_{EXEC_VENUE}_{interval}[_{params_tag}]` shared across backtest and validate.
+- **`notebooks/utils.py` helpers.** `make_instrument_id`, `load_backtest_data`, `load_sweeps_filtered`, `print_validation_verdict` (with capital-relative bootstrap threshold + JSON persistence), `wilson_score_interval`, `load_verdict_jsons` + `build_verdict_matrix` (consumed by `validate_all.ipynb`), `save_tearsheet`, `save_notebook` / `save_notebook_html` / `save_notebook_snapshot` (default `category="backtest"`).
+- **Suppress Jupyter cell auto-display with a trailing `;`.** `print_validation_verdict(...)` and `save_notebook_snapshot(...)` return values useful to programmatic consumers but redundant in cell output. End the call with `;` to suppress auto-echo.
 
 ## Project Structure
 
@@ -211,29 +214,46 @@ scripts/
 ├── run_sandbox.py        # Paper trading runner (SandboxExecutionClient)
 └── run_live.py           # Live trading runner (HyperliquidExecClient)
 notebooks/            # Jupyter research + charts.py plotting helpers
-├── backtest/             # Per-strategy backtest + sweep notebooks
+├── backtest/                # Per-strategy backtest + sweep notebooks
 │   ├── ema_cross.ipynb, sma_cross.ipynb, hma_cross.ipynb, ...
 │   ├── bb_meanrev.ipynb, macd_rsi.ipynb, donchian_breakout.ipynb
 │   └── ...
-├── verify/               # Data pipeline + signal verification
+├── verify/                  # Data pipeline + signal verification
 │   ├── 01_pipeline.ipynb, 02_data.ipynb, 03_signals.ipynb, 04_persistence.ipynb
-├── compare_sweeps.ipynb       # Cross-instrument, cross-timeframe comparison
-├── validate_strategy.ipynb    # Walk-forward, plateau, bootstrap validation
-├── review_live_run.ipynb      # Post-run analysis of live/paper trades
-├── charts.py                  # Plotly, matplotlib, TVLC HTML report generation
-└── utils.py                   # Shared notebook helpers (make_instrument_id, save_tearsheet,
-│                              #   save_notebook, save_notebook_html)
+├── compare_sweeps.ipynb     # Cross-instrument, cross-timeframe comparison
+├── validate_strategy.ipynb  # 8-check go/no-go verdict per (instrument, combo)
+├── validate_all.ipynb       # Strategy-level matrix consolidator (reads
+│                            #   reports/validate/*_verdict.json)
+├── review_live_run.ipynb    # Post-run analysis of live/paper trades
+├── charts.py                # Plotly, matplotlib, TVLC HTML report generation
+├── utils.py                 # Shared notebook helpers (make_instrument_id,
+│                            #   load_sweeps_filtered, print_validation_verdict,
+│                            #   load_verdict_jsons, build_verdict_matrix,
+│                            #   wilson_score_interval, save_notebook_snapshot)
+├── _compare_helpers.py      # Notebook-private helpers for compare_sweeps
+│                            #   (build_stability_df, short_sweep_label)
+└── _validate_helpers.py     # Notebook-private helpers for validate_strategy
+                             #   (STRATEGIES registry, make_strategy_factory,
+                             #    get_param_grid, plateau_scores, parse_pnl,
+                             #    short_param_key, short_params_tag,
+                             #    enrich_regime_with_wilson, collapse_to_grid)
 data/
 ├── catalog/          # ParquetDataCatalog root (gitignored)
 └── sweeps/           # Sweep result Parquet files (gitignored)
 reports/              # Generated reports (gitignored)
 ├── charts/           # TradingView Lightweight Charts HTML reports
+├── sweeps/           # Sortable HTML sweep tables (per-sweep + cross-sweep)
+├── validate/         # Verdict JSONs from validate_strategy.ipynb
 ├── html/
-│   ├── backtest/     # Notebook HTML exports from notebooks/backtest/
-│   └── validate/     # Notebook HTML exports from validate_strategy.ipynb
+│   ├── backtest/         # Notebook HTML exports from notebooks/backtest/
+│   ├── validate/         # Notebook HTML exports from validate_strategy.ipynb
+│   ├── validate_all/     # Notebook HTML exports from validate_all.ipynb
+│   └── compare/          # Notebook HTML exports from compare_sweeps.ipynb
 ├── notebooks/
-│   ├── backtest/     # Notebook snapshots from notebooks/backtest/
-│   └── validate/     # Notebook snapshots from validate_strategy.ipynb
+│   ├── backtest/         # Notebook snapshots from notebooks/backtest/
+│   ├── validate/         # Notebook snapshots from validate_strategy.ipynb
+│   ├── validate_all/     # Notebook snapshots from validate_all.ipynb
+│   └── compare/          # Notebook snapshots from compare_sweeps.ipynb
 └── tearsheets/       # NT tearsheet HTML (saved when SAVE_TEARSHEET=True)
 tests/                # unit/ and integration/
 ```
@@ -250,8 +270,10 @@ tests/                # unit/ and integration/
 - `rolling_performance()` — per-window PnL consistency analysis.
 - `tag_regimes()` + `performance_by_regime()` — market regime detection (ADX-based) and per-regime stats.
 - `run_fee_sweep()` — fee sensitivity analysis with breakeven detection.
-- `compare_sweeps.ipynb` — load saved sweeps, side-by-side heatmaps, best-params table, parameter stability across instruments/timeframes.
-- `validate_strategy.ipynb` — plateau detection, walk-forward, bootstrap confidence intervals, rolling performance, fee sensitivity, regime analysis, go/no-go assessment.
+- `bootstrap_total_pnl()` + `bootstrap_max_drawdown()` — per-trade resampling CIs in `src.backtesting.metrics`.
+- `compare_sweeps.ipynb` — load saved sweeps, side-by-side heatmaps with liquidated-cell flags, best-params table, parameter stability across instruments/timeframes (including coefficient-of-variation), sortable HTML cross-sweep table.
+- `validate_strategy.ipynb` — 8-check go/no-go verdict per (instrument, combo): plateau (with survival-rate accounting), walk-forward (with param-stability check), bootstrap (PnL CI + max-drawdown CI, capital-relative thresholds), rolling (active vs inactive split), fee sensitivity, regime breakdown (Wilson CI on win-rate), yearly concentration. Optional `OVERRIDE_PARAMS` validates cross-sweep robust combos. Persists each verdict as JSON.
+- `validate_all.ipynb` — strategy-level consolidator: reads every `reports/validate/*_verdict.json` and renders the comparison matrix + per-check failure-rate.  No new compute — just consolidates per-(instrument, pick) verdicts into one strategy-level view.
 - Focus: validate strategies before committing them to paper/live trading. Build more strategies, test on more instruments.
 
 **Phase 3a — future research tools (build when pain emerges):**
@@ -322,11 +344,12 @@ python scripts/fetch_binance_candles.py --update
 ### Phase 3a workflow (research + validation)
 1. Create or open a notebook in `notebooks/backtest/` for the strategy.
 2. Define a `strategy_factory(engine, params)` function and a list of `param_combos`.
-3. Call `run_sweep()` — results auto-save to `data/sweeps/{strategy}_{instrument}_{interval}.parquet`.
+3. Call `run_sweep()` — results auto-save to `data/sweeps/{strategy}_{instrument}_{interval}.parquet`. Repeat for each instrument you want to test (BTC/ETH/SOL/...).
 4. Inspect heatmaps in the backtest notebook. For multi-stage sweeps (e.g. MACD periods → RSI thresholds), use a different `strategy_name` for the sensitivity sweep.
-5. Compare across instruments/timeframes: open `notebooks/compare_sweeps.ipynb`, call `load_sweeps()` (optionally filtered by strategy/instrument/interval). Review the best-params table and parameter stability analysis.
-6. Validate before paper trading: open `notebooks/validate_strategy.ipynb`, point it at the sweep file and strategy factory. Run plateau detection, walk-forward, and bootstrap. Check the go/no-go assessment.
-7. Only proceed to paper trading (Phase 2 workflow) if validation passes.
+5. Compare across instruments/timeframes: open `notebooks/compare_sweeps.ipynb`, Run All. Review the best-params table, side-by-side heatmaps, and the parameter-stability table — pick a candidate combo (typically the cross-sweep robust one with low `cv_pnl_pct`).
+6. Validate per-instrument: open `notebooks/validate_strategy.ipynb`, edit cell 1.1 to set `STRATEGY` / `ASSET` / `BAR_INTERVAL` (auto-pick) or also `OVERRIDE_PARAMS = {...}` (validate a specific combo). Run All. Each run drops a verdict JSON. Repeat per (instrument, pick) you want to compare.
+7. Strategy-level rollup: open `notebooks/validate_all.ipynb`, Run All. The matrix + failure-rate view shows whether the candidate combo passes across instruments.
+8. Only proceed to paper trading (Phase 2 workflow) if the verdict matrix is dominated by ✅ / ⚠️ (no consistent 🚩 across instruments).
 
 ### Adding a new strategy
 1. Create a new file in `src/strategies/`.

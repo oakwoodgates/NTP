@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import shutil
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -809,6 +809,138 @@ def print_sweep_liquidation_diagnostics(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Verdict-JSON consumers (consumed by validate_all)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def load_verdict_jsons(
+    verdict_dir: str | Path | None = None,
+) -> list[dict[str, Any]]:
+    """Load every ``*_verdict.json`` file from ``reports/validate/``.
+
+    Each file is the dict returned by :func:`print_validation_verdict`
+    when called with ``verdict_path=``.  Files are returned sorted by
+    ``timestamp`` descending (newest first).
+
+    Parameters
+    ----------
+    verdict_dir
+        Directory containing verdict JSONs.  Default
+        ``reports/validate/`` relative to the project root.
+
+    Returns
+    -------
+    list[dict]
+        One dict per file.  Empty list if the directory doesn't exist
+        or has no matching files.
+
+    """
+    import json
+
+    if verdict_dir is None:
+        verdict_dir = _PROJECT_ROOT / "reports" / "validate"
+    verdict_dir = Path(verdict_dir)
+    if not verdict_dir.exists():
+        return []
+
+    out: list[dict[str, Any]] = []
+    for p in sorted(verdict_dir.glob("*_verdict.json")):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as e:  # noqa: PERF203
+            print(f"⚠️ Skipping {p.name}: {e}")
+            continue
+        # Tag with source filename so the matrix can show provenance
+        data["_source"] = p.name
+        out.append(data)
+
+    out.sort(key=lambda d: d.get("timestamp", ""), reverse=True)
+    return out
+
+
+def build_verdict_matrix(
+    verdicts: list[dict[str, Any]],
+) -> "pd.DataFrame":
+    """Compile a list of verdict dicts into a comparison-matrix DataFrame.
+
+    Each row is one validate run.  Columns:
+
+    * ``instrument`` — instrument_id (short form)
+    * ``interval`` — bar_interval
+    * ``pick`` — ``"auto"`` or the override params (e.g. ``"fast=10, slow=20"``)
+    * one column per check name, value = the icon (✅/⚠️/🚩)
+    * ``verdict`` — final icon
+    * ``timestamp`` — ISO timestamp
+
+    Sort by (instrument, pick, timestamp).  Use directly with
+    pandas ``display`` for an at-a-glance comparison.
+    """
+    import pandas as pd
+
+    if not verdicts:
+        return pd.DataFrame()
+
+    rows: list[dict[str, Any]] = []
+    # First pass: collect every check name across all verdicts so the
+    # column order is stable even when some runs skipped checks.
+    check_names: list[str] = []
+    seen = set()
+    for v in verdicts:
+        for c in v.get("checks", []):
+            name = c.get("name", "")
+            if name and name not in seen:
+                seen.add(name)
+                check_names.append(name)
+
+    for v in verdicts:
+        params = v.get("params", {}) or {}
+        # "auto" vs "override" determination — prefer the explicit
+        # ``override_params`` field on the verdict dict (v1 schema
+        # forward), then fall back to the legacy filename-suffix
+        # heuristic for older JSONs that predate the field.
+        override = v.get("override_params")
+        if override:
+            pick_str = ", ".join(f"{k}={vv}" for k, vv in override.items())
+        elif override is None and "override_params" in v:
+            # Explicit None — auto-pick run on the new schema
+            pick_str = "auto"
+        else:
+            # Legacy fallback: sniff the source filename for known
+            # override-tag prefixes.
+            src = v.get("_source", "")
+            is_override = (
+                "_fast" in src or "_f10" in src or "_f5" in src
+                or "_bb_period" in src or "_bp" in src
+                or "_dc_period" in src or "_dp" in src
+                or "_length" in src
+            )
+            pick_str = (
+                ", ".join(f"{k}={vv}" for k, vv in params.items())
+                if is_override else "auto"
+            )
+
+        check_icons = {c["name"]: c["icon"] for c in v.get("checks", [])}
+        verdict_icon = v.get("verdict", {}).get("icon", "")
+        timestamp = v.get("timestamp", "")[:19]  # drop microseconds
+
+        row: dict[str, Any] = {
+            "instrument": v.get("instrument_id", ""),
+            "interval":   v.get("bar_interval", ""),
+            "pick":       pick_str,
+        }
+        for name in check_names:
+            row[name] = check_icons.get(name, "")
+        row["verdict"]   = verdict_icon
+        row["timestamp"] = timestamp
+        rows.append(row)
+
+    df = pd.DataFrame(rows)
+    return df.sort_values(
+        ["instrument", "pick", "timestamp"], ascending=[True, True, False],
+    ).reset_index(drop=True)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Statistics helpers (consumed by validate_strategy)
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -983,7 +1115,10 @@ def print_validation_verdict(
     fee_results: Any | None = None,
     regime_results: Any | None = None,
     yearly_results: Any | None = None,
-) -> None:
+    starting_capital: float | None = None,
+    verdict_path: str | Path | None = None,
+    override_params: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """Print the consolidated go / no-go assessment for a strategy.
 
     Aggregates up to six PnL-based checks (plateau, walk-forward,
@@ -1114,7 +1249,13 @@ def print_validation_verdict(
                     f"top combo only {most_common_count}) — fitting noise",
                 ))
 
-    # 3. Bootstrap
+    # 3. Bootstrap — high P(profit) by itself isn't enough.  Pros size
+    # to survive their drawdown CI, so a strategy whose 5th-percentile
+    # PnL is well below 10% of starting capital has a worst-case tail
+    # at-or-below "essentially zero return," even at 95% P(profit).
+    # The capital-relative tail check is only applied when
+    # ``starting_capital`` is provided; absent it, we fall back to the
+    # legacy P(profit)-only thresholds.
     if bootstrap_prob_positive is not None:
         if n_trades is not None and n_trades < 5:
             checks.append(("⚠️", "Bootstrap", f"Only {n_trades} trades — insufficient"))
@@ -1123,9 +1264,22 @@ def print_validation_verdict(
             if bootstrap_p5 is not None and bootstrap_p95 is not None:
                 ci_str = f", 90% CI [{bootstrap_p5:,.0f}, {bootstrap_p95:,.0f}]"
             detail = f"P(profit)={bootstrap_prob_positive:.0f}%{ci_str}"
-            if bootstrap_prob_positive >= 90:
+
+            # Capital-relative weak-tail check
+            weak_tail = False
+            if starting_capital is not None and bootstrap_p5 is not None:
+                tail_threshold = starting_capital * 0.10
+                if bootstrap_p5 < tail_threshold:
+                    weak_tail = True
+                    detail += (
+                        f"  ⚠ pct_5 < {tail_threshold:,.0f} "
+                        f"(10% of capital)"
+                    )
+
+            if bootstrap_prob_positive >= 90 and not weak_tail:
                 checks.append(("✅", "Bootstrap", detail))
             elif bootstrap_prob_positive >= 70:
+                # 70-89% prob OR ≥90% with weak tail → ⚠️
                 checks.append(("⚠️", "Bootstrap", detail))
             else:
                 checks.append(("🚩", "Bootstrap", detail))
@@ -1257,14 +1411,73 @@ def print_validation_verdict(
 
     n_fail = sum(1 for icon, _, _ in checks if icon == "🚩")
     n_warn = sum(1 for icon, _, _ in checks if icon == "⚠️")
+    n_pass = sum(1 for icon, _, _ in checks if icon == "✅")
 
     print()
     if n_fail > 0:
-        print("  VERDICT: 🚩 DO NOT paper trade yet.  Address the red flags first.")
+        verdict_icon = "🚩"
+        verdict_outcome = "fail"
+        verdict_summary = "DO NOT paper trade yet.  Address the red flags first."
     elif n_warn > 0:
-        print("  VERDICT: ⚠️ PROCEED WITH CAUTION.  Monitor closely in paper trading.")
+        verdict_icon = "⚠️"
+        verdict_outcome = "warn"
+        verdict_summary = "PROCEED WITH CAUTION.  Monitor closely in paper trading."
     else:
-        print("  VERDICT: ✅ READY for paper trading.")
+        verdict_icon = "✅"
+        verdict_outcome = "pass"
+        verdict_summary = "READY for paper trading."
+
+    print(f"  VERDICT: {verdict_icon} {verdict_summary}")
     print()
     print("  Remember: expect 30–40% haircut from backtest to live.")
     print("=" * 60)
+
+    # Build the verdict dict — persisted to disk if verdict_path is
+    # set, and returned to the caller so validate_all.ipynb can build
+    # a comparison matrix without parsing stdout.  Schema versioned
+    # so consumers can reject older formats cleanly.
+    verdict_dict: dict[str, Any] = {
+        "_schema_version": 1,
+        "instrument_id": instrument_id,
+        "bar_interval": bar_interval,
+        "params": dict(params),
+        # When ``override_params`` is set, the run validated a
+        # specific user-supplied combo (typically the cross-sweep
+        # robust pick) instead of the per-sweep best.  Persisting
+        # it explicitly lets validate_all distinguish "auto" from
+        # "override" rows without filename-suffix sniffing.
+        "override_params": dict(override_params) if override_params else None,
+        "starting_capital": starting_capital,
+        "checks": [
+            {
+                "icon": icon,
+                "name": name,
+                "detail": detail,
+                "outcome": (
+                    "fail" if icon == "🚩"
+                    else "warn" if icon == "⚠️"
+                    else "pass"
+                ),
+            }
+            for icon, name, detail in checks
+        ],
+        "counts": {"pass": n_pass, "warn": n_warn, "fail": n_fail},
+        "verdict": {
+            "icon": verdict_icon,
+            "outcome": verdict_outcome,
+            "summary": verdict_summary,
+        },
+        "timestamp": datetime.now(tz=UTC).isoformat(),
+    }
+
+    if verdict_path is not None:
+        import json
+        path = Path(verdict_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(verdict_dict, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"  Verdict JSON: {path}")
+
+    return verdict_dict

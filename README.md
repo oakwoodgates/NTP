@@ -117,11 +117,15 @@ A crypto algorithmic trading platform built on [NautilusTrader](https://nautilus
 │   │   ├── 03_signals.ipynb         # Indicator / signal verification
 │   │   └── 04_persistence.ipynb     # DB persistence verification
 │   ├── compare_sweeps.ipynb       # Cross-instrument/timeframe comparison
-│   ├── validate_strategy.ipynb    # Walk-forward, plateau, bootstrap
+│   ├── validate_strategy.ipynb    # 8-check go/no-go verdict per (instrument, combo)
+│   ├── validate_all.ipynb         # Strategy-level matrix consolidator
 │   ├── review_live_run.ipynb      # Post-run analysis of live/paper trades
 │   ├── charts.py                  # Plotting helpers (plotly, matplotlib, TVLC reports)
-│   └── utils.py                   # Shared notebook helpers (make_instrument_id, save_tearsheet,
-│                                  #   save_notebook, save_notebook_html)
+│   ├── utils.py                   # Shared notebook helpers (load_sweeps_filtered,
+│   │                              #   print_validation_verdict, save_notebook_snapshot, ...)
+│   ├── _compare_helpers.py        # Notebook-private helpers for compare_sweeps
+│   └── _validate_helpers.py       # Notebook-private helpers for validate_strategy
+│                                  #   (STRATEGIES registry, plateau scoring, ...)
 ├── scripts/
 │   ├── _catalog.py            # Shared utilities for data fetch scripts (crash-safe writes)
 │   ├── fetch_hl_candles.py    # Hyperliquid OHLCV data fetcher
@@ -234,9 +238,12 @@ python scripts/run_sandbox.py
 jupyter notebook notebooks/
 
 # Workflow:
-# 1. backtest_*.ipynb → run_sweep() → data/sweeps/*.parquet
-# 2. compare_sweeps.ipynb → load_sweeps() → side-by-side analysis
-# 3. validate_strategy.ipynb → walk-forward + plateau + bootstrap
+# 1. backtest_*.ipynb (per instrument) → run_sweep() → data/sweeps/*.parquet
+# 2. compare_sweeps.ipynb → cross-sweep table, stability + CV column
+# 3. validate_strategy.ipynb (per instrument, optional override) → 8-check
+#    verdict per (instrument, combo), drops JSON to reports/validate/
+# 4. validate_all.ipynb → reads all verdict JSONs, renders strategy-level
+#    comparison matrix + per-check failure-rate
 ```
 
 ## Usage
@@ -246,10 +253,11 @@ jupyter notebook notebooks/
 This is the current focus. The research workflow:
 
 1. **Write a strategy** in `src/strategies/`. Subclass `Strategy`, implement `on_start()` and `on_bar()`.
-2. **Sweep parameters** in a `backtest_*.ipynb` notebook using `run_sweep()`. Results auto-save to `data/sweeps/`.
-3. **Compare across instruments and timeframes.** Open `compare_sweeps.ipynb`, call `load_sweeps()`. Review side-by-side heatmaps and parameter stability.
-4. **Validate before paper trading.** Open `validate_strategy.ipynb`. Run plateau detection (are best params robust?), walk-forward analysis (do they work out-of-sample?), and bootstrap confidence intervals (is the result statistically reliable?).
-5. **Paper trade validated strategies** via Phase 2 infrastructure.
+2. **Sweep parameters** in a `backtest_*.ipynb` notebook using `run_sweep()`. Run for each instrument you want to test (BTC/ETH/SOL/...). Results auto-save to `data/sweeps/`.
+3. **Compare across instruments.** Open `compare_sweeps.ipynb`, Run All. Review the best-params table, side-by-side heatmaps with liquidated-cell flags, and the parameter-stability table (sorted by avg PnL%, with `cv_pnl_pct` showing cross-instrument stability). Pick a candidate combo — typically the cross-sweep robust one with low CV.
+4. **Validate per (instrument, combo).** Open `validate_strategy.ipynb`. Edit cell 1.1 to set the instrument; optionally set `OVERRIDE_PARAMS` to validate a specific combo instead of the per-sweep best. Run All — produces an 8-check verdict (plateau, walk-forward, param-stability, bootstrap, rolling, fee, regime, yearly concentration) and drops a JSON to `reports/validate/`. Repeat for each (instrument, pick) you care about.
+5. **Strategy-level rollup.** Open `validate_all.ipynb`, Run All. The comparison matrix shows which checks consistently flag across instruments — separates strategy-level signal from instrument-specific noise.
+6. **Paper trade validated strategies** via Phase 2 infrastructure — only when no check is consistently 🚩 across instruments.
 
 ### Run paper trading (Phase 2)
 

@@ -138,3 +138,51 @@ class TestBuildStabilityDf:
         assert list(out["avg_pnl_pct"]) == sorted(
             out["avg_pnl_pct"], reverse=True,
         )
+
+
+class TestBuildStabilityDfCoV:
+    """Coefficient-of-variation column — combo stability across instruments."""
+
+    def test_cov_column_present(self) -> None:
+        sweeps = {
+            "btc": _make_sweep([(5, 20, 100.0)]),
+            "eth": _make_sweep([(5, 20, 200.0)]),
+        }
+        out, _ = build_stability_df(sweeps, ["fast", "slow"])
+        assert "cv_pnl_pct" in out.columns
+
+    def test_cov_low_for_stable_combo(self) -> None:
+        # 3 sweeps with PnL% around 100 (small variation)
+        sweeps = {
+            "a": _make_sweep([(5, 20, 950.0)]),    # 95%
+            "b": _make_sweep([(5, 20, 1000.0)]),   # 100%
+            "c": _make_sweep([(5, 20, 1050.0)]),   # 105%
+        }
+        out, _ = build_stability_df(sweeps, ["fast", "slow"])
+        cv = float(out.iloc[0]["cv_pnl_pct"])
+        # std/mean ≈ 5/100 = 0.05 — very stable
+        assert cv < 0.10
+
+    def test_cov_high_for_unstable_combo(self) -> None:
+        # 3 sweeps with wildly different PnL% (sign-flipping)
+        sweeps = {
+            "a": _make_sweep([(5, 20, 1000.0)]),    # 100%
+            "b": _make_sweep([(5, 20, -300.0)]),    # -30%
+            "c": _make_sweep([(5, 20, 600.0)]),     # 60%
+        }
+        out, _ = build_stability_df(sweeps, ["fast", "slow"])
+        cv = float(out.iloc[0]["cv_pnl_pct"])
+        # Wide spread → high CV
+        assert cv > 0.5
+
+    def test_cov_nan_for_single_sweep_combo(self) -> None:
+        # A combo that appears in only ONE sweep gets NaN CV
+        # (n=1 → std is NaN → CV undefined)
+        import math
+        sweeps = {
+            "a": _make_sweep([(5, 20, 100.0), (10, 30, 200.0)]),
+            "b": _make_sweep([(5, 20, 150.0)]),  # only 5/20
+        }
+        out, _ = build_stability_df(sweeps, ["fast", "slow"])
+        ten_thirty = out[(out["fast"] == 10) & (out["slow"] == 30)]
+        assert math.isnan(float(ten_thirty["cv_pnl_pct"].iloc[0]))

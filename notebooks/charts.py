@@ -1875,9 +1875,16 @@ def plot_pnl_heatmap(
 
     # Build a matching boolean pivot for flagged cells (using the
     # filtered df so flag_pivot lines up with the value pivot).
+    # Handles both v2 bool columns (e.g. ``liquidated``) and v1
+    # string columns (e.g. ``error == "liquidated"``) — for v2 the
+    # column is itself the flag and ``flag_value`` is ignored.
     flag_pivot = None
     if flag_col and flag_col in df.columns:
-        flagged = (df[flag_col].fillna("") == flag_value).astype(float)
+        col_data = df[flag_col]
+        if pd.api.types.is_bool_dtype(col_data):
+            flagged = col_data.fillna(False).astype(float)
+        else:
+            flagged = (col_data.fillna("") == flag_value).astype(float)
         flag_pivot = df.assign(_flag=flagged).pivot(
             index=row_col, columns=col_col, values="_flag",
         )

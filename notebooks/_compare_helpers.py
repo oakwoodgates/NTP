@@ -85,6 +85,13 @@ def build_stability_df(
             sweep_count=("total_pnl_pct", "count"),
             all_profitable=("total_pnl", lambda x: bool((x > 0).all())),
         )
-        .sort_values("avg_pnl_pct", ascending=False)
     )
+    # Coefficient of variation — how stable is each combo across sweeps?
+    # CV = std / |mean|.  Lower = more stable; very high values often
+    # signal a combo that's a coin flip across instruments.  Single-
+    # sweep combos get NaN std → NaN CV (not meaningful with n=1).
+    stab["cv_pnl_pct"] = (
+        stab["std_pnl_pct"] / stab["avg_pnl_pct"].abs()
+    ).where(stab["sweep_count"] >= 2)
+    stab = stab.sort_values("avg_pnl_pct", ascending=False)
     return stab, len(tagged)

@@ -293,6 +293,51 @@ def plateau_scores(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Filename helpers (consumed by RESULT_NAME composition in cell 1.1)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def short_param_key(key: str) -> str:
+    """Compact a param-dict key for use in filenames.
+
+    Takes the first letter of each underscore-separated word, so:
+
+    * ``"fast"`` → ``"f"``
+    * ``"slow"`` → ``"s"``
+    * ``"bb_period"`` → ``"bp"``
+    * ``"bb_std"`` → ``"bs"``
+    * ``"dc_period"`` → ``"dp"``
+    * ``"atr_sl"`` → ``"as"``
+    * ``"atr_tp"`` → ``"at"``
+    * ``"trailing_mult"`` → ``"tm"``
+
+    Used to generate the ``_OVERRIDE_TAG`` suffix in ``RESULT_NAME``
+    so validate snapshots match the compact backtest filename style
+    (``..._f10_s40_<ts>.html``) rather than verbose
+    (``..._fast10_slow20_<ts>.html``).
+
+    All compactions are unique within each strategy in
+    :data:`STRATEGIES`, so the round-trip is unambiguous per-strategy.
+    """
+    return "".join(w[0] for w in key.split("_") if w)
+
+
+def short_params_tag(params: dict[str, Any]) -> str:
+    """Render a params dict as a compact filename tag.
+
+    Joins ``short_param_key(k) + str(v)`` with underscores.  Returns
+    empty string for an empty dict.  Examples::
+
+        {"fast": 10, "slow": 20}              → "f10_s20"
+        {"bb_period": 20, "bb_std": 2.0}      → "bp20_bs2.0"
+        {"dc_period": 20}                     → "dp20"
+        {}                                    → ""
+
+    """
+    return "_".join(f"{short_param_key(k)}{v}" for k, v in params.items())
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Trade-PnL parsing (consumed by section 4.1 of the validate notebook)
 # ─────────────────────────────────────────────────────────────────────────────
 
