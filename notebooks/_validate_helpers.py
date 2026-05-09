@@ -88,7 +88,7 @@ def make_strategy_factory(
     The returned callable matches the signature ``run_sweep`` /
     ``run_walk_forward`` expects: ``factory(engine, params_dict)`` →
     side-effect (adds the strategy to the engine).  This is the v2
-    convention from the reference notebook ``ema_cross.ipynb``.
+    convention from the reference notebook ``ma_cross.ipynb``.
 
     Parameters
     ----------

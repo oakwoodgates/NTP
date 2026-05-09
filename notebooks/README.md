@@ -7,7 +7,9 @@ Research notebooks for strategy development, backtesting, and validation.
 ```
 notebooks/
   backtest/                — per-strategy backtest + sweep notebooks
-                             (ema_cross.ipynb is the v2 reference notebook)
+                             (ma_cross.ipynb is the v2 reference notebook —
+                             covers all 6 base MA types via MA_TYPE selector:
+                             EMA / SMA / HMA / DEMA / AMA / VIDYA)
   verify/                  — data-pipeline + signal verification
   compare_sweeps.ipynb     — cross-instrument / cross-timeframe comparison
   validate_strategy.ipynb  — walk-forward, plateau, bootstrap, regime, fee
@@ -34,7 +36,7 @@ but not imported anywhere outside `notebooks/`.
 
 ## Notebook structure convention (v2)
 
-`notebooks/backtest/ema_cross.ipynb` is the canonical reference for
+`notebooks/backtest/ma_cross.ipynb` is the canonical reference for
 **backtest** notebooks; `compare_sweeps.ipynb` and
 `validate_strategy.ipynb` are the canonical references for the
 **analysis** workflow notebooks.  All three use the same conventions
@@ -275,7 +277,7 @@ into three different `reports/` subtrees.
 ### 1. Sweep + compare (across instruments)
 
 ```bash
-# In each backtest notebook (e.g. notebooks/backtest/ema_cross.ipynb):
+# In each backtest notebook (e.g. notebooks/backtest/ma_cross.ipynb):
 #   Run All → run_sweep() writes data/sweeps/{strategy}_{instr}_{interval}.parquet
 
 # Then in compare_sweeps.ipynb:
@@ -355,12 +357,12 @@ After (or instead of) an interactive run, drop to a terminal:
 
 **Bash / Git Bash / WSL:**
 ```bash
-./scripts/snapshot-notebook.sh notebooks/backtest/ema_cross.ipynb
+./scripts/snapshot-notebook.sh notebooks/backtest/ma_cross.ipynb
 ```
 
 **PowerShell:**
 ```powershell
-.\scripts\snapshot-notebook.ps1 notebooks\backtest\ema_cross.ipynb
+.\scripts\snapshot-notebook.ps1 notebooks\backtest\ma_cross.ipynb
 ```
 
 The wrapper re-executes the notebook from a **fresh kernel** via

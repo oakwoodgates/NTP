@@ -186,7 +186,7 @@ def save_notebook_snapshot(
     Parameters
     ----------
     notebook_filename
-        Source notebook filename (e.g. ``"ema_cross.ipynb"``).  Resolved
+        Source notebook filename (e.g. ``"ma_cross.ipynb"``).  Resolved
         relative to the kernel's current working directory.
     result_name
         Basename for the snapshot files (no extension, no timestamp).

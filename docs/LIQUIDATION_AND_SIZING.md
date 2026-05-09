@@ -229,7 +229,7 @@ results_df = run_sweep(
 )
 ```
 
-See `notebooks/backtest/ema_cross.ipynb` for the canonical pattern.
+See `notebooks/backtest/ma_cross.ipynb` for the canonical pattern.
 
 ## Sweep schema additions
 
