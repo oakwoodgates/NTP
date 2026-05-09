@@ -1,9 +1,9 @@
 """Unit tests for the LiquidationAware strategy mixin.
 
-These tests verify the mixin's standalone behaviour without spinning up a
+These tests verify the mixin's standalone behavior without spinning up a
 full NT engine.  They cover:
 
-- ``_init_liquidation`` state initialisation.
+- ``_init_liquidation`` state initialization.
 - ``_liq_enabled`` guard logic (disabled when config is None / disabled).
 - ``_resolve_mm_rate`` reads the override-only field on a fully-resolved
   ``LiquidationConfig``.

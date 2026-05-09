@@ -11,7 +11,7 @@ NautilusTrader 1.225.0's `SimulatedExchange` does **not enforce margin** for `MA
 
 This is a deliberate policy choice (graceful degradation over enforcement) driven by live-trading-fidelity concerns. It is **unlikely to change upstream** before NT 2.0.
 
-The behavioural consequence: a backtest with insufficient equity will fill orders through insolvency, post negative balances, "recover mathematically", and report PnL that would be impossible in live trading. This project closes the gap with its own simulator.
+The behavioral consequence: a backtest with insufficient equity will fill orders through insolvency, post negative balances, "recover mathematically", and report PnL that would be impossible in live trading. This project closes the gap with its own simulator.
 
 ## What it does
 
@@ -22,7 +22,7 @@ Two events flow through the project's `MessageBus`:
 | `PositionLiquidated` | The mixin's reduce-only stop fills — the position is force-closed at the cross-margin liquidation price | Strategy goes flat. Can re-enter on next signal *if* the account is still alive. |
 | `AccountLiquidated` | Account equity falls below the IM+fee floor required to open a minimum-size entry | RiskEngine is set to `HALTED`. All subsequent `SubmitOrder` / `SubmitOrderList` commands are denied. Resting orders (including the mixin's already-submitted liq stops) keep firing. Cancels still work. |
 
-Two events are emitted because they have different semantics: position liquidation is recoverable; account liquidation is terminal for the run. Under cross margin with non-trivial gross leverage they tend to fire together (one liq drains equity below the alive floor), but the distinction generalises correctly to multi-position scenarios.
+Two events are emitted because they have different semantics: position liquidation is recoverable; account liquidation is terminal for the run. Under cross margin with non-trivial gross leverage they tend to fire together (one liq drains equity below the alive floor), but the distinction generalizes correctly to multi-position scenarios.
 
 ## Terminology
 
@@ -95,7 +95,7 @@ liq_price    = entry × (1 − liq_distance)   # long
              = entry × (1 + liq_distance)   # short
 ```
 
-`equity` is read at the time the stop is placed (i.e., `PositionOpened` time). The mixin recomputes on `PositionChanged` (close-and-reverse). Multi-instrument equity-pool drift (where another open position's PnL changes this position's liquidation distance) is **not modelled in v1**.
+`equity` is read at the time the stop is placed (i.e., `PositionOpened` time). The mixin recomputes on `PositionChanged` (close-and-reverse). Multi-instrument equity-pool drift (where another open position's PnL changes this position's liquidation distance) is **not modeled in v1**.
 
 | Scenario | Equity | Notional | IM as % of equity | Liq @ adverse |
 |---|---|---|---|---|
@@ -322,5 +322,5 @@ For research-grade comparison between parameter combos these optimisms wash out 
 
 - Source files listed in "Architecture → File map" above.
 - Tests: `tests/unit/test_liquidation.py`, `test_liquidation_mixin.py`, `test_engine_resolution.py`, `test_sizing.py`.
-- Bar-fill behaviour for stops: `docs/BAR_BACKTESTING_GOTCHAS.md` §3.
+- Bar-fill behavior for stops: `docs/BAR_BACKTESTING_GOTCHAS.md` §3.
 - Returns-stat caveat that interacts with liquidated rows: `docs/ANALYZER_RETURNS_CAVEAT.md`.

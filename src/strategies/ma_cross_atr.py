@@ -127,7 +127,7 @@ class MACrossATR(Strategy):
     ------
     ValueError
         If `config.fast_period` >= `config.slow_period`.
-        If `config.ma_type` is not a recognised type.
+        If `config.ma_type` is not a recognized type.
         If `config.atr_sl_multiplier` <= 0.
         If `config.atr_tp_multiplier` <= `config.atr_sl_multiplier`.
 

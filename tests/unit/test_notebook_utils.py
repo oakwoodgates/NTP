@@ -1013,7 +1013,7 @@ class TestValidationVerdictBootstrapCapitalThreshold:
                 # starting_capital not provided
             )
         out = buf.getvalue()
-        assert "✅ Bootstrap" in out  # legacy behaviour
+        assert "✅ Bootstrap" in out  # legacy behavior
         assert "10% of capital" not in out
 
     def test_low_prob_stays_red_regardless_of_capital(self) -> None:

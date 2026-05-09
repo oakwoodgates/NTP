@@ -118,7 +118,7 @@ class MACross(LiquidationAware, Strategy):
     ------
     ValueError
         If `config.fast_period` is not less than `config.slow_period`.
-        If `config.ma_type` is not a recognised type.
+        If `config.ma_type` is not a recognized type.
         If neither `config.sizing` nor `config.trade_notional` is set.
 
     """

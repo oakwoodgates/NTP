@@ -11,7 +11,7 @@ Why not the NT analyzer's Returns section?
     returns-derived stat for any strategy that doesn't trade daily.
     See ``docs/ANALYZER_RETURNS_CAVEAT.md``.
 
-The metrics here all derive from PnL realised on closed positions and
+The metrics here all derive from PnL realized on closed positions and
 event-time balance snapshots — both of which NT exposes correctly.
 
 Public API

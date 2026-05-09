@@ -175,7 +175,7 @@ def _bars_to_ma_ohlcv(
 def _parse_fills(fills_report: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Extract buy and sell rows from the fills report.
 
-    Returns two DataFrames (buys, sells), each with normalised columns:
+    Returns two DataFrames (buys, sells), each with normalized columns:
     ``_ts`` (datetime64, UTC), ``_px`` (float), ``_qty`` (str).
     Both may be empty if the report is empty or columns are missing.
     """
@@ -1135,7 +1135,7 @@ def plot_bootstrap_pnl(
     for the dispersion, not a true reproduction of the bootstrap
     distribution.
 
-    The actual-total line shows where the strategy's realised PnL
+    The actual-total line shows where the strategy's realized PnL
     sits within the resampled distribution — your eye should see
     immediately whether it's at the mean, in the upper tail, or in
     the lower tail.
@@ -1474,7 +1474,7 @@ def plot_yearly_breakdown(
        +500% one year and -50% the next is regime-dependent.
     2. **Trade-quality lines** — win rate and profit factor on twin
        axes per year.  Diverging direction (rising win rate but
-       falling PF, or vice versa) flags a behavioural shift in the
+       falling PF, or vice versa) flags a behavioral shift in the
        strategy across regimes.
 
     Calls ``plt.show()`` directly — designed for inline notebook use.
@@ -2966,7 +2966,7 @@ td.pnl.neg { color: #ef5350; }
 </div>
 
 <script>
-// ── Injected data (serialised by Python) ─────────────────────────────────────
+// ── Injected data (serialized by Python) ─────────────────────────────────────
 const OHLCV         = __OHLCV_JSON__;
 const OVERLAY_LINES = __OVERLAY_LINES_JSON__;
 const MARKERS       = __MARKERS_JSON__;

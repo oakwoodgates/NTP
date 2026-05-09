@@ -175,7 +175,7 @@ class MACrossStopEntry(Strategy):
     ------
     ValueError
         If ``config.fast_period`` is not less than ``config.slow_period``.
-        If ``config.ma_type`` is not a recognised type.
+        If ``config.ma_type`` is not a recognized type.
 
     """
 

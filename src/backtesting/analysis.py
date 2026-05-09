@@ -300,7 +300,7 @@ def performance_by_year(
     """Split realized PnL by calendar year.
 
     Each closed trade is assigned to the year of its **close** timestamp
-    (so a multi-week trade lands in the year the PnL was realised).
+    (so a multi-week trade lands in the year the PnL was realized).
     Useful for spotting regime-dependent strategies — a strategy that's
     +100% one year and -50% the next is a regime trade dressed up.
 

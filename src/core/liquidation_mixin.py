@@ -69,7 +69,7 @@ class LiquidationAware:
     # ── Init ────────────────────────────────────────────────────────────────
 
     def _init_liquidation(self, config: LiquidationConfig | None) -> None:
-        """Initialise liquidation state.
+        """Initialize liquidation state.
 
         Call this from the strategy's ``__init__`` after ``super().__init__()``.
         ``config`` is a fully-resolved :class:`LiquidationConfig` —

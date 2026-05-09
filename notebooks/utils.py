@@ -169,7 +169,7 @@ def save_notebook_snapshot(
     Designed to live in the last cell of a backtest notebook so a single
     "Run All" produces a complete snapshot without races.
 
-    Three behaviours, picked automatically based on the notebook's
+    Three behaviors, picked automatically based on the notebook's
     on-disk freshness and the ``save_on_run_all`` flag:
 
     1. **Active wait for autosave** — polls the notebook file's mtime
@@ -989,9 +989,9 @@ def wilson_score_interval(
 
     p = successes / n
     z2 = z * z
-    centre = (p + z2 / (2 * n)) / (1 + z2 / n)
+    center = (p + z2 / (2 * n)) / (1 + z2 / n)
     half = (z * math.sqrt((p * (1 - p) + z2 / (4 * n)) / n)) / (1 + z2 / n)
-    return max(0.0, centre - half), min(1.0, centre + half)
+    return max(0.0, center - half), min(1.0, center + half)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
