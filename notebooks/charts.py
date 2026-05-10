@@ -4315,11 +4315,12 @@ _SWEEP_HTML_TEMPLATE = r"""<!DOCTYPE html>
       color: #fff;
       font-weight: bold;
       cursor: pointer;
-      /* Pin the header to the top of the viewport when the user scrolls
-         the table.  z-index keeps it above row hover effects. */
-      position: sticky;
-      top: 0;
-      z-index: 10;
+      /* Pin the header to the top of the viewport when the user scrolls.
+         !important is needed because DataTables applies its own rules
+         at runtime that override these otherwise. */
+      position: sticky !important;
+      top: 0 !important;
+      z-index: 10 !important;
     }}
     table.dataTable tbody td {{
       padding: 6px 12px;
@@ -4461,8 +4462,6 @@ _SWEEP_HTML_TEMPLATE = r"""<!DOCTYPE html>
     </div>
   </div>
 
-  {heatmap_block}
-
   <table id="sweepTable" class="display compact" style="width: 100%">
     <thead>
       <tr>
@@ -4479,6 +4478,8 @@ _SWEEP_HTML_TEMPLATE = r"""<!DOCTYPE html>
     <span class="swatch liq"></span>liquidated
     <span class="swatch spot"></span>spotlight (off-grid)
   </div>
+
+  {heatmap_block}
 
   <script>
     $(document).ready(function() {{
@@ -4824,11 +4825,12 @@ _CROSS_SWEEP_HTML_TEMPLATE = r"""<!DOCTYPE html>
       color: #fff;
       font-weight: bold;
       cursor: pointer;
-      /* Pin the header to the top of the viewport when the user scrolls
-         the table.  z-index keeps it above row hover effects. */
-      position: sticky;
-      top: 0;
-      z-index: 10;
+      /* Pin the header to the top of the viewport when the user scrolls.
+         !important is needed because DataTables applies its own rules
+         at runtime that override these otherwise. */
+      position: sticky !important;
+      top: 0 !important;
+      z-index: 10 !important;
     }}
     table.dataTable tbody td {{
       padding: 6px 12px;
