@@ -201,3 +201,18 @@ class BBMeanRev(Strategy):
         """Reset indicators for engine reuse (parameter sweeps)."""
         self.bb.reset()
         self.rsi.reset()
+
+# ── Default sweep grids ────────────────────────────────────────────────────
+#
+# Single source of truth for the BBMeanRev sweep grid; shared between
+# notebooks/backtest/bb_meanrev.ipynb and any future batch runner.
+# Override locally in cell 1 if you want a one-off experiment:
+#     from src.strategies.bb_meanrev import BB_PERIODS
+#     BB_PERIODS = BB_PERIODS + [40]   # try one bigger period
+
+BB_PERIODS: list[int] = [15, 20, 25, 30]
+BB_STDS: list[float] = [1.5, 2.0, 2.5, 3.0]
+
+# Section 4.5 RSI-sensitivity sub-sweep (fix best BB combo, sweep these):
+RSI_BUY_VALUES: list[float] = [0.20, 0.25, 0.30, 0.35]
+RSI_SELL_VALUES: list[float] = [0.65, 0.70, 0.75, 0.80]

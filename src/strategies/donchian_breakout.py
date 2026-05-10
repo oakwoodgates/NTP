@@ -242,3 +242,14 @@ class DonchianBreakout(Strategy):
         self._prev_lower = 0.0
         self._prev_exit_upper = 0.0
         self._prev_exit_lower = 0.0
+
+# ── Default sweep grids ────────────────────────────────────────────────────
+#
+# Single source of truth for the DonchianBreakout sweep grid; shared between
+# notebooks/backtest/donchian_breakout.ipynb and any future batch runner.
+# Override locally in cell 1 if you want a one-off experiment:
+#     from src.strategies.donchian_breakout import DONCHIAN_ENTRY_PERIODS
+#     DONCHIAN_ENTRY_PERIODS = DONCHIAN_ENTRY_PERIODS + [100]
+
+DONCHIAN_ENTRY_PERIODS: list[int] = [10, 15, 20, 25, 30, 40, 50, 55, 60, 65, 70, 75]
+DONCHIAN_EXIT_PERIODS:  list[int] = [5, 7, 10, 12, 15, 20, 25]
