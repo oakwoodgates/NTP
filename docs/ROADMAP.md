@@ -223,8 +223,11 @@ for the v2 RFC and roadmap. Things we care about most:
 - **Bar-backtest fill model improvements.** Phase 2.6 will quantify how
   much our predictions lose to the optimistic trigger-price fills NT
   does today; v2 may tighten this and shrink the haircut.
-- **Breaking changes.** Currently pinned at 1.225.0. Do not upgrade
-  without a tested branch.
+- **Breaking changes.** Currently pinned at 1.226.0. Do not upgrade
+  without a tested branch — the 1.225 → 1.226 bump itself only required
+  migrating Hyperliquid configs from `testnet=` to
+  `environment=HyperliquidEnvironment.{TESTNET,MAINNET}`, but bigger
+  bumps will need full sweep + verdict re-runs.
 
 Migration is opportunistic, not scheduled.
 
