@@ -342,16 +342,20 @@ def _move_into(src: Path, dest_dir: Path) -> Path:
 
 def write_master_index(results: list[ComboResult], out_path: Path, run_id: str) -> None:
     """Write a top-level summary HTML linking every per-combo artifact."""
+    import os  # noqa: PLC0415 — local import keeps this helper self-contained
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    # Use os.path.relpath so the link from index.html resolves correctly
+    # to artifacts under reports/{charts,tearsheets,sweeps}/<run_id>/...,
+    # regardless of the directory layout.  The previous implementation
+    # hard-coded "../../../{rel}" which dropped the leading "reports/"
+    # segment and broke every link.
     def _link(p: Path | None, label: str) -> str:
         if p is None:
             return "—"
-        try:
-            rel = p.resolve().relative_to(out_path.parent.resolve().parent.parent)
-        except ValueError:
-            rel = p.resolve()
-        return f'<a href="../../../{rel.as_posix()}">{label}</a>'
+        rel = os.path.relpath(p.resolve(), out_path.parent.resolve())
+        # Use forward slashes so it works in browsers on every OS.
+        return f'<a href="{rel.replace(os.sep, "/")}">{label}</a>'
 
     rows = []
     # Sort by profit-factor desc, treating None as 0.
