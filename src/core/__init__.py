@@ -44,7 +44,7 @@ from src.core.liquidation import (
     compute_liquidation_price,
     is_account_alive,
 )
-from src.core.liquidation_mixin import LiquidationAware
+from src.core.liquidation_mixin import LIQUIDATION_TAG, LiquidationAware
 from src.core.protective_stop_mixin import PROTECTIVE_STOP_TAG, ProtectiveStopAware
 from src.core.sizing import (
     SizingConfig,
@@ -75,6 +75,7 @@ __all__ = [
     "TOPIC_ACCOUNT_LIQUIDATED",
     "TOPIC_POSITION_LIQUIDATED",
     "AccountLiquidated",
+    "LIQUIDATION_TAG",
     "LiquidationAware",
     "LiquidationConfig",
     "PROTECTIVE_STOP_TAG",

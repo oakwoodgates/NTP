@@ -63,6 +63,17 @@ _RED         = "#ef5350"
 _AMBER       = "#f5c518"
 _BLUE        = "#2196f3"
 
+# ── Close-cause overlay constants ─────────────────────────────────────────
+# Distinct colours / shapes for close-cause markers (protective_stop and
+# liquidation) so they pop out against the regular green BUY / red SELL
+# triangles produced by ``_add_trade_markers``.  Used by both the Plotly
+# chart helpers and the TVLC HTML report.
+_PSTOP_COLOR  = "#ff8a65"   # warm orange — distinct from sell red
+_LIQ_COLOR    = "#ff1744"   # strong crimson — distinct from sell red
+_LIQ_BAND     = "rgba(255, 23, 68, 0.20)"
+_PSTOP_LABEL  = "STOP"
+_LIQ_LABEL    = "LIQ"
+
 # ── Flag constants ────────────────────────────────────────────────────────
 _FLAG_BG   = "#eeeeee"
 _FLAG_TEXT = "#777777"
@@ -94,8 +105,23 @@ def plot_ma_cross(
     instrument_label: str = "",
     bar_label: str = "1h",
     height: int = 600,
+    exit_classification: pd.DataFrame | None = None,
+    account_liq_event: dict[str, Any] | None = None,
 ) -> go.Figure:
-    """Candlestick chart with MA overlays and trade entry markers."""
+    """Candlestick chart with MA overlays and trade entry markers.
+
+    Parameters
+    ----------
+    exit_classification
+        Optional DataFrame from ``utils.classify_position_exits(...)``.
+        When provided, protective-stop and liquidation closes get
+        distinct overlay markers on top of the regular BUY/SELL
+        triangles, so stop-driven exits stand out from strategy exits.
+    account_liq_event
+        Optional dict from ``utils.find_account_liq_culprit(...)``.
+        When non-empty, a vertical red band is drawn at the
+        ``liq_ts`` timestamp.
+    """
     ohlcv = _bars_to_ma_ohlcv(bars, fast_period, slow_period, ma_type=ma_type)
     buys, sells = _parse_fills(fills_report)
 
@@ -103,6 +129,8 @@ def plot_ma_cross(
     _add_candlesticks(fig, ohlcv)
     _add_ma_lines(fig, ohlcv, fast_period, slow_period, ma_type=ma_type)
     _add_trade_markers(fig, buys, sells, ohlcv)
+    _add_close_cause_markers(fig, exit_classification, ohlcv)
+    _add_account_liq_marker(fig, account_liq_event)
     title = f"{instrument_label} · {bar_label} · {ma_type}Cross({fast_period}/{slow_period})"
     _apply_base_layout(fig, title, height)
     return fig
@@ -315,6 +343,103 @@ def _add_marker_trace(
         fig.add_trace(trace)
 
 
+def _add_close_cause_markers(
+    fig: go.Figure,
+    exit_classification: pd.DataFrame | None,
+    ohlcv: pd.DataFrame,
+    *,
+    row: int | None = None,
+) -> None:
+    """Overlay distinct markers for protective-stop and liquidation closes.
+
+    ``exit_classification`` is the DataFrame returned by
+    ``notebooks.utils.classify_position_exits``.  Rows with
+    ``close_cause == "strategy_exit"`` are skipped — those are already
+    represented by the regular BUY/SELL markers from
+    ``_add_trade_markers``.  This overlay sits on top of those, in
+    distinct colours/shapes, so stop-driven exits visually pop out.
+    """
+    if exit_classification is None or exit_classification.empty:
+        return
+    if "close_cause" not in exit_classification.columns:
+        return
+
+    # Nudge above the candle by a fraction of the median range so the
+    # stop / liq glyphs sit just clear of the body — matches the style
+    # of the regular SELL markers but offset enough to read separately.
+    median_range = (ohlcv["high"] - ohlcv["low"]).median()
+    nudge = median_range * 0.7
+
+    cfg = [
+        ("protective_stop", _PSTOP_LABEL, _PSTOP_COLOR, "diamond"),
+        ("liquidation",     _LIQ_LABEL,   _LIQ_COLOR,   "x"),
+    ]
+    for cause, label, color, symbol in cfg:
+        subset = exit_classification[exit_classification["close_cause"] == cause]
+        if subset.empty:
+            continue
+
+        ts = pd.to_datetime(subset["ts_closed"].astype("int64"), unit="ns", utc=True)
+        px = subset["fill_px"].astype(float)
+        pnl = subset["realized_pnl"].astype(float) if "realized_pnl" in subset.columns else None
+
+        if pnl is not None:
+            customdata = np.stack([px.round(2), pnl.round(2)], axis=-1)
+            hover = (
+                f"<b>{label}</b><br>"
+                "Fill px : $%{customdata[0]:,.2f}<br>"
+                "PnL     : %{customdata[1]:,.2f}<br>"
+                "Time    : %{x|%Y-%m-%d %H:%M}<extra></extra>"
+            )
+        else:
+            customdata = px.round(2).to_numpy().reshape(-1, 1)
+            hover = (
+                f"<b>{label}</b><br>"
+                "Fill px : $%{customdata[0]:,.2f}<br>"
+                "Time    : %{x|%Y-%m-%d %H:%M}<extra></extra>"
+            )
+
+        trace = go.Scatter(
+            x=ts,
+            y=px + nudge,
+            name=label,
+            mode="markers",
+            marker=dict(
+                symbol=symbol,
+                size=13,
+                color=color,
+                line=dict(color="#ffffff", width=1.2),
+            ),
+            customdata=customdata,
+            hovertemplate=hover,
+            legendgroup="close_cause",
+        )
+        if row is not None:
+            fig.add_trace(trace, row=row, col=1)
+        else:
+            fig.add_trace(trace)
+
+
+def _add_account_liq_marker(
+    fig: go.Figure,
+    account_liq_event: dict[str, Any] | None,
+) -> None:
+    """Draw a vertical red band at the account-liquidation timestamp."""
+    if not account_liq_event:
+        return
+    liq_ts = account_liq_event.get("liq_ts")
+    if liq_ts is None:
+        return
+    x = pd.Timestamp(int(liq_ts), unit="ns", tz="UTC")
+    fig.add_vline(
+        x=x,
+        line=dict(color=_LIQ_COLOR, width=2, dash="dash"),
+        annotation_text="ACCOUNT LIQ",
+        annotation_position="top",
+        annotation_font=dict(color=_LIQ_COLOR, size=11),
+    )
+
+
 def _add_ma_lines(
     fig: go.Figure,
     ohlcv: pd.DataFrame,
@@ -394,6 +519,8 @@ def plot_macd_rsi(
     instrument_label: str = "BTC-USD-PERP",
     bar_label: str = "1h",
     height: int = 900,
+    exit_classification: pd.DataFrame | None = None,
+    account_liq_event: dict[str, Any] | None = None,
 ) -> go.Figure:
     """3-panel chart: candlesticks + trades, MACD + signal + histogram, RSI.
 
@@ -432,6 +559,8 @@ def plot_macd_rsi(
     # Row 1: Candlesticks + trade markers
     _add_candlesticks(fig, df, row=1)
     _add_trade_markers(fig, buys, sells, df, row=1)
+    _add_close_cause_markers(fig, exit_classification, df, row=1)
+    _add_account_liq_marker(fig, account_liq_event)
 
     # Row 2: MACD panel
     _add_macd_panel(fig, df, macd_fast, macd_slow, macd_signal, row=2)
@@ -610,6 +739,8 @@ def plot_bb_meanrev(
     instrument_label: str = "BTC-USD-PERP",
     bar_label: str = "1h",
     height: int = 800,
+    exit_classification: pd.DataFrame | None = None,
+    account_liq_event: dict[str, Any] | None = None,
 ) -> go.Figure:
     """2-panel chart: candlesticks + BB bands + trades, RSI with thresholds.
 
@@ -649,6 +780,8 @@ def plot_bb_meanrev(
     _add_candlesticks(fig, df, row=1)
     _add_bb_bands(fig, df, bb_period, bb_std, row=1)
     _add_trade_markers(fig, buys, sells, df, row=1)
+    _add_close_cause_markers(fig, exit_classification, df, row=1)
+    _add_account_liq_marker(fig, account_liq_event)
 
     # Row 2: RSI panel (reuse existing helper)
     _add_rsi_panel(fig, df, rsi_period, rsi_sell_threshold, rsi_buy_threshold, row=2)
@@ -778,6 +911,8 @@ def plot_donchian_breakout(
     instrument_label: str = "BTC-USD-PERP",
     bar_label: str = "1h",
     height: int = 600,
+    exit_classification: pd.DataFrame | None = None,
+    account_liq_event: dict[str, Any] | None = None,
 ) -> go.Figure:
     """Candlestick chart with dual Donchian Channel bands and trade markers.
 
@@ -807,6 +942,8 @@ def plot_donchian_breakout(
     _add_candlesticks(fig, df)
     _add_dc_bands(fig, df, entry_period, exit_period)
     _add_trade_markers(fig, buys, sells, df)
+    _add_close_cause_markers(fig, exit_classification, df)
+    _add_account_liq_marker(fig, account_liq_event)
     title = (
         f"{instrument_label} · {bar_label} · "
         f"DonchianBreakout(entry={entry_period}, exit={exit_period})"
@@ -902,6 +1039,8 @@ def _add_dc_bands(
 def plot_equity_curve(
     *args,
     currency: str = "USDC",
+    exit_classification: pd.DataFrame | None = None,
+    account_liq_event: dict[str, Any] | None = None,
 ) -> None:
     """Plot the event-time account balance curve with running peak + drawdown.
 
@@ -983,6 +1122,41 @@ def plot_equity_curve(
     ax2.set_ylabel(f"Drawdown ({currency})", color="#d62728")
     ax2.tick_params(axis="y", labelcolor="#d62728")
     ax2.invert_yaxis()  # drawdown grows downward visually
+
+    # ── Close-cause overlay (protective_stop + liquidation) ──────────────
+    # Subtle vertical lines at every stop/liq fill so equity collapses
+    # tied to forced exits become visually attributable. Drawn on the
+    # equity axis so they don't fight the drawdown axis fill.
+    n_stops = n_liqs = 0
+    if exit_classification is not None and not exit_classification.empty \
+            and "close_cause" in exit_classification.columns:
+        ts_index = pd.to_datetime(
+            exit_classification["ts_closed"].astype("int64"), unit="ns", utc=True,
+        )
+        cls = exit_classification["close_cause"]
+        stop_ts = ts_index[cls == "protective_stop"]
+        liq_ts  = ts_index[cls == "liquidation"]
+        n_stops = len(stop_ts)
+        n_liqs  = len(liq_ts)
+        for t in stop_ts:
+            ax.axvline(t, color=_PSTOP_COLOR, alpha=0.35, linewidth=0.8)
+        for t in liq_ts:
+            ax.axvline(t, color=_LIQ_COLOR, alpha=0.55, linewidth=1.0)
+        # Single legend entry per cause via empty-data proxy lines
+        if n_stops:
+            ax.plot([], [], color=_PSTOP_COLOR, alpha=0.6, linewidth=1.5,
+                    label=f"Protective stop ({n_stops})")
+        if n_liqs:
+            ax.plot([], [], color=_LIQ_COLOR, alpha=0.8, linewidth=1.5,
+                    label=f"Position liquidation ({n_liqs})")
+
+    # ── Account-liq vertical band ────────────────────────────────────────
+    if account_liq_event:
+        liq_ts_ns = account_liq_event.get("liq_ts")
+        if liq_ts_ns is not None:
+            x_liq = pd.Timestamp(int(liq_ts_ns), unit="ns", tz="UTC")
+            ax.axvline(x_liq, color=_LIQ_COLOR, linewidth=2.0,
+                       linestyle="--", label="ACCOUNT LIQ")
 
     # Combine legends from both axes
     h1, l1 = ax.get_legend_handles_labels()
@@ -1621,6 +1795,7 @@ def plot_trade_distributions(
     title: str = "",
     bar_interval_ns: int | None = None,
     currency: str = "USDC",
+    exit_classification: pd.DataFrame | None = None,
 ) -> None:
     """Three-panel: PnL distribution, duration distribution, top-trade share.
 
@@ -1702,9 +1877,35 @@ def plot_trade_distributions(
     ax.axvline(np.median(pnls), color="black", linestyle="--", linewidth=1.0,
                label=f"Median = {np.median(pnls):,.2f}")
     ax.axvline(0, color="#888", linestyle=":", linewidth=0.8)
+
+    # ── Close-cause overlay: stops + liqs as rug ticks above the bars ───
+    # Stops/liqs are nearly always losers (forced exits at adverse prices),
+    # so plotting them along the PnL axis quickly tells you "of my losing
+    # trades, how many came from stop-outs vs strategy-driven exits".
+    # Rug sits in the top 10% of the panel so the histogram bars stay clean.
+    pstop_count = liq_count = 0
+    if exit_classification is not None and not exit_classification.empty \
+            and {"close_cause", "realized_pnl"}.issubset(exit_classification.columns):
+        cls = exit_classification["close_cause"]
+        pstop_pnls = exit_classification.loc[cls == "protective_stop", "realized_pnl"].astype(float).to_numpy()
+        liq_pnls   = exit_classification.loc[cls == "liquidation",     "realized_pnl"].astype(float).to_numpy()
+        pstop_count, liq_count = len(pstop_pnls), len(liq_pnls)
+        y_top = ax.get_ylim()[1]
+        if pstop_count:
+            ax.scatter(pstop_pnls, np.full_like(pstop_pnls, y_top * 0.95),
+                       marker="|", s=70, color=_PSTOP_COLOR,
+                       label=f"Stops (n={pstop_count})", clip_on=False)
+        if liq_count:
+            ax.scatter(liq_pnls, np.full_like(liq_pnls, y_top * 0.88),
+                       marker="x", s=50, color=_LIQ_COLOR,
+                       label=f"Liquidations (n={liq_count})", clip_on=False)
+
     ax.set_xlabel(f"Trade PnL ({currency})")
     ax.set_ylabel("# trades")
-    ax.set_title("PnL distribution per trade")
+    title_extra = ""
+    if pstop_count or liq_count:
+        title_extra = f"  ·  forced exits: {pstop_count} stop / {liq_count} liq"
+    ax.set_title(f"PnL distribution per trade{title_extra}")
     ax.legend(fontsize=9)
     ax.grid(True, alpha=0.2)
 
@@ -2058,6 +2259,7 @@ def _parse_money_str(s: Any) -> float | None:
 def _fills_to_markers(
     fills_df: pd.DataFrame,
     ts_to_trade_num: dict[int, int] | None = None,
+    ts_to_close_cause: dict[int, str] | None = None,
 ) -> tuple[list[dict], dict[int, dict]]:
     """
     Convert fills_report → (tvlc_markers, marker_detail_by_time).
@@ -2070,6 +2272,12 @@ def _fills_to_markers(
                      ts_opened/ts_closed. When provided, the marker label
                      becomes "#N" instead of "B qty" / "S qty".
 
+    ts_to_close_cause  optional mapping of unix-second timestamp → close cause
+                       ("protective_stop" / "liquidation") for closing fills.
+                       When the bucket is non-strategy_exit, the marker color
+                       and shape are upgraded so forced exits stand out from
+                       regular sells, and the tooltip shows the cause.
+
     NOTE: position_id on fills is NOT used for matching — in NETTING mode all
     fills share the same base position_id and cannot be mapped to individual
     trades. Timestamp matching is exact because each fill creates the event
@@ -2080,6 +2288,14 @@ def _fills_to_markers(
 
     tvlc_markers: list[dict] = []
     detail: dict[int, dict] = {}
+
+    # Marker visual config per close cause (keys must match
+    # classify_position_exits output values).  Sells default to the regular
+    # red arrow; stops/liqs upgrade to distinctive shapes.
+    cause_marker = {
+        "protective_stop": ("#ff8a65", "circle",  "STOP"),
+        "liquidation":     ("#ff1744", "square",  "LIQ"),
+    }
 
     for _, row in fills_df.iterrows():
         ts_s = _ts_to_unix_s(row.get("ts_last") or row.get("ts_init"))
@@ -2105,23 +2321,48 @@ def _fills_to_markers(
         if ts_to_trade_num is not None and ts_s is not None:
             trade_num = ts_to_trade_num.get(ts_s)
 
-        marker_text = f"#{trade_num}" if trade_num is not None else f"{'B' if is_buy else 'S'} {qty_str}"
+        # Resolve close cause for this fill (closing-fill timestamps only).
+        cause = (
+            ts_to_close_cause.get(ts_s)
+            if ts_to_close_cause is not None
+            else None
+        )
+
+        # Default visuals (regular BUY/SELL).
+        marker_color = "#26a69a" if is_buy else "#ef5350"
+        marker_shape = "arrowUp" if is_buy else "arrowDown"
+        cause_label = ""
+        if cause and cause in cause_marker and not is_buy:
+            marker_color, marker_shape, cause_label = cause_marker[cause]
+
+        # Marker label: trade number wins; otherwise cause label or B/S+qty.
+        if trade_num is not None:
+            marker_text = (
+                f"#{trade_num} {cause_label}"
+                if cause_label
+                else f"#{trade_num}"
+            )
+        elif cause_label:
+            marker_text = cause_label
+        else:
+            marker_text = f"{'B' if is_buy else 'S'} {qty_str}"
 
         tvlc_markers.append({
             "time":     ts_s,
             "position": "belowBar" if is_buy else "aboveBar",
-            "color":    "#26a69a" if is_buy else "#ef5350",
-            "shape":    "arrowUp" if is_buy else "arrowDown",
+            "color":    marker_color,
+            "shape":    marker_shape,
             "text":     marker_text,
             "size":     1.5,
         })
 
         detail[ts_s] = {
-            "is_buy":    is_buy,
-            "side":      "BUY" if is_buy else "SELL",
-            "qty":       qty_str,
-            "px":        px_fmt,
-            "trade_num": trade_num,
+            "is_buy":      is_buy,
+            "side":        "BUY" if is_buy else "SELL",
+            "qty":         qty_str,
+            "px":          px_fmt,
+            "trade_num":   trade_num,
+            "close_cause": cause,
         }
 
     # TVLC requires markers sorted by time; deduplicate by taking last per ts
@@ -2144,8 +2385,17 @@ def _fmt_px(v: Any) -> str:
         return "—"
 
 
-def _positions_to_rows(positions_df: pd.DataFrame) -> list[dict]:
-    """Convert positions_report → list of plain dicts for the HTML trade table."""
+def _positions_to_rows(
+    positions_df: pd.DataFrame,
+    ts_to_close_cause: dict[int, str] | None = None,
+) -> list[dict]:
+    """Convert positions_report → list of plain dicts for the HTML trade table.
+
+    ``ts_to_close_cause`` (when supplied) is keyed by the position's
+    ``ts_closed`` in unix seconds; the resolved cause is added to each
+    row as the ``close_cause`` field so the trade table can flag
+    forced exits.
+    """
     if positions_df is None or positions_df.empty:
         return []
 
@@ -2182,6 +2432,12 @@ def _positions_to_rows(positions_df: pd.DataFrame) -> list[dict]:
         except (ValueError, TypeError):
             ret_frac = 0.0
 
+        close_cause = (
+            ts_to_close_cause.get(closed_s)
+            if (ts_to_close_cause is not None and closed_s)
+            else None
+        ) or "strategy_exit"
+
         rows.append({
             "opened":     opened_str,
             "closed":     closed_str,
@@ -2192,6 +2448,7 @@ def _positions_to_rows(positions_df: pd.DataFrame) -> list[dict]:
             "exit_px":    exit_px,
             "pnl":        pnl,
             "realized_return": ret_frac,
+            "close_cause": close_cause,
         })
 
     return rows
@@ -2220,6 +2477,56 @@ def _compute_stats(position_rows: list[dict], starting_capital: float) -> dict:
         "total_wins":     len(winners),
         "total_losses":   len(losers),
     }
+
+
+def _compute_close_cause_counts(position_rows: list[dict]) -> dict[str, dict]:
+    """Aggregate per-cause trade counts and PnL for the close-cause panel.
+
+    Returns a dict keyed by cause (``strategy_exit`` / ``protective_stop`` /
+    ``liquidation``) with ``count`` and ``pnl`` per bucket — empty when no
+    rows carry a ``close_cause`` field.
+    """
+    out: dict[str, dict] = {}
+    for r in position_rows:
+        cause = r.get("close_cause")
+        if not cause:
+            continue
+        bucket = out.setdefault(cause, {"count": 0, "pnl": 0.0})
+        bucket["count"] += 1
+        if r.get("pnl") is not None:
+            bucket["pnl"] += float(r["pnl"])
+    # Round PnL after summation to keep JSON small and stable.
+    for v in out.values():
+        v["pnl"] = round(v["pnl"], 4)
+    return out
+
+
+def _summarise_account_liq(account_liq_event: dict[str, Any] | None) -> dict[str, Any]:
+    """Reduce ``find_account_liq_culprit`` output to JSON-safe primitives.
+
+    Only the bits needed by the HTML banner are kept — the full
+    ``culprit_positions`` list (NT Position objects) is not JSON-encodable.
+    """
+    if not account_liq_event:
+        return {}
+    return {
+        "liq_ts":         account_liq_event.get("liq_ts"),
+        "liq_ts_iso":     account_liq_event.get("liq_ts_iso"),
+        "equity_at_liq":  _decimal_to_float(account_liq_event.get("equity_at_liq")),
+        "equity_before":  _decimal_to_float(account_liq_event.get("equity_before")),
+        "drain_amount":   _decimal_to_float(account_liq_event.get("drain_amount")),
+        "culprit_count":  len(account_liq_event.get("culprit_position_ids", []) or []),
+    }
+
+
+def _decimal_to_float(v: Any) -> float | None:
+    """Best-effort coerce Decimal/None/numeric → float for JSON serialisation."""
+    if v is None:
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
 
 
 # ── Analysis tool charts ──────────────────────────────────────────────────────
@@ -2580,6 +2887,8 @@ def generate_backtest_html(
     starting_capital: float = 10_000.0,
     result_filename: str | None = None,
     open_browser: bool = False,
+    exit_classification: pd.DataFrame | None = None,
+    account_liq_event: dict[str, Any] | None = None,
 ) -> Path:
     """
     Generate a self-contained HTML backtest report using TradingView Lightweight Charts.
@@ -2667,9 +2976,30 @@ def generate_backtest_html(
             if closed_s:
                 ts_to_trade_num[closed_s] = trade_num
 
-    markers, marker_detail = _fills_to_markers(fills_report, ts_to_trade_num or None)
-    position_rows          = _positions_to_rows(positions_report)
+    # Build close-cause lookup keyed by closing-fill unix-second timestamp,
+    # used by both the markers and the trade table to flag forced exits.
+    ts_to_close_cause: dict[int, str] = {}
+    if exit_classification is not None and not exit_classification.empty \
+            and {"ts_closed", "close_cause"}.issubset(exit_classification.columns):
+        for _, ec_row in exit_classification.iterrows():
+            ts_ns = ec_row["ts_closed"]
+            ts_s = _ts_to_unix_s(ts_ns)
+            cause = str(ec_row["close_cause"])
+            if ts_s is not None and cause and cause != "strategy_exit":
+                ts_to_close_cause[ts_s] = cause
+
+    markers, marker_detail = _fills_to_markers(
+        fills_report,
+        ts_to_trade_num or None,
+        ts_to_close_cause or None,
+    )
+    position_rows          = _positions_to_rows(
+        positions_report,
+        ts_to_close_cause or None,
+    )
     stats                  = _compute_stats(position_rows, starting_capital)
+    cause_counts           = _compute_close_cause_counts(position_rows)
+    account_liq_summary    = _summarise_account_liq(account_liq_event)
 
     # ── Resolve output path ──────────────────────────────────────────────────
     if result_filename is None:
@@ -2715,6 +3045,8 @@ def generate_backtest_html(
     html = html.replace("__TRADES_JSON__",                  json.dumps(position_rows))
     html = html.replace("__STATS_JSON__",                   json.dumps(stats))
     html = html.replace("__STARTING_CAPITAL__",             str(starting_capital))
+    html = html.replace("__CAUSE_COUNTS_JSON__",            json.dumps(cause_counts))
+    html = html.replace("__ACCOUNT_LIQ_JSON__",             json.dumps(account_liq_summary))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html, encoding="utf-8")
@@ -2921,9 +3253,64 @@ table.trades td.id { color: #787b86; font-size: 11px; }
 }
 .badge.long  { background: rgba(38,166,154,0.12); color: #26a69a; }
 .badge.short { background: rgba(239,83,80,0.12);  color: #ef5350; }
+.badge.cause-strategy_exit  { background: rgba(120,123,134,0.18); color: #b2b5be; }
+.badge.cause-protective_stop { background: rgba(255,138,101,0.20); color: #ff8a65; }
+.badge.cause-liquidation     { background: rgba(255,23,68,0.22);  color: #ff8a8a; }
 td.pnl.pos { color: #26a69a; }
 td.pnl.neg { color: #ef5350; }
 .no-trades { padding: 28px; text-align: center; color: #787b86; }
+
+/* ── Account-liquidation banner ──────────────────────────────────────────── */
+.account-liq-banner {
+  display: none;  /* JS shows when account_liq summary is non-empty */
+  background: rgba(255, 23, 68, 0.18);
+  border-left: 4px solid #ff1744;
+  color: #ffb0b0;
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  border-bottom: 1px solid #2a2e39;
+}
+.account-liq-banner .meta {
+  display: inline-block;
+  margin-left: 12px;
+  color: #ff8a8a;
+  font-weight: 400;
+  font-size: 12px;
+}
+
+/* ── Close-cause summary chips (in stats bar) ────────────────────────────── */
+.cause-chips {
+  display: flex;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid #2a2e39;
+  background: #131722;
+  font-size: 12px;
+}
+.cause-chips:empty { display: none; }
+.cause-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: #1e222d;
+  border: 1px solid #2a2e39;
+  font-variant-numeric: tabular-nums;
+}
+.cause-chip .dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.cause-chip.strategy_exit .dot   { background: #b2b5be; }
+.cause-chip.protective_stop .dot { background: #ff8a65; }
+.cause-chip.liquidation .dot     { background: #ff1744; }
+.cause-chip .num { font-weight: 600; color: #e1e4ec; }
+.cause-chip .pnl { color: #787b86; margin-left: 4px; }
+.cause-chip .pnl.pos { color: #26a69a; }
+.cause-chip .pnl.neg { color: #ef5350; }
 </style>
 </head>
 <body>
@@ -2943,12 +3330,24 @@ td.pnl.neg { color: #ef5350; }
     <div class="legend-arrow-down"></div>
     <span>Short entry</span>
   </div>
+  <div class="legend-item">
+    <div class="legend-line" style="background:#ff8a65"></div>
+    <span>Protective stop</span>
+  </div>
+  <div class="legend-item">
+    <div class="legend-line" style="background:#ff1744"></div>
+    <span>Liquidation</span>
+  </div>
 </div>
+
+<div class="account-liq-banner" id="account-liq-banner"></div>
 
 <div id="chart-container">
   <div id="chart"></div>
   <div id="tooltip"></div>
 </div>
+
+<div class="cause-chips" id="cause-chips"></div>
 
 <div class="stats-bar" id="stats-bar"></div>
 
@@ -2971,6 +3370,7 @@ td.pnl.neg { color: #ef5350; }
         <th class="r">Size</th>
         <th class="r">Entry Px</th>
         <th class="r">Exit Px</th>
+        <th>Cause</th>
         <th class="r sortable" id="th-pnl">PnL <span class="sort-arrow">&varr;</span></th>
         <th class="r sortable" id="th-ret">Return % <span class="sort-arrow">&varr;</span></th>
       </tr>
@@ -2984,10 +3384,12 @@ td.pnl.neg { color: #ef5350; }
 const OHLCV         = __OHLCV_JSON__;
 const OVERLAY_LINES = __OVERLAY_LINES_JSON__;
 const MARKERS       = __MARKERS_JSON__;
-const MARKER_DETAIL = __MARKER_DETAIL_JSON__;   // {unix_s_str: {is_buy,side,qty,px,trade_num}}
+const MARKER_DETAIL = __MARKER_DETAIL_JSON__;   // {unix_s_str: {is_buy,side,qty,px,trade_num,close_cause}}
 const TRADES        = __TRADES_JSON__;
 const STATS              = __STATS_JSON__;
 const STARTING_CAPITAL   = __STARTING_CAPITAL__;
+const CAUSE_COUNTS  = __CAUSE_COUNTS_JSON__;     // {cause: {count, pnl}}
+const ACCOUNT_LIQ   = __ACCOUNT_LIQ_JSON__;      // {} or {liq_ts_iso, equity_at_liq, ...}
 
 // ── Chart ─────────────────────────────────────────────────────────────────────
 const chartEl = document.getElementById('chart');
@@ -3091,6 +3493,10 @@ chart.subscribeCrosshairMove(param => {
     html += `<div class="tt-row"><span class="tt-label">Signal</span><span class="tt-${cls}">${mDetail.side}</span></div>`;
     html += `<div class="tt-row"><span class="tt-label">Qty</span><span class="tt-value">${mDetail.qty}</span></div>`;
     html += `<div class="tt-row"><span class="tt-label">Fill px</span><span class="tt-value">${mDetail.px}</span></div>`;
+    if (mDetail.close_cause && mDetail.close_cause !== 'strategy_exit') {
+      const causeLbl = mDetail.close_cause === 'protective_stop' ? 'Protective stop' : 'Liquidation';
+      html += `<div class="tt-row"><span class="tt-label">Cause</span><span class="tt-sell">${causeLbl}</span></div>`;
+    }
   }
 
   tooltipEl.innerHTML = html;
@@ -3157,15 +3563,67 @@ function renderStats(stats) {
 
 renderStats(STATS);
 
+// ── Close-cause chips + account-liq banner ──────────────────────────────────
+function renderCauseChips(causeCounts) {
+  const el = document.getElementById('cause-chips');
+  if (!causeCounts || Object.keys(causeCounts).length === 0) {
+    el.innerHTML = '';
+    return;
+  }
+  const order = ['strategy_exit', 'protective_stop', 'liquidation'];
+  const labels = {
+    strategy_exit:    'Strategy exit',
+    protective_stop:  'Protective stop',
+    liquidation:      'Liquidation',
+  };
+  el.innerHTML = order
+    .filter(k => causeCounts[k])
+    .map(k => {
+      const b = causeCounts[k];
+      const pnlCls = b.pnl > 0 ? 'pos' : (b.pnl < 0 ? 'neg' : '');
+      const pnlStr = (b.pnl >= 0 ? '+' : '') + fmtNum(b.pnl);
+      return `<div class="cause-chip ${k}">
+        <span class="dot"></span>
+        <span>${labels[k]}</span>
+        <span class="num">${b.count}</span>
+        <span class="pnl ${pnlCls}">${pnlStr}</span>
+      </div>`;
+    })
+    .join('');
+}
+renderCauseChips(CAUSE_COUNTS);
+
+function renderAccountLiqBanner(summary) {
+  const el = document.getElementById('account-liq-banner');
+  if (!summary || !summary.liq_ts_iso) {
+    el.style.display = 'none';
+    return;
+  }
+  const before = summary.equity_before != null ? fmtNum(summary.equity_before) : '—';
+  const at = summary.equity_at_liq != null ? fmtNum(summary.equity_at_liq) : '—';
+  const drain = summary.drain_amount != null ? fmtNum(summary.drain_amount) : '—';
+  const culprit = summary.culprit_count != null ? summary.culprit_count : 0;
+  el.innerHTML = `⚠️ ACCOUNT LIQUIDATED at ${summary.liq_ts_iso}` +
+    `<span class="meta">equity ${before} → ${at} (drain ${drain}) ` +
+    `· ${culprit} open position(s) at the moment of liquidation</span>`;
+  el.style.display = 'block';
+}
+renderAccountLiqBanner(ACCOUNT_LIQ);
+
 // ── Trade table ───────────────────────────────────────────────────────────────
 (function renderTrades() {
   const tbody = document.getElementById('trades-body');
   document.getElementById('trade-count').textContent = TRADES.length;
 
   if (TRADES.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="9" class="no-trades">No closed positions found</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="10" class="no-trades">No closed positions found</td></tr>';
     return;
   }
+
+  const causeLabel = c =>
+    c === 'protective_stop' ? 'Stop'  :
+    c === 'liquidation'     ? 'Liq'   :
+    c === 'strategy_exit'   ? 'Strat' : '—';
 
   tbody.innerHTML = TRADES.map((t, i) => {
     const isLong   = t.side === 'Long';
@@ -3175,8 +3633,9 @@ renderStats(STATS);
     const ret      = t.realized_return;
     const retStr   = (ret == null) ? '—' : (ret >= 0 ? '+' : '') + fmtNum(ret * 100, 2) + '%';
     const retCls   = (ret == null) ? '' : (ret >= 0 ? 'pos' : 'neg');
+    const cause    = t.close_cause || 'strategy_exit';
 
-    return `<tr data-ts="${t.opened_ts_s || 0}" data-pnl="${pnl ?? 0}" data-ret="${ret ?? 0}" data-side="${isLong ? 'long' : 'short'}" onclick="scrollChart(this)">
+    return `<tr data-ts="${t.opened_ts_s || 0}" data-pnl="${pnl ?? 0}" data-ret="${ret ?? 0}" data-side="${isLong ? 'long' : 'short'}" data-cause="${cause}" onclick="scrollChart(this)">
       <td class="id">${i + 1}</td>
       <td>${t.opened}</td>
       <td>${t.closed}</td>
@@ -3184,6 +3643,7 @@ renderStats(STATS);
       <td class="r">${t.qty}</td>
       <td class="r">${t.entry_px}</td>
       <td class="r">${t.exit_px}</td>
+      <td><span class="badge cause-${cause}">${causeLabel(cause)}</span></td>
       <td class="r pnl ${pnlCls}">${pnlStr}</td>
       <td class="r pnl ${retCls}">${retStr}</td>
     </tr>`;
@@ -4407,9 +4867,19 @@ def _fig_to_base64_png(fig, *, dpi: int = 110, transparent: bool = False) -> str
 
 
 def _render_equity_curve_png(
-    account_report: pd.DataFrame, currency: str,
+    account_report: pd.DataFrame,
+    currency: str,
+    *,
+    exit_classification: pd.DataFrame | None = None,
+    account_liq_event: dict[str, Any] | None = None,
 ) -> str:
-    """Event-time balance + drawdown chart as a base64 PNG."""
+    """Event-time balance + drawdown chart as a base64 PNG.
+
+    Optional ``exit_classification`` and ``account_liq_event`` overlays
+    mirror the inline ``plot_equity_curve`` helper — vertical lines at
+    every protective-stop / liquidation close, and a dashed band at
+    the account-liq timestamp when applicable.
+    """
     if account_report is None or account_report.empty:
         return ""
     equity = account_report["total"].astype(float).copy()
@@ -4441,6 +4911,36 @@ def _render_equity_curve_png(
     for spine in ax2.spines.values():
         spine.set_color("#383b45")
 
+    # Close-cause overlay (forced exits) — small vertical lines on the
+    # equity axis, distinct colours per cause.
+    n_stops = n_liqs = 0
+    if exit_classification is not None and not exit_classification.empty \
+            and "close_cause" in exit_classification.columns:
+        ts_index = pd.to_datetime(
+            exit_classification["ts_closed"].astype("int64"), unit="ns", utc=True,
+        )
+        cls = exit_classification["close_cause"]
+        for t in ts_index[cls == "protective_stop"]:
+            ax.axvline(t, color=_PSTOP_COLOR, alpha=0.30, linewidth=0.6)
+            n_stops += 1
+        for t in ts_index[cls == "liquidation"]:
+            ax.axvline(t, color=_LIQ_COLOR, alpha=0.55, linewidth=0.9)
+            n_liqs += 1
+        if n_stops:
+            ax.plot([], [], color=_PSTOP_COLOR, alpha=0.6, linewidth=1.4,
+                    label=f"Stop ({n_stops})")
+        if n_liqs:
+            ax.plot([], [], color=_LIQ_COLOR, alpha=0.8, linewidth=1.4,
+                    label=f"Liq ({n_liqs})")
+
+    # Account-liquidation marker.
+    if account_liq_event:
+        liq_ts_ns = account_liq_event.get("liq_ts")
+        if liq_ts_ns is not None:
+            x_liq = pd.Timestamp(int(liq_ts_ns), unit="ns", tz="UTC")
+            ax.axvline(x_liq, color=_LIQ_COLOR, linewidth=2.0,
+                       linestyle="--", label="ACCOUNT LIQ")
+
     ax.legend(loc="upper left", facecolor="#1a1d24", edgecolor="#383b45",
               labelcolor="#d1d4dc")
     ax.set_title(
@@ -4452,7 +4952,11 @@ def _render_equity_curve_png(
 
 
 def _render_trade_distributions_png(
-    positions: list, currency: str, bar_interval_ns: int | None,
+    positions: list,
+    currency: str,
+    bar_interval_ns: int | None,
+    *,
+    exit_classification: pd.DataFrame | None = None,
 ) -> str:
     """Three-panel PnL/duration/concentration chart as a base64 PNG."""
     closed = [
@@ -4495,9 +4999,31 @@ def _render_trade_distributions_png(
     ax.axvline(np.median(pnls), color="#fff", linestyle="--", linewidth=0.8,
                label=f"Median = {np.median(pnls):,.0f}")
     ax.axvline(0, color="#888", linestyle=":", linewidth=0.5)
+
+    pstop_count = liq_count = 0
+    if exit_classification is not None and not exit_classification.empty \
+            and {"close_cause", "realized_pnl"}.issubset(exit_classification.columns):
+        cls = exit_classification["close_cause"]
+        pstop_pnls = exit_classification.loc[cls == "protective_stop", "realized_pnl"].astype(float).to_numpy()
+        liq_pnls   = exit_classification.loc[cls == "liquidation",     "realized_pnl"].astype(float).to_numpy()
+        pstop_count, liq_count = len(pstop_pnls), len(liq_pnls)
+        y_top = ax.get_ylim()[1]
+        if pstop_count:
+            ax.scatter(pstop_pnls, np.full_like(pstop_pnls, y_top * 0.95),
+                       marker="|", s=70, color=_PSTOP_COLOR,
+                       label=f"Stops ({pstop_count})", clip_on=False)
+        if liq_count:
+            ax.scatter(liq_pnls, np.full_like(liq_pnls, y_top * 0.88),
+                       marker="x", s=50, color=_LIQ_COLOR,
+                       label=f"Liqs ({liq_count})", clip_on=False)
+
     ax.set_xlabel(f"Trade PnL ({currency})", color="#d1d4dc")
     ax.set_ylabel("# trades", color="#d1d4dc")
-    ax.set_title("PnL distribution", color="#d1d4dc", fontsize=11)
+    title_extra = (
+        f" · forced exits: {pstop_count} stop / {liq_count} liq"
+        if (pstop_count or liq_count) else ""
+    )
+    ax.set_title(f"PnL distribution{title_extra}", color="#d1d4dc", fontsize=11)
     ax.legend(fontsize=8, facecolor="#1a1d24", edgecolor="#383b45",
               labelcolor="#d1d4dc")
     ax.tick_params(colors="#d1d4dc")
@@ -4666,6 +5192,8 @@ def generate_v2_tearsheet(
     liquidated_at: str | None = None,
     leverage: int | float = 1,
     fee_rate: float | None = None,
+    exit_classification: pd.DataFrame | None = None,
+    account_liq_event: dict[str, Any] | None = None,
 ) -> Path:
     """Self-contained HTML tearsheet using only trustworthy v2 metrics.
 
@@ -4826,9 +5354,14 @@ def generate_v2_tearsheet(
     out_path = output_dir / filename
 
     # ── Render charts to base64 PNGs ─────────────────────────────────────
-    equity_png = _render_equity_curve_png(account_report, currency)
+    equity_png = _render_equity_curve_png(
+        account_report, currency,
+        exit_classification=exit_classification,
+        account_liq_event=account_liq_event,
+    )
     trade_dist_png = _render_trade_distributions_png(
         positions, currency, bar_interval_ns,
+        exit_classification=exit_classification,
     )
     yearly_png = _render_yearly_bars_png(yearly_df, currency) if yearly_df is not None else ""
 
@@ -5060,7 +5593,77 @@ def generate_v2_tearsheet(
         )
         yearly_section = f"{chart_html}\n{yearly_html}"
 
+    # ── Close-cause section (forced exits) ───────────────────────────────
+    # Only renders when ``exit_classification`` carries at least one
+    # forced-exit row; pure strategy_exit runs skip the section since
+    # there's nothing notable to show.
+    close_cause_html = ""
+    cause_total = 0
+    if exit_classification is not None and not exit_classification.empty \
+            and "close_cause" in exit_classification.columns:
+        cause_groups = (
+            exit_classification.groupby("close_cause")["realized_pnl"]
+            .agg(["count", "sum"]).reset_index()
+        )
+        # Sort: strategy_exit first, then forced exits.
+        cause_order = {"strategy_exit": 0, "protective_stop": 1, "liquidation": 2}
+        cause_groups["_order"] = cause_groups["close_cause"].map(
+            lambda c: cause_order.get(c, 99),
+        )
+        cause_groups = cause_groups.sort_values("_order").drop(columns="_order")
+        forced_count = int(
+            cause_groups.loc[
+                cause_groups["close_cause"] != "strategy_exit", "count",
+            ].sum(),
+        )
+        cause_total = forced_count
+        if forced_count > 0:
+            cause_label = {
+                "strategy_exit":   "Strategy exit",
+                "protective_stop": "Protective stop",
+                "liquidation":     "Liquidation",
+            }
+            rows = []
+            for _, r in cause_groups.iterrows():
+                cause = str(r["close_cause"])
+                cnt = int(r["count"])
+                pnl = float(r["sum"])
+                cls = "good" if pnl > 0 else ("bad" if pnl < 0 else "")
+                rows.append(
+                    f'<tr><td>{html.escape(cause_label.get(cause, cause))}</td>'
+                    f'<td class="num">{cnt}</td>'
+                    f'<td class="num {cls}">{_format_metric(pnl, "money")}</td>'
+                    f'<td class="num">{_format_metric(pnl / cnt if cnt else 0, "money")}</td>'
+                    f'</tr>',
+                )
+            close_cause_html = (
+                '<section class="card-section"><h2>Close causes</h2>'
+                '<table class="data-table"><thead><tr>'
+                '<th>Cause</th><th class="r">Trades</th>'
+                '<th class="r">Total PnL</th><th class="r">Avg PnL/trade</th>'
+                '</tr></thead><tbody>'
+                + "\n".join(rows)
+                + '</tbody></table></section>'
+            )
+
+    # ── Account-liquidation banner (separate from per-position liq banner) ─
+    account_liq_banner = ""
+    if account_liq_event:
+        liq_iso = account_liq_event.get("liq_ts_iso") or "unknown"
+        eq_at = _decimal_to_float(account_liq_event.get("equity_at_liq"))
+        eq_before = _decimal_to_float(account_liq_event.get("equity_before"))
+        culprit_n = len(account_liq_event.get("culprit_position_ids", []) or [])
+        eq_at_str = _format_metric(eq_at, "money") if eq_at is not None else "—"
+        eq_bef_str = _format_metric(eq_before, "money") if eq_before is not None else "—"
+        account_liq_banner = (
+            f'<div class="liq-banner">⚠️ ACCOUNT LIQUIDATED at {html.escape(liq_iso)} '
+            f'— equity {eq_bef_str} → {eq_at_str} ({culprit_n} open position(s) at the moment of halt).'
+            f'</div>'
+        )
+
     # ── Build full HTML ──────────────────────────────────────────────────
+    # cause_total kept for potential future use (skip-section gating).
+    del cause_total
     html_doc = _V2_TEARSHEET_TEMPLATE.format(
         title=html.escape(title),
         strategy_label=html.escape(strategy_label or "—"),
@@ -5074,6 +5677,7 @@ def generate_v2_tearsheet(
         currency=html.escape(currency),
         generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
         liq_banner=liq_banner,
+        account_liq_banner=account_liq_banner,
         metrics_grid=metrics_grid,
         equity_img=(
             f'<img src="{equity_png}" alt="Equity & drawdown" />'
@@ -5086,6 +5690,7 @@ def generate_v2_tearsheet(
         yearly_section=yearly_section,
         regime_html=regime_html,
         baselines_html=baselines_html,
+        close_cause_html=close_cause_html,
     )
 
     out_path.write_text(html_doc, encoding="utf-8")
@@ -5205,6 +5810,7 @@ _V2_TEARSHEET_TEMPLATE = r"""<!DOCTYPE html>
 </div>
 
 {liq_banner}
+{account_liq_banner}
 
 <h2>Key metrics</h2>
 <div class="grid">
@@ -5220,6 +5826,8 @@ _V2_TEARSHEET_TEMPLATE = r"""<!DOCTYPE html>
 <div class="chart">
 {trade_dist_img}
 </div>
+
+{close_cause_html}
 
 {yearly_section}
 

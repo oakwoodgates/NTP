@@ -53,6 +53,12 @@ if TYPE_CHECKING:
     from nautilus_trader.model.identifiers import ClientOrderId, PositionId
 
 
+# Order tag used for cross-margin liquidation stops. Notebooks/tests filter
+# cache.orders() by this tag to identify liq-stop-driven exits (parallel
+# to PROTECTIVE_STOP_TAG in protective_stop_mixin).
+LIQUIDATION_TAG = "liquidation"
+
+
 class LiquidationAware:
     """Strategy mixin for position-liquidation simulation.
 
@@ -194,7 +200,7 @@ class LiquidationAware:
             quantity=quantity,
             trigger_price=trigger,
             reduce_only=True,
-            tags=["liquidation"],
+            tags=[LIQUIDATION_TAG],
         )
         self._liq_order_ids[position_id] = order.client_order_id
         self.submit_order(order)  # type: ignore[attr-defined]
@@ -265,7 +271,7 @@ class LiquidationAware:
         if order is None:
             return
         tags = order.tags or []
-        if "liquidation" not in tags:
+        if LIQUIDATION_TAG not in tags:
             return
 
         self._liq_count += 1

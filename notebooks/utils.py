@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import shutil
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -669,6 +670,273 @@ def print_baselines_verdict(
         )
     else:
         print("No closed trades — skipping random-entry baseline.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Close-cause classification (for chart + tearsheet annotation)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def classify_position_exits(positions: list, engine: Any) -> "pd.DataFrame":
+    """Classify each closed position by what closed it.
+
+    For every position in *positions* that is closed, looks up the closing
+    fill's order via ``engine.cache.order(client_order_id)`` and inspects
+    the order's ``tags`` to determine the close cause:
+
+    - ``"protective_stop"`` — closed by ``ProtectiveStopAware`` mixin's
+      reduce-only stop (tagged ``protective_stop``).
+    - ``"liquidation"`` — closed by ``LiquidationAware`` mixin's
+      cross-margin reduce-only stop (tagged ``liquidation``).
+    - ``"strategy_exit"`` — closed by an untagged order (the strategy's
+      cross-back signal, ``close_all_positions``, or any other exit
+      submitted by the strategy itself without a tag).
+
+    Used by ``plot_ma_cross``, ``plot_equity_curve``,
+    ``plot_trade_distributions``, ``generate_v2_tearsheet``, and
+    ``generate_backtest_html`` to render close-cause-aware annotations.
+
+    Parameters
+    ----------
+    positions
+        Output of ``engine.cache.position_snapshots() +
+        engine.cache.positions()`` — every position seen during the run.
+    engine
+        The ``BacktestEngine`` (or any object exposing ``.cache.order(id)``).
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per closed position, columns:
+
+        - ``position_id`` (str): the position's ID
+        - ``ts_closed`` (int, ns since epoch): closing fill timestamp
+        - ``close_cause`` (str): ``"strategy_exit"`` | ``"protective_stop"``
+          | ``"liquidation"``
+        - ``side`` (str): ``"LONG"`` | ``"SHORT"`` | ``"FLAT"`` (the
+          position's side, useful for plotting)
+        - ``fill_px`` (Decimal): the closing fill price (``Decimal(0)`` if
+          the closing fill can't be located — rare but possible if the
+          order was pruned from cache)
+        - ``trigger_px`` (Decimal | None): for tagged stops, the order's
+          ``trigger_price`` (so the chart can draw the planned stop level
+          alongside the actual fill); ``None`` for untagged exits
+        - ``realized_pnl`` (Decimal): the position's realized PnL
+        - ``entry_px`` (Decimal): the position's average open price (for
+          slippage calculations downstream)
+
+    Notes
+    -----
+    Positions with multiple closing fills (NETTING reductions) are not
+    handled specially — the helper looks at the LAST fill's order on the
+    position.  In single-position-per-strategy v1 setups this matches
+    intuition; in multi-leg strategies the helper would need extending.
+    """
+    import pandas as pd  # noqa: PLC0415 — keep heavy import lazy
+
+    rows = []
+    for pos in positions:
+        if not pos.is_closed:
+            continue
+
+        # Find the closing fill: the LAST OrderFilled on the position.
+        # NT's Position keeps a list of events; the closing one is the
+        # one whose qty zeros the position.  Easiest path: pull the
+        # last-known closing-fill order via the position's events.
+        closing_order_id = _last_closing_order_id(pos)
+        order = (
+            engine.cache.order(closing_order_id) if closing_order_id else None
+        )
+
+        tags = list(getattr(order, "tags", None) or []) if order else []
+        if "protective_stop" in tags:
+            cause = "protective_stop"
+        elif "liquidation" in tags:
+            cause = "liquidation"
+        else:
+            cause = "strategy_exit"
+
+        trigger_px = getattr(order, "trigger_price", None) if order else None
+
+        rows.append({
+            "position_id": str(pos.id),
+            "ts_closed": int(pos.ts_closed) if pos.ts_closed else 0,
+            "close_cause": cause,
+            "side": str(pos.side).split(".")[-1],  # "PositionSide.LONG" → "LONG"
+            "fill_px": (
+                Decimal(str(order.avg_px)) if order is not None
+                and getattr(order, "avg_px", None) is not None
+                else Decimal("0")
+            ),
+            "trigger_px": (
+                Decimal(str(trigger_px)) if trigger_px is not None else None
+            ),
+            "realized_pnl": (
+                pos.realized_pnl.as_decimal() if pos.realized_pnl is not None
+                else Decimal("0")
+            ),
+            "entry_px": (
+                Decimal(str(pos.avg_px_open)) if pos.avg_px_open is not None
+                else Decimal("0")
+            ),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def _last_closing_order_id(pos: Any) -> Any:
+    """Return the ClientOrderId of the order that closed *pos*, or None.
+
+    Walks the position's event list backwards to find the last
+    ``OrderFilled`` event whose post-fill quantity is zero.  Returns the
+    event's ``client_order_id``.
+
+    Defensive: if events are unavailable or no closing fill is found
+    (shouldn't happen on a closed position, but guard anyway), returns
+    ``None`` and the caller treats it as ``strategy_exit``.
+    """
+    events = getattr(pos, "events", None)
+    if not events:
+        # Fallback: NT positions may expose ``last_event`` without the
+        # full events list in some cache configurations.
+        last = getattr(pos, "last_event", None)
+        return getattr(last, "client_order_id", None) if last is not None else None
+    # Walk backwards — closing fill is at the end.
+    for ev in reversed(events):
+        if getattr(ev, "client_order_id", None) is not None:
+            return ev.client_order_id
+    return None
+
+
+def find_account_liq_culprit(
+    account_liq_events: list,
+    positions: list,
+    account_report: "pd.DataFrame",
+) -> dict[str, Any]:
+    """Identify the position(s) that drained the account to liquidation.
+
+    Given the ``AccountLiquidated`` event list captured by §2.2 of every
+    v2 backtest notebook (via ``msgbus.subscribe(TOPIC_ACCOUNT_LIQUIDATED,
+    ...)``), figures out which open position(s) caused the equity drain.
+    A "culprit" is any position that was open within 1ms of the liquidation
+    timestamp — typically a single position in single-strategy v1 setups,
+    but the helper handles multiple simultaneously open positions.
+
+    Used by ``plot_ma_cross`` (vertical line + annotation), ``plot_equity_curve``
+    (vertical line on the equity timeline), and ``generate_v2_tearsheet``
+    (the "Account liquidation" block) to highlight the catastrophic event.
+
+    Parameters
+    ----------
+    account_liq_events
+        The ``account_liquidations`` list from §2.2 — populated by the
+        notebook's MessageBus subscriber.  Each entry is an
+        ``AccountLiquidated`` event with at minimum ``ts_event`` and
+        ``equity``.
+    positions
+        Output of ``engine.cache.position_snapshots() +
+        engine.cache.positions()``.
+    account_report
+        Output of ``engine.trader.generate_account_report(VENUE)``.  Used
+        to compute pre-liquidation equity (``equity_before``) by reading
+        the last balance datapoint strictly before the liq timestamp.
+
+    Returns
+    -------
+    dict
+        Empty ``{}`` if no account-liquidation event fired.  Otherwise:
+
+        - ``liq_ts`` (int, ns): timestamp of the AccountLiquidated event
+        - ``liq_ts_iso`` (str): ISO-formatted timestamp for display
+        - ``equity_at_liq`` (Decimal): equity at the moment of liquidation
+          (from the event)
+        - ``equity_before`` (Decimal): last equity datapoint strictly
+          before ``liq_ts`` (from ``account_report``).  Zero if no prior
+          datapoint.
+        - ``drain_amount`` (Decimal): ``equity_before - equity_at_liq``
+        - ``culprit_position_ids`` (list[str]): IDs of positions that
+          were open within 1ms of ``liq_ts``.  Typically one element.
+        - ``culprit_positions`` (list[dict]): per-position summary —
+          ``{"position_id", "side", "entry_px", "fill_px", "realized_pnl"}``.
+
+    Notes
+    -----
+    Only the FIRST account-liquidation event is processed (one halt per
+    run is the design).  If multiple events somehow fire, the rest are
+    ignored with a print warning.
+    """
+    if not account_liq_events:
+        return {}
+
+    if len(account_liq_events) > 1:
+        print(
+            f"⚠️ Multiple AccountLiquidated events ({len(account_liq_events)}); "
+            f"using the first.",
+        )
+
+    ev = account_liq_events[0]
+    liq_ts = int(ev.ts_event)
+    equity_at_liq = (
+        ev.equity.as_decimal() if hasattr(ev.equity, "as_decimal")
+        else Decimal(str(ev.equity))
+    )
+
+    # equity_before: last account_report row with ts_event strictly < liq_ts.
+    equity_before = Decimal("0")
+    if account_report is not None and not account_report.empty:
+        # account_report's index is ts_event (DatetimeIndex) in NT v1.225.
+        # Convert liq_ts (ns) to a comparable timestamp.
+        import pandas as pd  # noqa: PLC0415
+
+        liq_dt = pd.Timestamp(liq_ts, unit="ns", tz="UTC")
+        prior = account_report.loc[account_report.index < liq_dt]
+        if not prior.empty:
+            equity_before = Decimal(str(prior["total"].iloc[-1]))
+
+    drain_amount = equity_before - equity_at_liq
+
+    # Culprit positions: those open within 1ms of liq_ts.
+    # "Open" means: ts_opened <= liq_ts AND (ts_closed is None OR ts_closed >= liq_ts - 1ms)
+    tolerance_ns = 1_000_000  # 1ms
+    culprit_ids: list[str] = []
+    culprit_summaries: list[dict[str, Any]] = []
+    for pos in positions:
+        ts_opened = int(pos.ts_opened) if pos.ts_opened else 0
+        ts_closed = int(pos.ts_closed) if pos.ts_closed else None
+        was_open_at_liq = (
+            ts_opened <= liq_ts
+            and (ts_closed is None or ts_closed >= liq_ts - tolerance_ns)
+        )
+        if not was_open_at_liq:
+            continue
+        culprit_ids.append(str(pos.id))
+        culprit_summaries.append({
+            "position_id": str(pos.id),
+            "side": str(pos.side).split(".")[-1],
+            "entry_px": (
+                Decimal(str(pos.avg_px_open)) if pos.avg_px_open is not None
+                else Decimal("0")
+            ),
+            "fill_px": (
+                Decimal(str(pos.avg_px_close))
+                if getattr(pos, "avg_px_close", None) is not None
+                else Decimal("0")
+            ),
+            "realized_pnl": (
+                pos.realized_pnl.as_decimal() if pos.realized_pnl is not None
+                else Decimal("0")
+            ),
+        })
+
+    return {
+        "liq_ts": liq_ts,
+        "liq_ts_iso": datetime.fromtimestamp(liq_ts / 1e9, tz=UTC).isoformat(),
+        "equity_at_liq": equity_at_liq,
+        "equity_before": equity_before,
+        "drain_amount": drain_amount,
+        "culprit_position_ids": culprit_ids,
+        "culprit_positions": culprit_summaries,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
