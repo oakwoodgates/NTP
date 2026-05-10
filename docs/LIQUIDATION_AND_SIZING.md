@@ -2,7 +2,7 @@
 
 ## What this is and why it exists
 
-NautilusTrader 1.225.0's `SimulatedExchange` does **not enforce margin** for `MARGIN` accounts and has **no liquidation engine** — verified end to end:
+NautilusTrader 1.226.0's `SimulatedExchange` does **not enforce margin** for `MARGIN` accounts and has **no liquidation engine** — verified end to end (unchanged from 1.225 — re-checked at the 1.226 upgrade):
 
 - `risk/engine.pyx:678–679` short-circuits the risk check for margin accounts with `# TODO: Determine risk controls for margin`. Returns `True` unconditionally.
 - `accounting/manager.pyx:580–586` has a commented-out `AccountMarginExceeded` raise with the TODO comment: *"Until the platform can accurately track account equity and cross-margin requirements this condition check is inaccurate and causes issues in live trading with more complex margin requirements."*
@@ -66,7 +66,7 @@ Three distinctions worth internalising:
 
 ### Why a mixin and not a single Actor
 
-Two NT 1.225.0 facts forced this split:
+Two NT 1.226.0 facts forced this split:
 
 1. **Actors cannot submit orders.** Only `Strategy` has `order_factory` / `submit_order`. (`common/actor.pyx`.)
 2. **NETTING positions are keyed by `{instrument_id}-{strategy_id}`.** A separate "liquidation strategy" submitting reduce-only orders against another strategy's position is rejected at `backtest/engine.pyx:5037–5049` ("REDUCE_ONLY would have increased position") because the liquidation strategy has no position under its own `strategy_id`.
@@ -388,7 +388,7 @@ Strategy configs in `run_live.py` set `liquidation=None` explicitly even though 
 ## What it doesn't model
 
 - **Gap-risk slippage on stop fills.** NT's bar matching engine fills `StopMarketOrder`s at the trigger price during synthetic-tick processing — even when the bar's wick gaps far past it. Real venues fill at "next available price", which on a big-gap day is significantly worse. Liquidation losses are systematically *best-case* in this simulator.
-- **Isolated margin.** NT 1.225.0 has no isolated/cross toggle. `MarginAccount` is always cross. Locked design decision.
+- **Isolated margin.** NT 1.226.0 has no isolated/cross toggle. `MarginAccount` is always cross. Locked design decision.
 - **Multi-instrument cross-margin equity drift.** The mixin computes `liq_price` once at position open, using equity at that moment. Other positions' PnL won't move this position's liquidation distance. Single-instrument-per-strategy v1 only.
 - **Liquidation cascades / auto-deleveraging.** Real venues run ADL when a liquidation can't be absorbed; we don't model that.
 - **Funding fees.** Out of scope.

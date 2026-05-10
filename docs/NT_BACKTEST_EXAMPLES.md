@@ -1,6 +1,6 @@
-# NautilusTrader v1.225.0 — Backtest Examples Report
+# NautilusTrader v1.226.0 — Backtest Examples Report
 
-Reference: `.ref/nautilus_trader-1.225.0/examples/backtest/`
+Reference: `.ref/nautilus_trader-1.226.0/examples/backtest/`
 
 ---
 

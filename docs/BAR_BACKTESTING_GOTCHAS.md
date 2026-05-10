@@ -1,4 +1,4 @@
-# Bar-Only Backtesting Gotchas (NautilusTrader 1.225.0)
+# Bar-Only Backtesting Gotchas (NautilusTrader 1.226.0)
 
 Lessons learned from adapting NT example strategies to work with OHLCV bar data from `ParquetDataCatalog`. NT's example strategies are written for tick data; several order types silently fail in bar-only backtests, and the engine itself doesn't enforce margin.
 

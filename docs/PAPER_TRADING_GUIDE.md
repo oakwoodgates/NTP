@@ -196,7 +196,7 @@ Then restart: Ctrl+C the running node, `python scripts/run_sandbox.py`.
 
 ## 7. NautilusTrader upgrades
 
-This project currently pins NautilusTrader `1.225.0` in `pyproject.toml`. When
+This project currently pins NautilusTrader `1.226.0` in `pyproject.toml`. When
 upgrading NautilusTrader in future:
 
 - Re-run the canonical EMA Cross backtest notebook to sanity-check P&L,

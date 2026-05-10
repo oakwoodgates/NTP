@@ -67,7 +67,7 @@ SWEEP_SCHEMA_VERSION = 2
 
 
 # ── Rust LogGuard singleton ──────────────────────────────────────────────────
-# NT 1.225.0's Rust logging subsystem panics if re-initialized after the
+# NT 1.226.0's Rust logging subsystem panics if re-initialized after the
 # LogGuard is freed (i.e. after an engine.dispose()).  BacktestNode solves
 # this by capturing the guard once and keeping it alive (node.py:369-374).
 # We mirror that pattern here so that make_engine() can create unlimited

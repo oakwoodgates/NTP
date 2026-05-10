@@ -2,13 +2,13 @@
 
 ## Status
 
-**Do not use Sharpe, Sortino, Volatility, or returns-based Profit Factor for strategy selection or go/no-go decisions.** These numbers are unreliable in both NT v1.224.0 and v1.225.0. PnL-section stats (Total PnL, Win Rate, Expectancy, PnL-based Profit Factor) are correct and consistent across versions.
+**Do not use Sharpe, Sortino, Volatility, or returns-based Profit Factor for strategy selection or go/no-go decisions.** These numbers are unreliable in NT v1.224.0, v1.225.0, **and v1.226.0** (the version currently pinned in `pyproject.toml`). The 1.226 upgrade did not fix the methodology — re-verified in the upgrade commit (`Upgrade NautilusTrader 1.225.0 -> 1.226.0`). PnL-section stats (Total PnL, Win Rate, Expectancy, PnL-based Profit Factor) are correct and consistent across versions.
 
 Waiting for an upstream fix in NautilusTrader. The most likely resolution is NT v2 — the v2 RFC ([nautechsystems/nautilus_trader#4042](https://github.com/nautechsystems/nautilus_trader/issues/4042)) explicitly calls out portfolio analytics as an area being reworked. We're tracking it; see [`ROADMAP.md`](ROADMAP.md) Phase 5.
 
 ## What Changed in v1.225.0
 
-The `analyzer.get_performance_stats_returns()` methodology changed between versions. Discovered during the v1.224.0 to v1.225.0 upgrade when comparing saved notebook outputs.
+The `analyzer.get_performance_stats_returns()` methodology changed between versions. Discovered during the v1.224.0 to v1.225.0 upgrade when comparing saved notebook outputs. **Carried unchanged into v1.226.0** — numbers below match the currently-pinned NT version.
 
 ### Concrete example: MACrossTakeProfit on BTCUSDT-PERP.BINANCE 1d
 
@@ -38,9 +38,9 @@ Computed `realized_pnl / notional_value` per position (38 returns for 38 positio
 
 **Problem:** Positions were open for 1-60+ days. Treating a 30-day position return as a 1-day return inflates annualized volatility and Sharpe. Avg Win was 8.3% (position-level), which is not a daily return.
 
-### v1.225.0: Equity pct_change, zero-padded daily
+### v1.225.0 / v1.226.0: Equity pct_change, zero-padded daily
 
-Computes `(equity_after - equity_before) / equity_before` at event timestamps (38 non-zero values), then embeds them into a full daily calendar (2,337 days total), padding all non-event days with zero.
+Computes `(equity_after - equity_before) / equity_before` at event timestamps (38 non-zero values), then embeds them into a full daily calendar (2,337 days total), padding all non-event days with zero. v1.226.0 retains the same `.ffill().pct_change()` daily-resample methodology — re-verified at upgrade time (see commit `Upgrade NautilusTrader 1.225.0 -> 1.226.0`); analyzer outputs are byte-for-byte identical between 1.225 and 1.226 for the BTC 1d MACrossTakeProfit reference run.
 
 **Problem:** 2,299 zero-return days massively dilute the mean (by factor 38/2337 = 0.016x) while deflating std less (~0.126x). This asymmetric dilution crushes Sharpe from 1.235 (non-zero only) to 0.159.
 
