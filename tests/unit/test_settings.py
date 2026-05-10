@@ -1,5 +1,7 @@
 """Tests for src.config.settings."""
 
+from decimal import Decimal
+
 from src.config.settings import Settings, get_settings
 
 
@@ -17,9 +19,23 @@ class TestSettings:
         assert s.trader_id == "TRADER-001"
         assert s.strategy == "MACross"
         assert s.instrument_id == "BTC-USD-PERP.HYPERLIQUID"
-        assert s.bar_interval == "1-HOUR-LAST-EXTERNAL"
-        assert s.trade_notional == "100"
-        assert s.starting_balance == 10_000
+        # Account / trader — flow through backtest, sandbox, live.
+        assert s.starting_capital == 1000
+        assert s.trade_notional == Decimal("2000")
+        assert s.leverage == 20
+        # Default venue + interval.
+        assert s.data_source == "BINANCE_PERP"
+        assert s.exec_venue == "HYPERLIQUID_PERP"
+        assert s.bar_interval == "4h"
+        # Risk + liquidation.
+        assert s.default_stop_pct == 0.05
+        assert s.liquidation_enabled is True
+        assert s.liquidation_min_trade_notional == Decimal("10")
+        # Default test universe.
+        assert s.default_assets == ["BTC", "ETH", "SOL"]
+        assert s.default_intervals == ["4h", "1d"]
+        # Back-compat alias.
+        assert s.starting_balance == 1000
 
     def test_postgres_dsn(self) -> None:
         s = Settings(

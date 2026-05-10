@@ -1,5 +1,27 @@
-"""Pydantic Settings — single source of truth for all environment configuration."""
+"""Pydantic Settings — single source of truth for all environment configuration.
 
+This is the canonical config object for the WHOLE system: backtest
+notebooks, batch runner, sandbox runner, live runner, validate,
+compare-sweeps — everyone reads from ``get_settings()``.  The same
+.env file flows from research → paper → live, so a value validated
+in backtest deploys with the same number, no manual re-entry.
+
+Override per environment via ``.env``::
+
+    STARTING_CAPITAL=1000
+    TRADE_NOTIONAL=2000
+    LEVERAGE=20
+    BAR_INTERVAL=4h
+    DEFAULT_STOP_PCT=0.05
+
+For one-off experiments (different capital, different leverage), set
+the env var or override the imported value locally in cell 1::
+
+    settings = get_settings()
+    STARTING_CAPITAL = 500   # one-off override; settings.starting_capital still 1000
+"""
+
+from decimal import Decimal
 from functools import lru_cache
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -10,35 +32,95 @@ class Settings(BaseSettings):
         env_file=".env", env_file_encoding="utf-8", extra="ignore",
     )
 
-    # Database
+    # ── Database ────────────────────────────────────────────────────────
     postgres_host: str = "localhost"
     postgres_port: int = 5434
     postgres_db: str = "nautilus_platform"
     postgres_user: str = "nautilus"
     postgres_password: str = ""
 
-    # Redis
+    # ── Redis ───────────────────────────────────────────────────────────
     redis_host: str = "localhost"
     redis_port: int = 6379
 
-    # Telegram
+    # ── Telegram ────────────────────────────────────────────────────────
     telegram_token: str = ""
     telegram_chat_id: str = ""
 
-    # Hyperliquid
+    # ── Hyperliquid ─────────────────────────────────────────────────────
     hl_wallet_address: str = ""
     hl_private_key: str = ""
     hl_testnet: bool = True  # Safety default — must explicitly set False for mainnet
-    live_confirm: bool = False  # Set LIVE_CONFIRM=yes in .env for containerized live trading
+    live_confirm: bool = False  # LIVE_CONFIRM=yes to bypass interactive prompt
 
-    # Trading
+    # ── Account / trader ────────────────────────────────────────────────
+    # The "single trader" config that flows through backtest, sandbox,
+    # and live.  Override each field via .env per deployment if needed.
     trader_id: str = "TRADER-001"
-    strategy: str = "MACross"  # MACross | …Cross | MACrossLongOnly | …CrossLongOnly | MACrossATR | MACDRSI
-    instrument_id: str = "BTC-USD-PERP.HYPERLIQUID"
-    bar_interval: str = "1-HOUR-LAST-EXTERNAL"
-    trade_notional: str = "100"  # USD notional per trade
-    starting_balance: int = 10_000
 
+    starting_capital: int = 1000
+    """USD seed capital. Used by backtest engines, sandbox SimulatedExchange
+    (``starting_balances``), and live monitoring (alive-floor calculations)."""
+
+    trade_notional: Decimal = Decimal("2000")
+    """USD notional per trade. With ``leverage=20`` and a 5% protective stop
+    ($100 risk), this is the project's standard 'aggressive but bounded'
+    setup — worst-case loss per trade equals the initial margin (isolated-
+    margin equivalence under cross-margin accounting)."""
+
+    leverage: int = 20
+    """Account leverage applied to the engine.  Combined with
+    ``trade_notional`` above, defines gross leverage on the position."""
+
+    # ── Default venue + data ────────────────────────────────────────────
+    data_source: str = "BINANCE_PERP"
+    """Where catalog data comes from. Binance has the deepest history;
+    Hyperliquid for native HL data when available."""
+
+    exec_venue: str = "HYPERLIQUID_PERP"
+    """Where execution is simulated / routed live."""
+
+    # ── Strategy + bar interval ─────────────────────────────────────────
+    strategy: str = "MACross"
+    """Strategy identifier used by sandbox/live runners. Backtest notebooks
+    pick their own (one notebook per strategy)."""
+
+    instrument_id: str = "BTC-USD-PERP.HYPERLIQUID"
+    """Default instrument for sandbox/live. Backtest notebooks override
+    via ``ASSET`` + ``DATA_SOURCE`` in cell 1."""
+
+    bar_interval: str = "4h"
+    """Friendly bar-interval string (e.g. ``"1d"``, ``"4h"``, ``"1h"``,
+    ``"15m"``). Use ``src.core.utils.bar_type_str(instrument_id, interval)``
+    to produce the full NT bar-type string at the boundary. NT internals
+    store the suffix form (``"4-HOUR-LAST-EXTERNAL"``); we stay friendly
+    everywhere user-facing."""
+
+    # ── Risk management ─────────────────────────────────────────────────
+    default_stop_pct: float | None = 0.05
+    """Default protective-stop fraction (``0.05`` = 5%). At
+    ``stop_pct = 1/leverage`` (20× → 0.05) worst-case loss per trade
+    equals the initial margin committed. Set to ``None`` to disable
+    the protective-stop mixin by default."""
+
+    # ── Liquidation simulator ───────────────────────────────────────────
+    liquidation_enabled: bool = True
+    """Wire up the LiquidationAware mixin + AccountAliveMonitor actor.
+    Set False for live (the venue handles its own liquidation)."""
+
+    liquidation_min_trade_notional: Decimal = Decimal("10")
+    """Floor used by AccountAliveMonitor to decide 'can the account still
+    afford a trade'. Smaller than any sensible position; not the binding
+    constraint in practice."""
+
+    # ── Default test universe (used by batch runner + research) ─────────
+    default_assets: list[str] = ["BTC", "ETH", "SOL"]
+    """Standard asset list for batch backtests + sweep comparisons."""
+
+    default_intervals: list[str] = ["4h", "1d"]
+    """Standard interval list for batch backtests + sweep comparisons."""
+
+    # ── Derived properties ──────────────────────────────────────────────
     @property
     def postgres_dsn(self) -> str:
         return (
@@ -49,6 +131,13 @@ class Settings(BaseSettings):
     @property
     def telegram_enabled(self) -> bool:
         return bool(self.telegram_token and self.telegram_chat_id)
+
+    # ── Back-compat alias ───────────────────────────────────────────────
+    @property
+    def starting_balance(self) -> int:
+        """Deprecated alias for ``starting_capital``. Old runner code reads
+        this name; new code should use ``starting_capital`` directly."""
+        return self.starting_capital
 
 
 @lru_cache
