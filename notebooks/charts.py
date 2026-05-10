@@ -2029,10 +2029,20 @@ def plot_pnl_heatmap(
     exclude_kinds: tuple[str, ...] | None = ("spotlight",),
     figsize: tuple[float, float] = (10, 7),
     cell_fontsize: int = 8,
-) -> None:
+    save_to: str | Path | None = None,
+    show: bool = True,
+) -> Any:
     """Diverging RdYlGn heatmap from sweep results DataFrame.
 
-    Calls ``plt.show()`` directly — designed for inline notebook use.
+    Designed for inline notebook use — by default calls ``plt.show()``.
+    Pass ``save_to=<path>`` to also persist the figure as a PNG (useful
+    for batch runners and embedding into the sweep HTML).  Pass
+    ``show=False`` for headless / scripted callers that don't want the
+    inline display.
+
+    Returns the ``matplotlib.figure.Figure`` for downstream callers
+    (e.g. base64-encoding for embed); returns ``None`` only on the
+    no-data early-return path.
 
     Parameters
     ----------
@@ -2172,7 +2182,14 @@ def plot_pnl_heatmap(
         )
         fig.subplots_adjust(bottom=fig.subplotpars.bottom + 0.04)
 
-    plt.show()
+    if save_to is not None:
+        out_path = Path(save_to)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_path, dpi=140, bbox_inches="tight")
+
+    if show:
+        plt.show()
+    return fig
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3959,6 +3976,8 @@ def generate_sweep_html(
     title: str | None = None,
     extra_columns: list[str] | None = None,
     open_browser: bool = False,
+    heatmap_path: str | Path | None = None,
+    heatmap_caption: str | None = None,
 ) -> Path:
     """Generate an interactive, sortable HTML report from a sweep DataFrame.
 
@@ -3997,6 +4016,15 @@ def generate_sweep_html(
         Useful for showing sweep-specific stats not in the default list.
     open_browser
         If True, opens the generated HTML in the default browser.
+    heatmap_path
+        Optional path to a PNG of the sweep's PnL heatmap (typically
+        produced by passing ``save_to`` to :func:`plot_pnl_heatmap`).
+        When provided, the image is base64-embedded into the sweep
+        HTML above the table so the heatmap and the sortable grid
+        ship as a single self-contained artifact.
+    heatmap_caption
+        Optional caption text rendered under the embedded heatmap.
+        Default is a short reminder of what the colors mean.
 
     Returns
     -------
@@ -4170,6 +4198,29 @@ def generate_sweep_html(
                 sort_col_idx = offset + i
                 break
 
+    # ── Optional embedded heatmap ─────────────────────────────────────────
+    heatmap_block = ""
+    if heatmap_path is not None:
+        hm_path = Path(heatmap_path)
+        if hm_path.exists():
+            import base64  # noqa: PLC0415 — keep heavy import lazy
+            mime = "image/png" if hm_path.suffix.lower() == ".png" else "image/svg+xml"
+            data = base64.b64encode(hm_path.read_bytes()).decode("ascii")
+            cap = heatmap_caption or (
+                "Diverging RdYlGn — green = profit, red = loss; "
+                "grey/underlined cells flag liquidations."
+            )
+            heatmap_block = (
+                '<section class="heatmap-block">'
+                f'<img src="data:{mime};base64,{data}" alt="PnL heatmap" />'
+                f'<div class="heatmap-caption">{html.escape(cap)}</div>'
+                "</section>"
+            )
+        else:
+            print(
+                f"⚠ heatmap_path={hm_path} does not exist — skipping embed.",
+            )
+
     # ── Build HTML ────────────────────────────────────────────────────────
     html_doc = _SWEEP_HTML_TEMPLATE.format(
         title=html.escape(title),
@@ -4189,6 +4240,7 @@ def generate_sweep_html(
         header_cells="\n".join(header_cells),
         body_rows="\n".join(body_rows),
         sort_col_idx=sort_col_idx,
+        heatmap_block=heatmap_block,
     )
 
     out_path.write_text(html_doc, encoding="utf-8")
@@ -4355,6 +4407,26 @@ _SWEEP_HTML_TEMPLATE = r"""<!DOCTYPE html>
     }}
     .swatch.liq {{ background: rgba(214, 39, 40, 0.30); }}
     .swatch.spot {{ background: rgba(255, 200, 0, 0.30); }}
+
+    .heatmap-block {{
+      background: #1a1d24;
+      border-radius: 6px;
+      padding: 12px;
+      margin: 16px 0;
+      text-align: center;
+    }}
+    .heatmap-block img {{
+      max-width: 100%;
+      height: auto;
+      border-radius: 4px;
+      background: #ffffff;
+    }}
+    .heatmap-caption {{
+      color: #888;
+      font-size: 11px;
+      margin-top: 8px;
+      font-style: italic;
+    }}
   </style>
 </head>
 <body>
@@ -4383,6 +4455,8 @@ _SWEEP_HTML_TEMPLATE = r"""<!DOCTYPE html>
       <span class="stat-label">Median DD:</span><span class="stat-value">{median_dd}</span>
     </div>
   </div>
+
+  {heatmap_block}
 
   <table id="sweepTable" class="display compact" style="width: 100%">
     <thead>

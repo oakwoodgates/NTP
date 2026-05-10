@@ -40,6 +40,7 @@ from nautilus_trader.model.identifiers import InstrumentId
 from src.actors.alert import AlertActor, AlertActorConfig
 from src.actors.persistence import PersistenceActor, PersistenceActorConfig
 from src.config.settings import get_settings
+from src.core import bar_type_str
 
 RUN_MODE = "sandbox"
 
@@ -153,15 +154,16 @@ def main() -> None:
     run_id = str(uuid.uuid4())
     instrument_id_str = settings.instrument_id
     instrument_id = InstrumentId.from_str(instrument_id_str)
-    bar_interval = settings.bar_interval
-    bar_type = BarType.from_str(f"{instrument_id}-{bar_interval}")
+    # settings.bar_interval is the friendly form ("4h"); convert to the
+    # full NT bar-type string at this boundary.
+    bar_type = BarType.from_str(bar_type_str(instrument_id_str, settings.bar_interval))
 
     strategy, strategy_id, config_dict = _build_strategy(
         settings.strategy, instrument_id, bar_type,
-        Decimal(settings.trade_notional),
+        settings.trade_notional,
     )
 
-    print(f"Starting {RUN_MODE} run: {strategy_id} on {instrument_id} ({bar_interval})")
+    print(f"Starting {RUN_MODE} run: {strategy_id} on {instrument_id} ({settings.bar_interval})")
 
     # Register run in DB before node starts
     asyncio.run(_register_run(
@@ -198,7 +200,7 @@ def main() -> None:
         exec_clients={
             "HYPERLIQUID": SandboxExecutionClientConfig(
                 venue="HYPERLIQUID",
-                starting_balances=[f"{settings.starting_balance} USDC"],
+                starting_balances=[f"{settings.starting_capital} USDC"],
             ),
         },
     ))
