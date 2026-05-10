@@ -44,6 +44,7 @@ def _make_position(
     avg_px_close: float | None = 95.0,
     realized_pnl: Decimal | None = Decimal("-50"),
     closing_order_id: str | None = "ORDER-CLOSE-1",
+    opening_order_id: str | None = None,
     ts_opened: int = 1_000_000_000_000,
     ts_closed: int | None = 2_000_000_000_000,
 ) -> SimpleNamespace:
@@ -51,6 +52,12 @@ def _make_position(
 
     NT's Position has many attributes; the helpers only touch a small
     subset.  ``SimpleNamespace`` is enough.
+
+    If ``opening_order_id`` is left ``None`` the events list contains
+    only the closing fill (matches NT's view when a position closes in
+    one event); the helper's opening-order lookup will return the same
+    id as ``closing_order_id`` in that case, which is the right
+    behaviour for single-fill positions.
     """
     pnl_obj = None
     if realized_pnl is not None:
@@ -61,6 +68,19 @@ def _make_position(
         if closing_order_id
         else None
     )
+    first_event = (
+        SimpleNamespace(client_order_id=opening_order_id)
+        if opening_order_id
+        else None
+    )
+
+    events: list[SimpleNamespace] | None
+    if first_event and last_event:
+        events = [first_event, last_event]
+    elif last_event:
+        events = [last_event]
+    else:
+        events = None
 
     return SimpleNamespace(
         id=pos_id,
@@ -71,7 +91,7 @@ def _make_position(
         realized_pnl=pnl_obj,
         ts_opened=ts_opened,
         ts_closed=ts_closed,
-        events=[last_event] if last_event else None,
+        events=events,
         last_event=last_event,
     )
 
@@ -214,6 +234,58 @@ class TestClassifyPositionExits:
             "P-2": "protective_stop",
             "P-3": "liquidation",
         }
+
+    def test_distinct_opening_and_closing_order_ids(self) -> None:
+        """Position with separate open + close fills exposes both IDs."""
+        positions = [_make_position(
+            pos_id="P-1",
+            opening_order_id="OPEN-1",
+            closing_order_id="CLOSE-1",
+        )]
+        engine = _make_engine_with_orders({"CLOSE-1": _make_order(tags=None)})
+        out = classify_position_exits(positions, engine)
+        row = out.iloc[0]
+        assert row["opening_order_id"] == "OPEN-1"
+        assert row["closing_order_id"] == "CLOSE-1"
+
+    def test_single_event_position_has_same_open_close_oid(self) -> None:
+        """Position with only one event in the events list:
+        opening_order_id collapses to the same id (the only event we have).
+        """
+        positions = [_make_position(
+            pos_id="P-1",
+            closing_order_id="ONLY-1",
+            opening_order_id=None,  # no separate open event
+        )]
+        engine = _make_engine_with_orders({"ONLY-1": _make_order(tags=None)})
+        out = classify_position_exits(positions, engine)
+        row = out.iloc[0]
+        # Single-event positions share the order id; downstream code must
+        # not assume open != close in that case.
+        assert row["opening_order_id"] == "ONLY-1"
+        assert row["closing_order_id"] == "ONLY-1"
+
+    def test_ts_opened_column_present(self) -> None:
+        positions = [_make_position(
+            pos_id="P-1",
+            closing_order_id="O-1",
+            ts_opened=1_700_000_000_000_000_000,
+            ts_closed=1_700_000_086_400_000_000,
+        )]
+        engine = _make_engine_with_orders({"O-1": _make_order(tags=None)})
+        out = classify_position_exits(positions, engine)
+        row = out.iloc[0]
+        assert row["ts_opened"] == 1_700_000_000_000_000_000
+        assert row["ts_closed"] == 1_700_000_086_400_000_000
+
+    def test_missing_closing_order_id_emits_empty_string(self) -> None:
+        """No closing fill resolvable → empty string, not NaN/None."""
+        positions = [_make_position(closing_order_id=None)]
+        engine = _make_engine_with_orders({})
+        out = classify_position_exits(positions, engine)
+        row = out.iloc[0]
+        assert row["closing_order_id"] == ""
+        assert row["opening_order_id"] == ""
 
 
 # ── find_account_liq_culprit ───────────────────────────────────────────────

@@ -2258,49 +2258,80 @@ def _parse_money_str(s: Any) -> float | None:
 
 def _fills_to_markers(
     fills_df: pd.DataFrame,
-    ts_to_trade_num: dict[int, int] | None = None,
-    ts_to_close_cause: dict[int, str] | None = None,
-) -> tuple[list[dict], dict[int, dict]]:
+    oid_to_trade_num: dict[str, int] | None = None,
+    oid_to_close_cause: dict[str, str] | None = None,
+) -> tuple[list[dict], dict[str, dict]]:
     """
-    Convert fills_report → (tvlc_markers, marker_detail_by_time).
+    Convert fills_report → (tvlc_markers, marker_detail_by_key).
 
-    tvlc_markers    passed to candleSeries.setMarkers() — no extra keys.
-    marker_detail   keyed by unix-seconds, holds extra data for the tooltip.
+    tvlc_markers   passed to candleSeries.setMarkers() — TVLC accepts
+                   multiple markers at the same time, so every fill
+                   gets its own marker.
+    marker_detail  keyed by ``"<unix_s>:<oid>"`` so simultaneous fills
+                   (NETTING reversals where the close+open of two
+                   trades land on the same bar timestamp) keep their
+                   own tooltip data instead of one overwriting the
+                   other.  The JS tooltip walks the keys for the
+                   hovered timestamp and renders all matching fills.
 
-    ts_to_trade_num  optional mapping of unix-second timestamp → 1-based trade
-                     number from the trades table, built from positions_report
-                     ts_opened/ts_closed. When provided, the marker label
-                     becomes "#N" instead of "B qty" / "S qty".
+    Parameters
+    ----------
+    fills_df
+        DataFrame from ``engine.trader.generate_order_fills_report()``.
+        Must include ``client_order_id`` so each fill can be linked
+        back to its owning order (for trade-number + close-cause).
+    oid_to_trade_num
+        Per-fill mapping from client-order-id → 1-based trade number.
+        Built upstream by traversing ``classify_position_exits``
+        rows and assigning each row's ``opening_order_id`` /
+        ``closing_order_id`` to its trade index.
+    oid_to_close_cause
+        Per-fill mapping from client-order-id → close cause
+        (``"protective_stop"`` | ``"liquidation"``).  Built upstream
+        from ``classify_position_exits``'s ``closing_order_id`` column,
+        skipping ``"strategy_exit"`` (the default).
 
-    ts_to_close_cause  optional mapping of unix-second timestamp → close cause
-                       ("protective_stop" / "liquidation") for closing fills.
-                       When the bucket is non-strategy_exit, the marker color
-                       and shape are upgraded so forced exits stand out from
-                       regular sells, and the tooltip shows the cause.
-
-    NOTE: position_id on fills is NOT used for matching — in NETTING mode all
-    fills share the same base position_id and cannot be mapped to individual
-    trades. Timestamp matching is exact because each fill creates the event
-    that opens or closes a position.
+    Why per-order-id, not per-timestamp
+    -----------------------------------
+    With NETTING reversals on bar-aligned data (e.g. daily bars), the
+    close-fill of trade N and the open-fill of trade N+1 share the
+    same ``ts_event``.  A timestamp-keyed lookup collides: we'd lose
+    one trade's metadata to the other, then the dedup step drops one
+    of the two markers entirely.  Each fill has its own
+    ``client_order_id`` though — that's a stable, collision-free key.
     """
     if fills_df is None or fills_df.empty:
         return [], {}
 
     tvlc_markers: list[dict] = []
-    detail: dict[int, dict] = {}
+    detail: dict[str, dict] = {}
 
     # Marker visual config per close cause (keys must match
-    # classify_position_exits output values).  Sells default to the regular
-    # red arrow; stops/liqs upgrade to distinctive shapes.
+    # classify_position_exits output values).  Forced exits override the
+    # regular BUY/SELL arrow regardless of fill side — a SHORT-position
+    # protective stop fires a BUY order, and we still want the STOP
+    # visual on it.
     cause_marker = {
         "protective_stop": ("#ff8a65", "circle",  "STOP"),
         "liquidation":     ("#ff1744", "square",  "LIQ"),
     }
 
-    for _, row in fills_df.iterrows():
+    # NT's generate_order_fills_report() puts client_order_id on the
+    # DataFrame *index*, not in a column.  Allow both shapes: prefer
+    # the index name, fall back to a column for callers passing a
+    # custom shape.
+    oid_is_index = fills_df.index.name == "client_order_id"
+
+    for idx, row in fills_df.iterrows():
         ts_s = _ts_to_unix_s(row.get("ts_last") or row.get("ts_init"))
         if ts_s is None:
             continue
+
+        if oid_is_index:
+            oid = idx
+        else:
+            oid = row.get("client_order_id")
+        oid_key = str(oid) if oid is not None else ""
 
         side_raw = str(row.get("side", "")).upper()
         is_buy = "BUY" in side_raw
@@ -2315,24 +2346,21 @@ def _fills_to_markers(
 
         qty_str = str(qty_raw).rstrip("0").rstrip(".")  # "0.01000000" → "0.01"
 
-        # Resolve trade number by timestamp — position_id cannot be used in
-        # NETTING mode because all fills share the same base position_id.
         trade_num: int | None = None
-        if ts_to_trade_num is not None and ts_s is not None:
-            trade_num = ts_to_trade_num.get(ts_s)
+        if oid_to_trade_num is not None and oid_key:
+            trade_num = oid_to_trade_num.get(oid_key)
 
-        # Resolve close cause for this fill (closing-fill timestamps only).
-        cause = (
-            ts_to_close_cause.get(ts_s)
-            if ts_to_close_cause is not None
-            else None
-        )
+        cause = None
+        if oid_to_close_cause is not None and oid_key:
+            cause = oid_to_close_cause.get(oid_key)
 
         # Default visuals (regular BUY/SELL).
         marker_color = "#26a69a" if is_buy else "#ef5350"
         marker_shape = "arrowUp" if is_buy else "arrowDown"
         cause_label = ""
-        if cause and cause in cause_marker and not is_buy:
+        # Drive the visual from cause, not fill side: a SHORT-position
+        # stop is a BUY closing fill but should still show STOP.
+        if cause and cause in cause_marker:
             marker_color, marker_shape, cause_label = cause_marker[cause]
 
         # Marker label: trade number wins; otherwise cause label or B/S+qty.
@@ -2347,16 +2375,34 @@ def _fills_to_markers(
         else:
             marker_text = f"{'B' if is_buy else 'S'} {qty_str}"
 
+        # Position the cause-marker on the *opposite* side of the bar
+        # from the regular BUY/SELL arrow:
+        #   - LONG-position stop (SELL fill at adverse low) → belowBar,
+        #     so it sits where the price actually went, not floating
+        #     above the candle alongside a non-existent SELL signal.
+        #   - SHORT-position stop (BUY fill at adverse high) → aboveBar.
+        # Without this, every stop is visually indistinguishable from a
+        # signal entry on the same side.
+        if cause:
+            position = "aboveBar" if is_buy else "belowBar"
+        else:
+            position = "belowBar" if is_buy else "aboveBar"
+
         tvlc_markers.append({
             "time":     ts_s,
-            "position": "belowBar" if is_buy else "aboveBar",
+            "position": position,
             "color":    marker_color,
             "shape":    marker_shape,
             "text":     marker_text,
             "size":     1.5,
         })
 
-        detail[ts_s] = {
+        # Detail key includes the fill's order id so simultaneous fills
+        # don't clobber each other.  The JS tooltip groups keys by
+        # leading timestamp prefix.
+        detail_key = f"{ts_s}:{oid_key}" if oid_key else f"{ts_s}:{len(detail)}"
+        detail[detail_key] = {
+            "ts":          ts_s,
             "is_buy":      is_buy,
             "side":        "BUY" if is_buy else "SELL",
             "qty":         qty_str,
@@ -2365,11 +2411,11 @@ def _fills_to_markers(
             "close_cause": cause,
         }
 
-    # TVLC requires markers sorted by time; deduplicate by taking last per ts
-    seen: dict[int, dict] = {}
-    for m in tvlc_markers:
-        seen[m["time"]] = m
-    tvlc_markers = sorted(seen.values(), key=lambda m: m["time"])
+    # TVLC requires markers sorted by time.  We do NOT dedup — every
+    # fill is its own real event and deserves its own marker; with
+    # NETTING reversals you legitimately have two fills at the same
+    # bar timestamp (close of trade N + open of trade N+1).
+    tvlc_markers.sort(key=lambda m: m["time"])
 
     return tvlc_markers, detail
 
@@ -2387,14 +2433,14 @@ def _fmt_px(v: Any) -> str:
 
 def _positions_to_rows(
     positions_df: pd.DataFrame,
-    ts_to_close_cause: dict[int, str] | None = None,
+    pos_id_to_close_cause: dict[str, str] | None = None,
 ) -> list[dict]:
     """Convert positions_report → list of plain dicts for the HTML trade table.
 
-    ``ts_to_close_cause`` (when supplied) is keyed by the position's
-    ``ts_closed`` in unix seconds; the resolved cause is added to each
-    row as the ``close_cause`` field so the trade table can flag
-    forced exits.
+    ``pos_id_to_close_cause`` (when supplied) is keyed by ``position_id``
+    so each row picks up the correct cause regardless of whether two
+    positions share a closing-bar timestamp.  Falls back to
+    ``"strategy_exit"`` for any row not in the map.
     """
     if positions_df is None or positions_df.empty:
         return []
@@ -2432,9 +2478,14 @@ def _positions_to_rows(
         except (ValueError, TypeError):
             ret_frac = 0.0
 
+        # Look up close_cause by position_id, not timestamp — two
+        # positions can share a closing-bar ts (NETTING reversal) and
+        # the timestamp lookup would silently grab the wrong row's cause.
+        pos_id = row.get("position_id")
+        pos_key = str(pos_id) if pos_id is not None else None
         close_cause = (
-            ts_to_close_cause.get(closed_s)
-            if (ts_to_close_cause is not None and closed_s)
+            pos_id_to_close_cause.get(pos_key)
+            if (pos_id_to_close_cause is not None and pos_key)
             else None
         ) or "strategy_exit"
 
@@ -2959,43 +3010,47 @@ def generate_backtest_html(
             {"label": f"{ma_type}{slow_period}", "color": "#ff9800", "width": 1, "style": 0, "data": slow_ma_data},
         ]
 
-    # Build unix-second timestamp → 1-based trade number mapping so chart
-    # markers show the trade number from the table.
+    # ── Per-fill metadata maps, keyed by client_order_id ─────────────
+    # Each fill carries its own client_order_id, and that id uniquely
+    # identifies which order (and therefore which trade leg) it belongs
+    # to.  Earlier versions of this code keyed on timestamp; that
+    # collided in NETTING mode where the closing fill of trade N and
+    # the opening fill of trade N+1 share the same bar timestamp, so
+    # one trade's metadata silently overwrote the other's.
     #
-    # position_id cannot be used here: in NETTING mode all fills share the same
-    # base position_id (e.g. "BTC-USD-PERP.HYPERLIQUID-EMACross-000") regardless
-    # of which trade they belong to. Timestamp matching is exact because each
-    # fill creates the event that opens or closes a position.
-    ts_to_trade_num: dict[int, int] = {}
-    if positions_report is not None and not positions_report.empty:
-        for trade_num, (_, pos_row) in enumerate(positions_report.iterrows(), start=1):
-            opened_s = _ts_to_unix_s(pos_row.get("ts_opened"))
-            closed_s = _ts_to_unix_s(pos_row.get("ts_closed"))
-            if opened_s:
-                ts_to_trade_num[opened_s] = trade_num
-            if closed_s:
-                ts_to_trade_num[closed_s] = trade_num
-
-    # Build close-cause lookup keyed by closing-fill unix-second timestamp,
-    # used by both the markers and the trade table to flag forced exits.
-    ts_to_close_cause: dict[int, str] = {}
-    if exit_classification is not None and not exit_classification.empty \
-            and {"ts_closed", "close_cause"}.issubset(exit_classification.columns):
-        for _, ec_row in exit_classification.iterrows():
-            ts_ns = ec_row["ts_closed"]
-            ts_s = _ts_to_unix_s(ts_ns)
-            cause = str(ec_row["close_cause"])
-            if ts_s is not None and cause and cause != "strategy_exit":
-                ts_to_close_cause[ts_s] = cause
+    # Both lookups are derived from the v2 ``exit_classification``
+    # DataFrame (which exposes opening_order_id + closing_order_id +
+    # close_cause per closed position).  When the helper isn't
+    # supplied (legacy callers), the maps stay empty and the markers
+    # fall back to "B qty" / "S qty" labels.
+    oid_to_trade_num: dict[str, int] = {}
+    oid_to_close_cause: dict[str, str] = {}
+    pos_id_to_close_cause: dict[str, str] = {}
+    if exit_classification is not None and not exit_classification.empty:
+        for trade_num, (_, ec_row) in enumerate(
+            exit_classification.iterrows(), start=1,
+        ):
+            open_oid  = str(ec_row.get("opening_order_id") or "")
+            close_oid = str(ec_row.get("closing_order_id") or "")
+            cause     = str(ec_row.get("close_cause") or "")
+            pos_id    = str(ec_row.get("position_id") or "")
+            if open_oid:
+                oid_to_trade_num[open_oid] = trade_num
+            if close_oid:
+                oid_to_trade_num[close_oid] = trade_num
+            if close_oid and cause and cause != "strategy_exit":
+                oid_to_close_cause[close_oid] = cause
+            if pos_id and cause:
+                pos_id_to_close_cause[pos_id] = cause
 
     markers, marker_detail = _fills_to_markers(
         fills_report,
-        ts_to_trade_num or None,
-        ts_to_close_cause or None,
+        oid_to_trade_num or None,
+        oid_to_close_cause or None,
     )
     position_rows          = _positions_to_rows(
         positions_report,
-        ts_to_close_cause or None,
+        pos_id_to_close_cause or None,
     )
     stats                  = _compute_stats(position_rows, starting_capital)
     cause_counts           = _compute_close_cause_counts(position_rows)
@@ -3384,7 +3439,7 @@ td.pnl.neg { color: #ef5350; }
 const OHLCV         = __OHLCV_JSON__;
 const OVERLAY_LINES = __OVERLAY_LINES_JSON__;
 const MARKERS       = __MARKERS_JSON__;
-const MARKER_DETAIL = __MARKER_DETAIL_JSON__;   // {unix_s_str: {is_buy,side,qty,px,trade_num,close_cause}}
+const MARKER_DETAIL = __MARKER_DETAIL_JSON__;   // {"<unix_s>:<oid>": {ts, is_buy, side, qty, px, trade_num, close_cause}}
 const TRADES        = __TRADES_JSON__;
 const STATS              = __STATS_JSON__;
 const STARTING_CAPITAL   = __STARTING_CAPITAL__;
@@ -3453,10 +3508,14 @@ ro.observe(chartEl);
 // ── Hover tooltip ─────────────────────────────────────────────────────────────
 const tooltipEl   = document.getElementById('tooltip');
 
-// Build a lookup keyed by timestamp string (MARKER_DETAIL keys are strings from JSON)
+// MARKER_DETAIL is keyed by "<ts>:<oid>" so simultaneous fills don't
+// overwrite each other.  Group by timestamp; tooltip then renders all
+// fills that share the hovered bar.
 const detailByTs  = {};
 for (const [k, v] of Object.entries(MARKER_DETAIL)) {
-  detailByTs[parseInt(k)] = v;
+  const ts = (typeof v.ts === 'number') ? v.ts : parseInt(k.split(':')[0]);
+  if (!detailByTs[ts]) detailByTs[ts] = [];
+  detailByTs[ts].push(v);
 }
 
 function fmtNum(n, dec = 2) {
@@ -3464,6 +3523,22 @@ function fmtNum(n, dec = 2) {
   return parseFloat(n).toLocaleString('en-US', {
     minimumFractionDigits: dec, maximumFractionDigits: dec
   });
+}
+
+function renderFillBlock(d) {
+  const cls = d.is_buy ? 'buy' : 'sell';
+  let h = `<hr class="tt-sep">`;
+  if (d.trade_num != null) {
+    h += `<div class="tt-row"><span class="tt-label">Trade</span><span class="tt-value">#${d.trade_num}</span></div>`;
+  }
+  h += `<div class="tt-row"><span class="tt-label">Signal</span><span class="tt-${cls}">${d.side}</span></div>`;
+  h += `<div class="tt-row"><span class="tt-label">Qty</span><span class="tt-value">${d.qty}</span></div>`;
+  h += `<div class="tt-row"><span class="tt-label">Fill px</span><span class="tt-value">${d.px}</span></div>`;
+  if (d.close_cause && d.close_cause !== 'strategy_exit') {
+    const causeLbl = d.close_cause === 'protective_stop' ? 'Protective stop' : 'Liquidation';
+    h += `<div class="tt-row"><span class="tt-label">Cause</span><span class="tt-sell">${causeLbl}</span></div>`;
+  }
+  return h;
 }
 
 chart.subscribeCrosshairMove(param => {
@@ -3476,7 +3551,7 @@ chart.subscribeCrosshairMove(param => {
 
   const tsMs = param.time * 1000;
   const tsStr = new Date(tsMs).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
-  const mDetail = detailByTs[param.time];
+  const mDetails = detailByTs[param.time] || [];
 
   let html = `<div class="tt-time">${tsStr}</div>`;
   html += `<div class="tt-row"><span class="tt-label">O</span><span class="tt-value">${fmtNum(bar.open)}</span></div>`;
@@ -3484,19 +3559,10 @@ chart.subscribeCrosshairMove(param => {
   html += `<div class="tt-row"><span class="tt-label">L</span><span class="tt-value">${fmtNum(bar.low)}</span></div>`;
   html += `<div class="tt-row"><span class="tt-label">C</span><span class="tt-value">${fmtNum(bar.close)}</span></div>`;
 
-  if (mDetail) {
-    const cls = mDetail.is_buy ? 'buy' : 'sell';
-    html += `<hr class="tt-sep">`;
-    if (mDetail.trade_num != null) {
-      html += `<div class="tt-row"><span class="tt-label">Trade</span><span class="tt-value">#${mDetail.trade_num}</span></div>`;
-    }
-    html += `<div class="tt-row"><span class="tt-label">Signal</span><span class="tt-${cls}">${mDetail.side}</span></div>`;
-    html += `<div class="tt-row"><span class="tt-label">Qty</span><span class="tt-value">${mDetail.qty}</span></div>`;
-    html += `<div class="tt-row"><span class="tt-label">Fill px</span><span class="tt-value">${mDetail.px}</span></div>`;
-    if (mDetail.close_cause && mDetail.close_cause !== 'strategy_exit') {
-      const causeLbl = mDetail.close_cause === 'protective_stop' ? 'Protective stop' : 'Liquidation';
-      html += `<div class="tt-row"><span class="tt-label">Cause</span><span class="tt-sell">${causeLbl}</span></div>`;
-    }
+  // Stack one block per fill at this bar.  NETTING reversals routinely
+  // produce 2 fills (close + open) on the same bar.
+  for (const d of mDetails) {
+    html += renderFillBlock(d);
   }
 
   tooltipEl.innerHTML = html;

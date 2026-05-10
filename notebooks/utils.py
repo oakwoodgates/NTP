@@ -710,7 +710,14 @@ def classify_position_exits(positions: list, engine: Any) -> "pd.DataFrame":
         One row per closed position, columns:
 
         - ``position_id`` (str): the position's ID
+        - ``ts_opened`` (int, ns since epoch): opening fill timestamp
         - ``ts_closed`` (int, ns since epoch): closing fill timestamp
+        - ``opening_order_id`` (str): client order ID of the first fill
+          that opened the position; ``""`` if not resolvable.  Used by
+          chart helpers to map a fill back to its trade-number.
+        - ``closing_order_id`` (str): client order ID of the last fill
+          that closed the position; ``""`` if not resolvable.  Used by
+          chart helpers to flag a fill as a forced exit.
         - ``close_cause`` (str): ``"strategy_exit"`` | ``"protective_stop"``
           | ``"liquidation"``
         - ``side`` (str): ``"LONG"`` | ``"SHORT"`` | ``"FLAT"`` (the
@@ -744,6 +751,7 @@ def classify_position_exits(positions: list, engine: Any) -> "pd.DataFrame":
         # one whose qty zeros the position.  Easiest path: pull the
         # last-known closing-fill order via the position's events.
         closing_order_id = _last_closing_order_id(pos)
+        opening_order_id = _first_opening_order_id(pos)
         order = (
             engine.cache.order(closing_order_id) if closing_order_id else None
         )
@@ -760,7 +768,10 @@ def classify_position_exits(positions: list, engine: Any) -> "pd.DataFrame":
 
         rows.append({
             "position_id": str(pos.id),
+            "ts_opened": int(pos.ts_opened) if getattr(pos, "ts_opened", None) else 0,
             "ts_closed": int(pos.ts_closed) if pos.ts_closed else 0,
+            "opening_order_id": str(opening_order_id) if opening_order_id else "",
+            "closing_order_id": str(closing_order_id) if closing_order_id else "",
             "close_cause": cause,
             "side": str(pos.side).split(".")[-1],  # "PositionSide.LONG" → "LONG"
             "fill_px": (
@@ -803,6 +814,28 @@ def _last_closing_order_id(pos: Any) -> Any:
         return getattr(last, "client_order_id", None) if last is not None else None
     # Walk backwards — closing fill is at the end.
     for ev in reversed(events):
+        if getattr(ev, "client_order_id", None) is not None:
+            return ev.client_order_id
+    return None
+
+
+def _first_opening_order_id(pos: Any) -> Any:
+    """Return the ClientOrderId of the order that opened *pos*, or None.
+
+    Mirror of ``_last_closing_order_id`` but walks events forward.  The
+    opening fill is the first ``OrderFilled`` event on the position.
+
+    Falls back to ``pos.opening_order_id`` if NT exposes it directly,
+    then to the first event's ``client_order_id``, then to ``None``.
+    """
+    # Some NT versions expose this directly on Position.
+    direct = getattr(pos, "opening_order_id", None)
+    if direct is not None:
+        return direct
+    events = getattr(pos, "events", None)
+    if not events:
+        return None
+    for ev in events:
         if getattr(ev, "client_order_id", None) is not None:
             return ev.client_order_id
     return None
