@@ -25,7 +25,7 @@ import pandas as pd
 _NOTEBOOKS_DIR = Path(__file__).resolve().parent.parent.parent / "notebooks"
 sys.path.insert(0, str(_NOTEBOOKS_DIR))
 
-from charts import _fills_to_markers  # type: ignore[import-not-found]  # noqa: E402, I001
+from charts import _fills_to_markers, _positions_to_rows  # type: ignore[import-not-found]  # noqa: E402, I001
 
 
 # ── Fixtures ───────────────────────────────────────────────────────────────
@@ -91,8 +91,10 @@ class TestSimultaneousFillsRender:
             oid_to_trade_num={"OID-CLOSE-1": 1, "OID-OPEN-2": 2},
             oid_to_close_cause={"OID-CLOSE-1": "protective_stop"},
         )
+        # Marker text is just the trade number; cause is conveyed by
+        # shape + color, not inline text on the chart.
         texts = sorted(m["text"] for m in markers)
-        assert texts == ["#1 STOP", "#2"]
+        assert texts == ["#1", "#2"]
 
 
 # ── Bug 2: STOP/LIQ visual must work for both BUY and SELL fills ─────────
@@ -122,7 +124,9 @@ class TestCauseDrivenVisuals:
         m = markers[0]
         assert m["shape"] == "circle"           # STOP visual
         assert m["color"] == "#ff8a65"          # warm orange
-        assert "STOP" in m["text"]
+        # Marker text is just the trade number; cause is conveyed by
+        # shape + color, not inline text.
+        assert m["text"] == "#5"
         # And the marker should sit ABOVE the bar (BUY at adverse high),
         # not below where regular BUY arrows go.
         assert m["position"] == "aboveBar"
@@ -158,7 +162,7 @@ class TestCauseDrivenVisuals:
         m = markers[0]
         assert m["shape"] == "square"
         assert m["color"] == "#ff1744"
-        assert "LIQ" in m["text"]
+        assert m["text"] == "#3"
 
 
 # ── Bug 3: trade-number lookup keyed on order id ────────────────────────
@@ -260,5 +264,73 @@ class TestEdgeCases:
             oid_to_close_cause={"OID-FROM-INDEX": "protective_stop"},
         )
         assert len(markers) == 1
-        assert markers[0]["text"] == "#7 STOP"
+        assert markers[0]["text"] == "#7"
         assert markers[0]["shape"] == "circle"
+
+
+# ── _positions_to_rows: position_id index/column shape ─────────────────────
+
+
+class TestPositionsToRowsCloseCauseLookup:
+    """Regression: NT's positions_report puts position_id on the
+    DataFrame *index*, not in a column.  _positions_to_rows must read
+    from the index when that's the shape, otherwise every row falls
+    through to the default 'strategy_exit' even when stops fired.
+    """
+
+    def _row(self, **overrides: object) -> dict[str, object]:
+        base: dict[str, object] = {
+            "ts_opened": pd.Timestamp("2019-10-18", tz="UTC"),
+            "ts_closed": pd.Timestamp("2019-10-26", tz="UTC"),
+            "entry": "SELL",
+            "peak_qty": "0.248",
+            "avg_px_open": "8069.20",
+            "avg_px_close": "8472.70",
+            "realized_pnl": "-101.50 USDT",
+            "realized_return": -0.05,
+        }
+        base.update(overrides)
+        return base
+
+    def test_position_id_on_index_picks_up_close_cause(self) -> None:
+        """The bug: position_id is on the index, lookup misses, every
+        trade shows 'Strat' even when it was a stop.  Fix reads index
+        when index.name == 'position_id'.
+        """
+        df = pd.DataFrame(
+            [self._row()],
+            index=pd.Index(["POS-STOP-1"], name="position_id"),
+        )
+        rows = _positions_to_rows(
+            df, pos_id_to_close_cause={"POS-STOP-1": "protective_stop"},
+        )
+        assert len(rows) == 1
+        assert rows[0]["close_cause"] == "protective_stop"
+
+    def test_position_id_as_column_still_works(self) -> None:
+        """Custom callers passing position_id as a column keep working."""
+        df = pd.DataFrame([
+            {**self._row(), "position_id": "POS-STOP-1"},
+        ])
+        rows = _positions_to_rows(
+            df, pos_id_to_close_cause={"POS-STOP-1": "liquidation"},
+        )
+        assert rows[0]["close_cause"] == "liquidation"
+
+    def test_unknown_position_id_defaults_to_strategy_exit(self) -> None:
+        df = pd.DataFrame(
+            [self._row()],
+            index=pd.Index(["POS-MISSING"], name="position_id"),
+        )
+        rows = _positions_to_rows(
+            df, pos_id_to_close_cause={"POS-OTHER": "protective_stop"},
+        )
+        assert rows[0]["close_cause"] == "strategy_exit"
+
+    def test_no_lookup_map_defaults_to_strategy_exit(self) -> None:
+        df = pd.DataFrame(
+            [self._row()],
+            index=pd.Index(["POS-1"], name="position_id"),
+        )
+        rows = _positions_to_rows(df, pos_id_to_close_cause=None)
+        assert rows[0]["close_cause"] == "strategy_exit"

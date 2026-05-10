@@ -2312,8 +2312,8 @@ def _fills_to_markers(
     # protective stop fires a BUY order, and we still want the STOP
     # visual on it.
     cause_marker = {
-        "protective_stop": ("#ff8a65", "circle",  "STOP"),
-        "liquidation":     ("#ff1744", "square",  "LIQ"),
+        "protective_stop": ("#ff8a65", "circle"),
+        "liquidation":     ("#ff1744", "square"),
     }
 
     # NT's generate_order_fills_report() puts client_order_id on the
@@ -2357,21 +2357,17 @@ def _fills_to_markers(
         # Default visuals (regular BUY/SELL).
         marker_color = "#26a69a" if is_buy else "#ef5350"
         marker_shape = "arrowUp" if is_buy else "arrowDown"
-        cause_label = ""
         # Drive the visual from cause, not fill side: a SHORT-position
-        # stop is a BUY closing fill but should still show STOP.
+        # stop is a BUY closing fill but should still show the STOP shape.
         if cause and cause in cause_marker:
-            marker_color, marker_shape, cause_label = cause_marker[cause]
+            marker_color, marker_shape = cause_marker[cause]
 
-        # Marker label: trade number wins; otherwise cause label or B/S+qty.
+        # Marker label is just the trade number; cause is conveyed by the
+        # marker shape + color + the legend, not redundant inline text.
+        # Falls back to "B qty" / "S qty" only when there's no trade
+        # number to show.
         if trade_num is not None:
-            marker_text = (
-                f"#{trade_num} {cause_label}"
-                if cause_label
-                else f"#{trade_num}"
-            )
-        elif cause_label:
-            marker_text = cause_label
+            marker_text = f"#{trade_num}"
         else:
             marker_text = f"{'B' if is_buy else 'S'} {qty_str}"
 
@@ -2447,7 +2443,13 @@ def _positions_to_rows(
 
     rows: list[dict] = []
 
-    for _, row in positions_df.iterrows():
+    # NT's generate_positions_report() puts position_id on the
+    # DataFrame *index*, not in a column.  Allow both shapes: prefer
+    # the index when it's named "position_id"; fall back to a column
+    # for callers passing a custom-shaped DataFrame.
+    pos_id_is_index = positions_df.index.name == "position_id"
+
+    for idx, row in positions_df.iterrows():
         ts_opened = row.get("ts_opened")
         ts_closed = row.get("ts_closed")
 
@@ -2481,7 +2483,7 @@ def _positions_to_rows(
         # Look up close_cause by position_id, not timestamp — two
         # positions can share a closing-bar ts (NETTING reversal) and
         # the timestamp lookup would silently grab the wrong row's cause.
-        pos_id = row.get("position_id")
+        pos_id = idx if pos_id_is_index else row.get("position_id")
         pos_key = str(pos_id) if pos_id is not None else None
         close_cause = (
             pos_id_to_close_cause.get(pos_key)
