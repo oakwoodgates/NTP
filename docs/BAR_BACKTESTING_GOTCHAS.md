@@ -222,3 +222,43 @@ The simulator must be **disabled in live trading** (`run_live.py`). Real venues 
 Use `liquidation_for_environment(config, env)` from `src.backtesting.engine` to map a single user config to the right per-environment value (BACKTEST: unchanged, SANDBOX: `halt_on_account_liquidation=False`, LIVE: `None`). `make_engine` itself rejects non-BACKTEST environments — it physically only constructs a `BacktestEngine`.
 
 `run_live.py` also sets `liquidation=None` explicitly on strategy configs (defensive — even though that's the field default).
+
+---
+
+## 8. Bad-bar / wick-driven liquidation produces apparent over-loss
+
+**Symptom:** A sweep heatmap shows cells where `total_pnl ≤ −starting_capital` — the account ended past zero by hundreds of dollars. The first reaction is "did one trade lose more than its margin allowed?"
+
+**Diagnosis (ETH 1d EMA 10/40 stop=10%, $1k capital, $2k notional, 20× leverage, observed during phase 3a).**
+
+22 cells across the 12×12 grid all converged on `total_pnl ≈ −1,193`. Drilling into the `fast=5, slow=35` combo:
+
+```
+trade #1  opened 2020-03-09  closed 2020-03-14  side=SHORT
+          entry=$199.54      fill=$320.98      pnl=-$1,219
+          cause=liquidation  (61% adverse on a 5-day position)
+```
+
+ETH bar on 2020-03-13 (Black Thursday +1):
+
+```
+open=$106.97  high=$323.00  low=$84.23  close=$134.13   range=223%
+```
+
+Binance perp ETH had a **$323 wick** on 2020-03-13 — a brief liquidation cascade that lasted milliseconds in real life but persists forever in the saved bar. The strategy was SHORT at $199.54; the `LiquidationAware` mixin's cross-margin stop trigger sat at ~$298. The bar's `high=$323` triggered the stop. NT's bar-only fill engine filled at $320.98 (close to the bar's high) — far past the trigger.
+
+**On a real exchange (Hyperliquid), the same scenario:**
+
+- Exchange-side liquidation caps loss at account equity (~$0)
+- HL's mark price (used for liquidation triggers) typically smooths Binance's spot wicks
+- Even if HL did liquidate, you can't lose more than your margin
+
+**What this means for sweep interpretation:**
+
+- Treat `total_pnl ≤ −starting_capital` rows / cells as "**wiped out**", not as additional loss magnitude
+- The exact number past zero is bar-fill noise — backtest is rendering a wick scenario pessimistically
+- Information value is "this combo died on this combination of data"; ignore the precise final number
+
+**This is not a strategy bug, runner bug, or simulator bug.** It's the documented bar-only-backtest behaviour from sections 1, 5, 7 above, applied to a specific bar with an outlier wick. The root cause is NT filling triggered orders at adverse-to-trigger prices when bars gap, which is the same modeling limitation behind the optimistic-fill caveat at the end of section 7.
+
+**Phase 2.6** (per [`ROADMAP.md`](ROADMAP.md)) is the path to quantify this: paper-vs-backtest comparison framework will measure how often these wick scenarios produce predicted losses that real-life liquidations would have capped, and translate that into an "accuracy haircut" metric.

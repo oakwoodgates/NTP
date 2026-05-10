@@ -269,11 +269,14 @@ tests/                # unit/ and integration/
 
 ## Development Phases
 
-**Phase 1 (complete):** Strategy development + backtesting using NT's native workflow. Jupyter notebooks, BacktestEngine, in-memory results, matplotlib/plotly charts, HTML tearsheets. No custom infrastructure — learn NT's patterns first.
+See [`docs/ROADMAP.md`](docs/ROADMAP.md) for the full roadmap including the
+gates between phases. The condensed status here:
 
-**Phase 2 (complete):** Deploy TradingNode, write PersistenceActor and AlertActor, paper trade via NT's Sandbox adapter, validate all fills and positions write to PostgreSQL, monitor via Grafana and Telegram. Containerized trader on Digital Ocean with auto-restart and graceful shutdown.
+**Phase 1 (complete):** Backtesting with NT's `BacktestEngine`, project conveniences (`make_engine`, `run_sweep`, fee overrides, MA-cross + BB + Donchian + MACD-RSI), v2 metrics schema with realized-PnL-only stats.
 
-**Phase 3a (current) — Research tooling + strategy validation:**
+**Phase 2 (complete):** TradingNode + PersistenceActor + AlertActor, paper trading via NT Sandbox adapter, PostgreSQL persistence, Telegram alerts, Grafana monitoring, Docker on Digital Ocean. Validated against original (polling-mode) MACross; needs revalidation against the post-cross-gate strategy as the first task of Phase 2.5.
+
+**Phase 3a (complete) — Research tooling + strategy validation:**
 - `run_sweep()` — parameter grid search with automatic Parquet persistence to `data/sweeps/`.
 - `run_walk_forward()` — sliding-window walk-forward analysis (train on N%, test on M%, slide).
 - `rolling_performance()` — per-window PnL consistency analysis.
@@ -282,24 +285,25 @@ tests/                # unit/ and integration/
 - `bootstrap_total_pnl()` + `bootstrap_max_drawdown()` — per-trade resampling CIs in `src.backtesting.metrics`.
 - `compare_sweeps.ipynb` — load saved sweeps, side-by-side heatmaps with liquidated-cell flags, best-params table, parameter stability across instruments/timeframes (including coefficient-of-variation), sortable HTML cross-sweep table.
 - `validate_strategy.ipynb` — 8-check go/no-go verdict per (instrument, combo): plateau (with survival-rate accounting), walk-forward (with param-stability check), bootstrap (PnL CI + max-drawdown CI, capital-relative thresholds), rolling (active vs inactive split), fee sensitivity, regime breakdown (Wilson CI on win-rate), yearly concentration. Optional `OVERRIDE_PARAMS` validates cross-sweep robust combos. Persists each verdict as JSON.
-- `validate_all.ipynb` — strategy-level consolidator: reads every `reports/validate/*_verdict.json` and renders the comparison matrix + per-check failure-rate.  No new compute — just consolidates per-(instrument, pick) verdicts into one strategy-level view.
-- Focus: validate strategies before committing them to paper/live trading. Build more strategies, test on more instruments.
+- `validate_all.ipynb` — strategy-level consolidator: reads every `reports/validate/*_verdict.json` and renders the comparison matrix + per-check failure-rate.
+- v2 tearsheet template (no broken returns-based stats — see [`docs/ANALYZER_RETURNS_CAVEAT.md`](docs/ANALYZER_RETURNS_CAVEAT.md)).
+- TradingView Lightweight Charts HTML reports with marker accuracy fixes (cross-gate-aware, side-aware stop visuals, per-fill OID attribution).
+- `LiquidationAware` + `ProtectiveStopAware` strategy mixins; `AccountAliveMonitor` actor.
+- **Cross-gate entry semantics** in `MACross` (signal-event-driven, not state-polled). See [`docs/STRATEGY_ENTRY_RULES.md`](docs/STRATEGY_ENTRY_RULES.md).
+- **Centralized configuration** via `src/config/settings.py`; same `.env` flows through backtest → paper → live. See [`docs/CONFIG.md`](docs/CONFIG.md).
+- `scripts/batch_backtest.py` headless cross-product runner with embedded sweep heatmaps and master-index summary. See [`docs/BATCH_BACKTEST.md`](docs/BATCH_BACKTEST.md).
 
-**Phase 3a — future research tools (build when pain emerges):**
-- Equity curve overlay — do strategies draw down together or diversify?
-- Randomized entry baseline — does the strategy beat random?
-- Strategy return correlation matrix — portfolio-level diversification analysis.
+**Phase 2.5 (next) — Paper-trading revalidation.** Confirm the cross-gated MACross + protective-stop + liquidation-simulator stack behaves the same in paper as in backtest. Two-week minimum run on Hyperliquid testnet. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-**Phase 3b (future) — Web layer (build when multiple validated strategies are running live and Grafana/SQL isn't enough):**
-- FastAPI read-only API — query runs, fills, positions, equity curves from PostgreSQL.
-- `bars` hypertable + PersistenceActor bar writing — candle data in PostgreSQL for chart overlay.
-- React dashboard — TradingView Lightweight Charts with trade markers (the one view Grafana can't do).
-- StreamingActor + Redis Streams + WebSocket — real-time trade streaming to browser.
-- Write endpoints + auth — remote control (halt/resume trading), JWT auth.
+**Phase 2.6 — Backtest accuracy validation.** The keystone phase: build the comparison framework that answers "are our backtests accurate?" Live-vs-backtest harness, rolling accuracy regression, accuracy gate between research and live. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-**Phase 4:** ML integration — feature engineering from sweep results and bar data, model training, inference in strategy callbacks.
+**Phase 3 — Live trading (small capital).** Gated on Phase 2.6's measured haircut staying within tolerance.
 
-**Phase 5:** Experimental — LSTM, LLM sentiment, RL agents.
+**Phase 4 (later) — Multi-strategy + portfolio.** Strategy correlation, portfolio-level kill switches, capital allocation.
+
+**Phase 5 — NT v2 migration when upstream lands.** Track [issue #4042](https://github.com/nautechsystems/nautilus_trader/issues/4042) for the v2 RFC. Particularly interested in returns-based stats fix, native liquidation simulation, bar-fill model improvements.
+
+**Phase 3b (deferred) — Web layer.** FastAPI read-only API + React dashboard + StreamingActor → Redis Streams. Build only when Grafana + Telegram aren't enough. Plumbing already specified.
 
 ## Common Tasks
 

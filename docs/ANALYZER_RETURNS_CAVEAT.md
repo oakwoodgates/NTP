@@ -4,7 +4,7 @@
 
 **Do not use Sharpe, Sortino, Volatility, or returns-based Profit Factor for strategy selection or go/no-go decisions.** These numbers are unreliable in both NT v1.224.0 and v1.225.0. PnL-section stats (Total PnL, Win Rate, Expectancy, PnL-based Profit Factor) are correct and consistent across versions.
 
-Waiting for an upstream fix in NautilusTrader before 2.0.
+Waiting for an upstream fix in NautilusTrader. The most likely resolution is NT v2 — the v2 RFC ([nautechsystems/nautilus_trader#4042](https://github.com/nautechsystems/nautilus_trader/issues/4042)) explicitly calls out portfolio analytics as an area being reworked. We're tracking it; see [`ROADMAP.md`](ROADMAP.md) Phase 5.
 
 ## What Changed in v1.225.0
 
