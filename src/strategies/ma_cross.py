@@ -43,6 +43,67 @@ _MA_TYPE_LOOKUP: dict[str, MovingAverageType] = {
 }
 
 
+# ── Default sweep grids per MA type ────────────────────────────────────────
+#
+# Each MA type has a different "useful range" — EMA/SMA/DEMA can run long
+# lookbacks cleanly, so they get a 12×12 grid up to 100 fast / 200 slow.
+# HMA/AMA/VIDYA are heavier or less stable at long windows, so they get
+# a tighter 11×10 grid capped at 50 fast / 100 slow.  These grids are
+# the project's defaults shared between ``notebooks/backtest/ma_cross.ipynb``
+# and ``scripts/batch_backtest.py`` — change here once, both update.
+#
+# Notebooks / scripts can locally extend before running a sweep, e.g.::
+#
+#     from src.strategies.ma_cross import MA_FAST_GRIDS
+#     fast_grid = MA_FAST_GRIDS["EMA"] + [120]   # try one bigger lookback
+
+MA_FAST_GRIDS: dict[str, list[int]] = {
+    "EMA":   [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 75, 100],
+    "SMA":   [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 75, 100],
+    "DEMA":  [5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 75, 100],
+    "HMA":   [5,  8, 10, 12, 15, 20, 25, 30, 35, 40, 50],
+    "AMA":   [5,  8, 10, 12, 15, 20, 25, 30, 35, 40, 50],
+    "VIDYA": [5,  8, 10, 12, 15, 20, 25, 30, 35, 40, 50],
+}
+
+MA_SLOW_GRIDS: dict[str, list[int]] = {
+    "EMA":   [10, 15, 20, 25, 30, 35, 40, 45, 50, 75, 100, 200],
+    "SMA":   [10, 15, 20, 25, 30, 35, 40, 45, 50, 75, 100, 200],
+    "DEMA":  [10, 15, 20, 25, 30, 35, 40, 45, 50, 75, 100, 200],
+    "HMA":   [10, 15, 20, 25, 30, 35, 40, 50, 75, 100],
+    "AMA":   [10, 15, 20, 25, 30, 35, 40, 50, 75, 100],
+    "VIDYA": [10, 15, 20, 25, 30, 35, 40, 50, 75, 100],
+}
+
+# Off-grid "spotlight" combos mixed into the sweep alongside the regular
+# fast/slow grid.  Each entry is a param dict with ``_kind: "spotlight"``
+# (and optional ``_note: ...``).  The ``_kind`` tag passes through to the
+# sweep parquet but is stripped before the strategy factory sees the
+# params; the heatmap silently excludes spotlight rows so the grid stays
+# clean, while the sortable HTML report badges them with [SPOT].
+#
+# Per-MA-type spotlights:
+#   * EMA   — trader-lore pairs (8/21, 12/26 MACD, Fibonacci, 9/18)
+#   * SMA   — classic 50/200 golden cross
+#   * HMA/DEMA/AMA/VIDYA — empty by default (no widely-used named combos;
+#     AMA/VIDYA are adaptive so fixed pairs are meaningless).
+MA_SPOTLIGHTS: dict[str, list[dict[str, object]]] = {
+    "EMA": [
+        {"fast":  9, "slow":  18, "_kind": "spotlight", "_note": "9/18 trial"},
+        {"fast":  8, "slow":  21, "_kind": "spotlight", "_note": "8/21 EMA classic"},
+        {"fast": 13, "slow":  21, "_kind": "spotlight", "_note": "Fibonacci"},
+        {"fast": 12, "slow":  26, "_kind": "spotlight", "_note": "MACD periods"},
+    ],
+    "SMA": [
+        {"fast": 50, "slow": 200, "_kind": "spotlight", "_note": "Golden cross"},
+    ],
+    "HMA":   [],
+    "DEMA":  [],
+    "AMA":   [],
+    "VIDYA": [],
+}
+
+
 class MACrossConfig(StrategyConfig, frozen=True):
     """Configuration for MACross strategy.
 

@@ -42,9 +42,11 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from decimal import Decimal
 
 # Headless matplotlib — must happen before any pyplot import elsewhere.
 import matplotlib
@@ -64,27 +66,28 @@ from nautilus_trader.model.identifiers import Venue  # noqa: E402
 
 from src.backtesting import make_engine, run_sweep  # noqa: E402
 from src.backtesting.engine import resolve_strategy_liquidation_config  # noqa: E402
+from src.config.settings import get_settings  # noqa: E402
 from src.core import (  # noqa: E402
+    LiquidationConfig,
     TOPIC_ACCOUNT_LIQUIDATED,
     TOPIC_POSITION_LIQUIDATED,
-    LiquidationConfig,
     bar_type_str,
     get_venue_config,
 )
-from src.strategies.ma_cross import MACross, MACrossConfig  # noqa: E402
+from src.strategies.ma_cross import (  # noqa: E402
+    MA_FAST_GRIDS,
+    MA_SLOW_GRIDS,
+    MA_SPOTLIGHTS,
+    MACross,
+    MACrossConfig,
+)
 
-# ── Defaults — match notebooks/backtest/ma_cross.ipynb cell 1 ────────────
-
-DEFAULT_DATA_SOURCE = "BINANCE_PERP"
-DEFAULT_EXEC_VENUE  = "HYPERLIQUID_PERP"
-DEFAULT_MA_TYPE     = "EMA"
-DEFAULT_FAST_MA     = 10
-DEFAULT_SLOW_MA     = 40
-DEFAULT_FAST_GRID   = [5, 10, 15, 20, 25, 30, 40, 50]
-DEFAULT_SLOW_GRID   = [20, 25, 30, 40, 50, 75, 100, 200]
-DEFAULT_STARTING_CAPITAL = 1000
-DEFAULT_TRADE_NOTIONAL   = Decimal("2000")
-DEFAULT_LEVERAGE         = 20
+# Strategy-pick defaults — only the values that aren't yet captured in
+# settings (these are MA-cross-specific picks for the *single-config*
+# backtest part of each combo; the sweep iterates over the grid).
+DEFAULT_MA_TYPE = "EMA"
+DEFAULT_FAST_MA = 10
+DEFAULT_SLOW_MA = 40
 
 
 # ── Per-combo run record ─────────────────────────────────────────────────
@@ -157,10 +160,11 @@ def run_combo(
         return _empty_result(asset, interval, stop_pct, instrument_id,
                              error="no bars in catalog")
 
+    settings = get_settings()
     liq_cfg = LiquidationConfig(
-        enabled=True,
-        halt_on_account_liquidation=True,
-        min_trade_notional=Decimal("10"),
+        enabled=settings.liquidation_enabled,
+        halt_on_account_liquidation=settings.liquidation_enabled,
+        min_trade_notional=settings.liquidation_min_trade_notional,
     )
     liq_resolved = resolve_strategy_liquidation_config(liq_cfg, venue_cfg, instrument)
 
@@ -420,19 +424,26 @@ def write_master_index(results: list[ComboResult], out_path: Path, run_id: str) 
 
 
 def main() -> int:
+    # All defaults pulled from get_settings() so the same .env that
+    # configures sandbox/live also configures this batch runner. CLI
+    # flags override settings; settings override hard-coded defaults.
+    settings = get_settings()
+    project_root = Path(__file__).resolve().parent.parent
+    default_catalog = project_root / "data" / "catalog"
+
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--assets",     nargs="+", default=["BTC", "ETH", "SOL"])
-    parser.add_argument("--intervals",  nargs="+", default=["1d", "4h"])
-    parser.add_argument("--stop-pcts",  nargs="+", type=float, default=[0.05, 0.10])
+    parser.add_argument("--assets",     nargs="+", default=settings.default_assets)
+    parser.add_argument("--intervals",  nargs="+", default=settings.default_intervals)
+    parser.add_argument("--stop-pcts",  nargs="+", type=float,
+                        default=[settings.default_stop_pct] if settings.default_stop_pct else [0.05])
     parser.add_argument("--ma-type",    default=DEFAULT_MA_TYPE)
     parser.add_argument("--fast-ma",    type=int, default=DEFAULT_FAST_MA)
     parser.add_argument("--slow-ma",    type=int, default=DEFAULT_SLOW_MA)
-    parser.add_argument("--data-source", default=DEFAULT_DATA_SOURCE)
-    parser.add_argument("--exec-venue", default=DEFAULT_EXEC_VENUE)
-    parser.add_argument("--starting-capital", type=int, default=DEFAULT_STARTING_CAPITAL)
-    parser.add_argument("--leverage",   type=int, default=DEFAULT_LEVERAGE)
-    parser.add_argument("--catalog-path",
-                        default=str(_PROJECT_ROOT / "data" / "catalog"))
+    parser.add_argument("--data-source", default=settings.data_source)
+    parser.add_argument("--exec-venue", default=settings.exec_venue)
+    parser.add_argument("--starting-capital", type=int, default=settings.starting_capital)
+    parser.add_argument("--leverage",   type=int, default=settings.leverage)
+    parser.add_argument("--catalog-path", default=str(default_catalog))
     parser.add_argument("--dry-run", action="store_true",
                         help="List combos and exit without running.")
     args = parser.parse_args()
@@ -464,15 +475,26 @@ def main() -> int:
         d.mkdir(parents=True, exist_ok=True)
 
     results: list[ComboResult] = []
+    # Sweep grids come from src.strategies.ma_cross — single source of
+    # truth shared with notebooks/backtest/ma_cross.ipynb so the script
+    # and the notebook always sweep the same combos for a given MA type.
+    fast_grid = MA_FAST_GRIDS[args.ma_type]
+    slow_grid = MA_SLOW_GRIDS[args.ma_type]
+    spotlights = MA_SPOTLIGHTS[args.ma_type]
+    print(f"\nGrid for {args.ma_type}: "
+          f"{len(fast_grid)} fast x {len(slow_grid)} slow "
+          f"({sum(1 for f in fast_grid for s in slow_grid if f < s)} valid combos), "
+          f"{len(spotlights)} spotlights")
+
     for asset, interval, stop in combos:
         try:
             r = run_combo(
                 asset=asset, interval=interval, stop_pct=stop,
                 data_source=args.data_source, exec_venue=args.exec_venue,
                 ma_type=args.ma_type, fast_ma=args.fast_ma, slow_ma=args.slow_ma,
-                fast_grid=DEFAULT_FAST_GRID, slow_grid=DEFAULT_SLOW_GRID,
+                fast_grid=fast_grid, slow_grid=slow_grid,
                 starting_capital=args.starting_capital,
-                trade_notional=DEFAULT_TRADE_NOTIONAL,
+                trade_notional=settings.trade_notional,
                 leverage=args.leverage,
                 catalog_path=args.catalog_path,
                 out_dirs=out_dirs,
