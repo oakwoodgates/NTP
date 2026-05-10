@@ -4315,6 +4315,11 @@ _SWEEP_HTML_TEMPLATE = r"""<!DOCTYPE html>
       color: #fff;
       font-weight: bold;
       cursor: pointer;
+      /* Pin the header to the top of the viewport when the user scrolls
+         the table.  z-index keeps it above row hover effects. */
+      position: sticky;
+      top: 0;
+      z-index: 10;
     }}
     table.dataTable tbody td {{
       padding: 6px 12px;
@@ -4479,8 +4484,10 @@ _SWEEP_HTML_TEMPLATE = r"""<!DOCTYPE html>
     $(document).ready(function() {{
       $('#sweepTable').DataTable({{
         order: [[ {sort_col_idx}, 'desc' ]],
-        pageLength: 25,
-        lengthMenu: [[25, 50, 100, -1], [25, 50, 100, 'All']],
+        // No pagination — full sweep visible, scroll vertically with the
+        // header pinned (CSS position: sticky on thead).
+        paging: false,
+        info: false,
         layout: {{
           topStart: ['buttons'],
         }},
@@ -4817,6 +4824,11 @@ _CROSS_SWEEP_HTML_TEMPLATE = r"""<!DOCTYPE html>
       color: #fff;
       font-weight: bold;
       cursor: pointer;
+      /* Pin the header to the top of the viewport when the user scrolls
+         the table.  z-index keeps it above row hover effects. */
+      position: sticky;
+      top: 0;
+      z-index: 10;
     }}
     table.dataTable tbody td {{
       padding: 6px 12px;
@@ -4962,8 +4974,10 @@ _CROSS_SWEEP_HTML_TEMPLATE = r"""<!DOCTYPE html>
     $(document).ready(function() {{
       $('#sweepTable').DataTable({{
         order: [[ {sort_col_idx}, 'desc' ]],
-        pageLength: 25,
-        lengthMenu: [[25, 50, 100, -1], [25, 50, 100, 'All']],
+        // No pagination — full sweep visible, scroll vertically with the
+        // header pinned (CSS position: sticky on thead).
+        paging: false,
+        info: false,
         layout: {{
           topStart: ['buttons'],
         }},
