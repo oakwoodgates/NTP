@@ -261,3 +261,16 @@ class MACDRSI(Strategy):
         self.rsi.reset()
         self._prev_macd = 0.0
         self._prev_signal = 0.0
+
+# ── Default sweep grids ────────────────────────────────────────────────────
+#
+# Single source of truth for the MACDRSI sweep grid; shared between
+# notebooks/backtest/macd_rsi.ipynb and any future batch runner.
+# Override locally in cell 1 if you want a one-off experiment.
+
+MACD_FAST_PERIODS: list[int] = [8, 12, 16]
+MACD_SLOW_PERIODS: list[int] = [20, 26, 34]
+
+# Section 4.5 RSI-sensitivity sub-sweep (fix best MACD combo, sweep these):
+RSI_OB_VALUES: list[float] = [0.65, 0.70, 0.75, 0.80]
+RSI_OS_VALUES: list[float] = [0.20, 0.25, 0.30, 0.35]
