@@ -94,6 +94,15 @@ class MACrossConfig(StrategyConfig, frozen=True):
         set ``stop_pct = 1 / venue_leverage`` (e.g. ``0.05`` at 20×) — this
         makes the worst-case loss per trade equal the initial margin
         committed.  See ``docs/LIQUIDATION_AND_SIZING.md``.
+    bootstrap_on_deploy : bool, default False
+        If True, the *first observed signal* on a freshly-started
+        strategy counts as a synthetic cross and triggers an immediate
+        entry.  Use this when deploying a strategy mid-trend and you
+        want to pick up the current move rather than wait for the next
+        cross.  Default False is the conservative steady-state
+        behaviour: the strategy waits for an actual MA transition
+        before entering, which is what the cross-gate semantics
+        require for honest signal-event-driven trading.
 
     """
 
@@ -109,25 +118,55 @@ class MACrossConfig(StrategyConfig, frozen=True):
     close_positions_on_stop: bool = True
     liquidation: LiquidationConfig | None = None
     stop_pct: float | None = None
+    bootstrap_on_deploy: bool = False
 
 
 class MACross(ProtectiveStopAware, LiquidationAware, Strategy):
     """Moving-average crossover strategy using MovingAverageFactory.
 
-    Goes long when fast MA crosses above slow MA.
-    Goes short when fast MA crosses below slow MA.
+    Enters on a *cross of the fast and slow MAs* — a signal **transition**,
+    not a signal **state**.  Long entry fires when ``fast_ma`` crosses
+    above ``slow_ma``; short entry when ``fast_ma`` crosses below.
     Designed for perpetual futures (supports both directions).
 
-    Inheritance order: mixins MUST come before ``Strategy``. NT calls the
-    typed handlers (``on_position_opened`` etc.) by name; ``Strategy`` defines
-    those as concrete no-op stubs, so ``(Strategy, ...mixins)`` order finds
+    Entry rule — cross-gated, not state-polled
+    ------------------------------------------
+    The strategy tracks the last signal direction it acted on.  An
+    entry only fires when the current signal differs from the last
+    one — i.e. on a fresh transition.  Same-direction bars after a
+    cross do nothing.
+
+    The same rule covers all exit causes uniformly: after *any* exit
+    (strategy cross-back, ``ProtectiveStopAware`` stop, ``LiquidationAware``
+    stop, take-profit, trailing stop, account liquidation), the
+    last-signal state persists, so the next entry waits for the next
+    *new* cross.  Re-entering on an unchanged signal that just produced
+    a stop-out is denied: a stop is information that the market
+    disagreed with the signal at that price level, and acting on the
+    same stale signal is just polling on a state the market has
+    already disproved.
+
+    Bootstrap (live-deploy override)
+    --------------------------------
+    Set ``config.bootstrap_on_deploy=True`` to treat the *first*
+    observed signal on a freshly-started strategy as a synthetic
+    cross.  Use this when deploying mid-trend and you want to pick
+    up the current move rather than wait for the next MA transition.
+    Defaults to False — the conservative steady-state behaviour.
+
+    Inheritance order
+    -----------------
+    Mixins MUST come before ``Strategy``. NT calls the typed handlers
+    (``on_position_opened`` etc.) by name; ``Strategy`` defines those
+    as concrete no-op stubs, so ``(Strategy, ...mixins)`` order finds
     the stubs first via MRO and the mixins silently never run.
 
-    The two mixins compose: ``ProtectiveStopAware`` places a fixed-pct
-    reduce-only stop and ``LiquidationAware`` places a cross-margin
-    reduce-only stop at a (typically wider) liq price.  Whichever fires
-    first reduces the position; NT's reduce-only logic cancels the other
-    on fill.
+    Mixin composition
+    -----------------
+    ``ProtectiveStopAware`` places a fixed-pct reduce-only stop and
+    ``LiquidationAware`` places a cross-margin reduce-only stop at a
+    (typically wider) liq price.  Whichever fires first reduces the
+    position; NT's reduce-only logic cancels the other on fill.
 
     Parameters
     ----------
@@ -158,6 +197,23 @@ class MACross(ProtectiveStopAware, LiquidationAware, Strategy):
         # Resolve sizing: explicit SizingConfig wins; else build a fixed-mode
         # config from trade_notional for back-compat.
         self._sizing = resolve_sizing_from_strategy_config(config)
+
+        # Cross-gate state.  Tracks the last signal direction we acted
+        # on so re-entries are gated on a fresh transition rather than
+        # on the polled signal *state*:
+        #   0  → no signal seen yet (pre-warmup, or freshly reset)
+        #  +1  → last action was on a LONG signal (fast > slow)
+        #  -1  → last action was on a SHORT signal (fast < slow)
+        # The state persists across position closes — strategy exits,
+        # protective stops, liquidations all leave the signal direction
+        # unchanged, so the next entry waits for a new cross.  See
+        # the class docstring for the rationale.
+        self._last_signal: int = 0
+        # When ``bootstrap_on_deploy`` is True, the very first
+        # observed signal counts as a synthetic cross — used for live
+        # mid-trend deployment.  Cleared on first use (and on
+        # ``on_reset``) so steady-state behaviour resumes immediately.
+        self._bootstrap_pending: bool = bool(config.bootstrap_on_deploy)
 
         self.instrument: Instrument | None = None
         ma_enum = _MA_TYPE_LOOKUP[config.ma_type]
@@ -200,34 +256,88 @@ class MACross(ProtectiveStopAware, LiquidationAware, Strategy):
         # for order fills. Without this, orders are rejected with "no market".
         self.subscribe_quote_ticks(self.config.instrument_id)
 
+    @staticmethod
+    def _cross_gate_decision(
+        fast_value: float,
+        slow_value: float,
+        last_signal: int,
+        bootstrap_pending: bool,
+    ) -> tuple[int, bool]:
+        """Pure cross-gate decision — extracted so it's testable in isolation.
+
+        Computes the current signal direction from the MA values and
+        decides whether the caller should act.  Equal MA values map to
+        a LONG signal (matches the original "fast >= slow" branch).
+
+        Returns
+        -------
+        tuple[int, bool]
+            ``(new_signal, should_act)`` where:
+
+            * ``new_signal`` is ``+1`` (LONG) or ``-1`` (SHORT) — the
+              signal direction observed on this bar.
+            * ``should_act`` is True when this is a fresh cross (the
+              new signal differs from ``last_signal``) OR when
+              ``bootstrap_pending`` is True (live mid-trend deploy).
+              Caller acts on ``new_signal`` and clears the
+              ``bootstrap_pending`` flag.
+        """
+        new_signal = 1 if fast_value >= slow_value else -1
+        should_act = new_signal != last_signal or bootstrap_pending
+        return new_signal, should_act
+
     def on_bar(self, bar: Bar) -> None:
-        """Evaluate MA crossover on each bar."""
+        """Evaluate MA crossover on each bar.
+
+        Cross-gated entry: the strategy acts only when the signed
+        signal differs from ``self._last_signal``.  Same-direction bars
+        after a cross do nothing.  After any exit (cross-back, stop,
+        liquidation), ``self._last_signal`` retains the direction we
+        entered on, so a stop-out doesn't trigger an immediate
+        re-entry on the unchanged signal — the next entry waits for
+        the next *new* MA cross.
+        """
         if not self.indicators_initialized():
             return
 
         if bar.is_single_price():
             return
 
+        signal, should_act = self._cross_gate_decision(
+            float(self.fast_ma.value),
+            float(self.slow_ma.value),
+            self._last_signal,
+            self._bootstrap_pending,
+        )
+        if not should_act:
+            return
+        self._bootstrap_pending = False
+        self._last_signal = signal
+
         price = Decimal(str(bar.close))
-        is_flat = self.portfolio.is_flat(self.config.instrument_id)
-        is_net_long = self.portfolio.is_net_long(self.config.instrument_id)
+        is_flat      = self.portfolio.is_flat(self.config.instrument_id)
+        is_net_long  = self.portfolio.is_net_long(self.config.instrument_id)
         is_net_short = self.portfolio.is_net_short(self.config.instrument_id)
 
-        # BUY signal: fast MA >= slow MA
-        if self.fast_ma.value >= self.slow_ma.value:
-            if is_flat:
-                self._enter(OrderSide.BUY, price)
-            elif is_net_short:
+        if signal > 0:
+            # Fresh LONG signal.  Close any open SHORT first (covers a
+            # cross-back when the prior position is still open — i.e.
+            # no stop has fired yet).
+            if is_net_short:
                 self.close_all_positions(self.config.instrument_id)
                 self._enter(OrderSide.BUY, price)
-
-        # SELL signal: fast MA < slow MA
-        elif self.fast_ma.value < self.slow_ma.value:
-            if is_flat:
-                self._enter(OrderSide.SELL, price)
-            elif is_net_long:
+            elif is_flat:
+                self._enter(OrderSide.BUY, price)
+            # else: already long (shouldn't normally happen on a
+            # transition but guard anyway — leave the position alone).
+        else:
+            # Fresh SHORT signal.
+            if is_net_long:
                 self.close_all_positions(self.config.instrument_id)
                 self._enter(OrderSide.SELL, price)
+            elif is_flat:
+                self._enter(OrderSide.SELL, price)
+            # else: already short, no action.
 
     def _enter(self, side: OrderSide, price: Decimal) -> None:
         """Submit a market order sized via SizingConfig."""
@@ -274,7 +384,16 @@ class MACross(ProtectiveStopAware, LiquidationAware, Strategy):
         self.unsubscribe_bars(self.config.bar_type)
 
     def on_reset(self) -> None:
-        """Reset indicators and liquidation state for engine reuse (parameter sweeps)."""
+        """Reset indicators and per-iteration state for engine reuse.
+
+        Also clears the cross-gate state so each sweep iteration starts
+        from a clean ``_last_signal=0`` (otherwise the residual signal
+        from iteration N would let iteration N+1 skip its own first
+        cross).  Restores the ``bootstrap_on_deploy`` flag so subsequent
+        sweeps see consistent behaviour.
+        """
         super().on_reset()
         self.fast_ma.reset()
         self.slow_ma.reset()
+        self._last_signal = 0
+        self._bootstrap_pending = bool(self.config.bootstrap_on_deploy)
