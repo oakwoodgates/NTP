@@ -2,6 +2,27 @@
 
 A crypto algorithmic trading platform built on [NautilusTrader](https://nautilustrader.io/), with custom Actors for persistence and alerting, research tooling for strategy validation, and Grafana for monitoring.
 
+## Status
+
+**Phase 3a (research tooling) — complete.** Sweep persistence, cross-instrument comparison, walk-forward, bootstrap CIs, 8-check validation, validate-all consolidator, batch backtest runner, and centralized config flow are all in place. See [`docs/ROADMAP.md`](docs/ROADMAP.md) for what's next (Phase 2.5 paper-trading revalidation → Phase 2.6 backtest accuracy validation → Phase 3 live trading).
+
+**Quick start:**
+
+```bash
+cp .env.example .env             # edit STARTING_CAPITAL, TRADE_NOTIONAL, etc.
+python scripts/batch_backtest.py --dry-run    # list combos
+python scripts/batch_backtest.py              # full BTC/ETH/SOL × 4h/1d × 5%/10% grid
+```
+
+**Key docs:**
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) — phase plan and gates
+- [`docs/CONFIG.md`](docs/CONFIG.md) — settings.py vs .env, override patterns
+- [`docs/BATCH_BACKTEST.md`](docs/BATCH_BACKTEST.md) — headless cross-product runner
+- [`docs/STRATEGY_ENTRY_RULES.md`](docs/STRATEGY_ENTRY_RULES.md) — cross-gate contract for new strategies
+- [`docs/BAR_BACKTESTING_GOTCHAS.md`](docs/BAR_BACKTESTING_GOTCHAS.md) — bar-fill artifacts to expect
+- [`docs/LIQUIDATION_AND_SIZING.md`](docs/LIQUIDATION_AND_SIZING.md) — liq simulator + protective stop mixins
+- [`docs/ANALYZER_RETURNS_CAVEAT.md`](docs/ANALYZER_RETURNS_CAVEAT.md) — why we don't trust NT's Sharpe
+
 ## Architecture
 
 **Modular monolith, event-driven.** NautilusTrader is the core engine (installed as a pip dependency). Everything else — Actors, persistence, alerting, research tooling, API, frontend — is custom code that orchestrates NT.
@@ -301,11 +322,14 @@ docker compose restart trader
 | Phase | Focus | Status |
 |-------|-------|--------|
 | 1 | Strategy development + backtesting (NT native workflow, Jupyter) | ✅ Complete |
-| 2 | TradingNode deployment, PersistenceActor, AlertActor, paper + live trading | ✅ Complete |
-| 3a | Research tooling — sweep persistence, cross-sweep comparison, walk-forward validation, bootstrap CI | 🟡 Active |
-| 3b | Web layer — FastAPI gateway, React frontend, StreamingActor, Redis Streams | ⬜ Future |
-| 4 | ML integration (feature engineering, model training, inference in callbacks) | ⬜ Planned |
-| 5 | Experimental (LSTM, LLM sentiment, RL agents) | ⬜ Planned |
+| 2 | TradingNode code, PersistenceActor, AlertActor, paper + live runners | ✅ Complete |
+| 3a | Research tooling — sweep persistence, comparison, walk-forward, bootstrap CIs, validate, batch runner, centralized config | ✅ Complete |
+| 2.5 | Paper-trading revalidation against post-cross-gate strategies | 🟡 Next ([`ROADMAP.md`](docs/ROADMAP.md)) |
+| 2.6 | Backtest accuracy validation — paper vs backtest divergence within tolerance | ⬜ Planned |
+| 3 | Live trading — capital deployment after 2.5 + 2.6 pass | ⬜ Planned |
+| 4 | Multi-strategy portfolio + correlation tooling | ⬜ Planned |
+| 5 | NT v2 migration (tracking [nautechsystems/nautilus_trader#4042](https://github.com/nautechsystems/nautilus_trader/issues/4042)) | ⬜ Watching |
+| 3b | Web layer — FastAPI gateway, React frontend, StreamingActor, Redis Streams | ⬜ Deferred |
 
 ## Key Constraints
 
