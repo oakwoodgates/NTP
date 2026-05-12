@@ -2344,10 +2344,7 @@ def _fills_to_markers(
         if ts_s is None:
             continue
 
-        if oid_is_index:
-            oid = idx
-        else:
-            oid = row.get("client_order_id")
+        oid = idx if oid_is_index else row.get("client_order_id")
         oid_key = str(oid) if oid is not None else ""
 
         side_raw = str(row.get("side", "")).upper()
@@ -3913,10 +3910,7 @@ def _fmt_sweep_cell(value: Any, kind: str) -> str:
         cls = "num-positive" if v > 0 else ("num-negative" if v < 0 else "")
         # If value looks like a fraction (CAGR style: 0.30) format as %.
         # If it looks like an already-pct number (PnL%: 951.06), keep as %.
-        if abs(v) <= 5:
-            text = f"{v * 100:.2f}%"
-        else:
-            text = f"{v:.2f}%"
+        text = f"{v * 100:.2f}%" if abs(v) <= 5 else f"{v:.2f}%"
         return f'<span class="{cls}">{text}</span>' if cls else text
     if kind == "ratio":
         v = float(value)
