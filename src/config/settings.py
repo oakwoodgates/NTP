@@ -103,6 +103,54 @@ class Settings(BaseSettings):
     equals the initial margin committed. Set to ``None`` to disable
     the protective-stop mixin by default."""
 
+    # ── Strategy hyperparameters ────────────────────────────────────────
+    # Pulled out of the runners so swapping fast/slow / ATR multipliers /
+    # MACD-RSI periods doesn't require editing Python source and rebuilding
+    # the trader image. Backtest notebooks pick their own (one notebook per
+    # strategy); these defaults apply to sandbox/live runners.
+    #
+    # NOTE: flat namespace will grow as strategies multiply. If it gets
+    # unwieldy, switch to a single JSON-encoded STRATEGY_PARAMS env var.
+
+    # — MA crossover family (MACross, MACrossLongOnly, *Cross specialisations)
+    ma_fast: int = 10
+    """Fast MA period. Default 10 matches the canonical backtest combo
+    used in ``notebooks/backtest/ma_cross.ipynb``."""
+
+    ma_slow: int = 40
+    """Slow MA period. Default 40 matches the canonical backtest combo."""
+
+    ma_type: str = "EMA"
+    """MA family for MACross-style strategies. One of EMA/SMA/HMA/DEMA/AMA/VIDYA.
+    Sandbox/live runners use this when ``strategy`` is the generic ``MACross``;
+    the family-specific aliases (``EMACross``, ``SMACross``, ...) override this."""
+
+    # — MACrossATR
+    macross_atr_period: int = 14
+    """ATR lookback for MACrossATR strategy."""
+
+    macross_atr_sl_mult: float = 1.5
+    """ATR multiplier for the stop-loss leg of MACrossATR's bracket. Stored
+    as float because NT's ``MACrossATRConfig`` expects float (multiplier,
+    not a money value — no precision concern)."""
+
+    macross_atr_tp_mult: float = 3.0
+    """ATR multiplier for the take-profit leg of MACrossATR's bracket. Stored
+    as float because NT's ``MACrossATRConfig`` expects float."""
+
+    # — MACDRSI
+    macdrsi_macd_fast: int = 12
+    """Fast EMA period in the MACD oscillator."""
+
+    macdrsi_macd_slow: int = 26
+    """Slow EMA period in the MACD oscillator."""
+
+    macdrsi_macd_signal: int = 9
+    """Signal-line EMA period in the MACD oscillator."""
+
+    macdrsi_rsi_period: int = 14
+    """RSI lookback in the MACDRSI strategy."""
+
     # ── Liquidation simulator ───────────────────────────────────────────
     liquidation_enabled: bool = True
     """Wire up the LiquidationAware mixin + AccountAliveMonitor actor.

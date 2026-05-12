@@ -46,6 +46,11 @@ from src.core.liquidation import (
 )
 from src.core.liquidation_mixin import LIQUIDATION_TAG, LiquidationAware
 from src.core.protective_stop_mixin import PROTECTIVE_STOP_TAG, ProtectiveStopAware
+from src.core.signal_event import (
+    TOPIC_SIGNAL_MA_CROSS,
+    TOPIC_SIGNAL_PREFIX,
+    SignalEvent,
+)
 from src.core.sizing import (
     SizingConfig,
     compute_notional,
@@ -81,7 +86,10 @@ __all__ = [
     "PROTECTIVE_STOP_TAG",
     "PositionLiquidated",
     "ProtectiveStopAware",
+    "SignalEvent",
     "SizingConfig",
+    "TOPIC_SIGNAL_MA_CROSS",
+    "TOPIC_SIGNAL_PREFIX",
     "VENUE_CONFIGS",
     "VenueConfig",
     "bar_type_str",

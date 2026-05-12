@@ -20,6 +20,8 @@ from nautilus_trader.model.currencies import USDC
 from nautilus_trader.model.events import OrderFilled, PositionClosed
 from nautilus_trader.model.identifiers import InstrumentId, Venue
 
+from src.core.signal_event import TOPIC_SIGNAL_PREFIX, SignalEvent
+
 
 def _valid_decimal_str(s: str) -> bool:
     """Check that a string parses as a non-negative decimal (for qty/price)."""
@@ -53,6 +55,10 @@ class PersistenceActor(Actor):
     def on_start(self) -> None:
         self.subscribe_order_fills(InstrumentId.from_str(self.config.instrument_id))
         self.msgbus.subscribe(topic="events.position.*", handler=self.on_event)
+        # Wildcard subscription for per-bar signal-gate events from
+        # signal-generating strategies (e.g., MACross). One row per bar
+        # after indicator warmup, persisted to ``signal_events``.
+        self.msgbus.subscribe(topic=f"{TOPIC_SIGNAL_PREFIX}*", handler=self._on_signal)
         self.clock.set_timer(
             name="account_snapshot",
             interval=pd.Timedelta(seconds=self.config.snapshot_interval_secs),
@@ -69,6 +75,13 @@ class PersistenceActor(Actor):
 
     def _on_snapshot_timer(self, event: Any) -> None:
         self.run_in_executor(self._persist_account_snapshot)
+
+    def _on_signal(self, event: Any) -> None:
+        # Wildcard msgbus delivers anything on a matching topic; guard the
+        # type so unrelated payloads on ``signals.*`` don't crash the insert.
+        if not isinstance(event, SignalEvent):
+            return
+        self.run_in_executor(self._persist_signal, (event,))
 
     # -- Executor callables (run in ThreadPoolExecutor) -----------------------
 
@@ -167,6 +180,33 @@ class PersistenceActor(Actor):
         except Exception as e:
             self.log.error(f"PersistenceActor: position insert failed: {e}")
 
+    def _persist_signal(self, event: SignalEvent) -> None:
+        ts = datetime.fromtimestamp(event.ts_event / 1e9, tz=UTC)
+        if not _valid_instrument_id(event.instrument_id):
+            self.log.warning(
+                "PersistenceActor: skipping signal — unexpected instrument_id shape",
+                extra={
+                    "event": "SignalEvent",
+                    "instrument_id": event.instrument_id,
+                    "strategy_id": event.strategy_id,
+                },
+            )
+            return
+        try:
+            asyncio.run(self._async_insert_signal(
+                ts,
+                uuid.UUID(self.config.run_id),
+                event.strategy_id,
+                event.instrument_id,
+                event.signal,
+                str(event.fast_value),
+                str(event.slow_value),
+                event.acted,
+                event.bootstrap,
+            ))
+        except Exception as e:
+            self.log.error(f"PersistenceActor: signal insert failed: {e}")
+
     def _persist_account_snapshot(self) -> None:
         account = self.cache.account_for_venue(self._venue)
         if account is None:
@@ -256,6 +296,33 @@ class PersistenceActor(Actor):
                 ts_opened, ts_closed, run_id, strategy_id, instrument_id,
                 position_id, entry_side, peak_qty, avg_px_open, avg_px_close,
                 realized_pnl, realized_return, currency, duration_ns,
+            )
+        finally:
+            await conn.close()
+
+    async def _async_insert_signal(
+        self,
+        ts: datetime,
+        run_id: uuid.UUID,
+        strategy_id: str,
+        instrument_id: str,
+        signal: int,
+        fast_value: str,
+        slow_value: str,
+        acted: bool,
+        bootstrap: bool,
+    ) -> None:
+        conn = await asyncpg.connect(self.config.postgres_dsn)
+        try:
+            await conn.execute(
+                """
+                INSERT INTO signal_events (
+                    ts, run_id, strategy_id, instrument_id, signal,
+                    fast_value, slow_value, acted, bootstrap
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                """,
+                ts, run_id, strategy_id, instrument_id, signal,
+                fast_value, slow_value, acted, bootstrap,
             )
         finally:
             await conn.close()

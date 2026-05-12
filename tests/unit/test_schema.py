@@ -7,17 +7,24 @@ from src.persistence.schema import (
     metadata,
     order_fills,
     positions,
+    signal_events,
     strategy_runs,
 )
 
 
 class TestSchema:
-    def test_four_tables_defined(self) -> None:
-        assert len(metadata.tables) == 4
+    def test_five_tables_defined(self) -> None:
+        assert len(metadata.tables) == 5
 
     def test_table_names(self) -> None:
         names = set(metadata.tables.keys())
-        assert names == {"strategy_runs", "order_fills", "positions", "account_snapshots"}
+        assert names == {
+            "strategy_runs",
+            "order_fills",
+            "positions",
+            "account_snapshots",
+            "signal_events",
+        }
 
     def test_strategy_runs_primary_key(self) -> None:
         pk_cols = [c.name for c in strategy_runs.primary_key.columns]
@@ -33,6 +40,10 @@ class TestSchema:
 
     def test_account_snapshots_fk_to_strategy_runs(self) -> None:
         fks = [fk.target_fullname for c in account_snapshots.columns for fk in c.foreign_keys]
+        assert "strategy_runs.id" in fks
+
+    def test_signal_events_fk_to_strategy_runs(self) -> None:
+        fks = [fk.target_fullname for c in signal_events.columns for fk in c.foreign_keys]
         assert "strategy_runs.id" in fks
 
 
@@ -51,6 +62,8 @@ class TestNumericColumns:
         (account_snapshots, "balance_total"),
         (account_snapshots, "balance_free"),
         (account_snapshots, "balance_locked"),
+        (signal_events, "fast_value"),
+        (signal_events, "slow_value"),
     ]
 
     def test_all_financial_columns_are_numeric(self) -> None:
@@ -71,6 +84,7 @@ class TestTimestampColumns:
         (positions, "ts_opened"),
         (positions, "ts_closed"),
         (account_snapshots, "ts"),
+        (signal_events, "ts"),
     ]
 
     def test_all_timestamp_columns_have_timezone(self) -> None:

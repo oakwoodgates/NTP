@@ -71,9 +71,13 @@ Which system reads which setting:
 | **Research universe** |  |  |  |  |  |
 | `default_assets` | — | ✓ default `--assets` | — | — | ✓ iteration |
 | `default_intervals` | — | ✓ default `--intervals` | — | — | ✓ |
+| **Strategy hyperparameters** |  |  |  |  |  |
+| `ma_fast` / `ma_slow` / `ma_type` | — (notebook picks) | — (CLI picks) | ✓ MACross fast/slow/family | ✓ | — |
+| `macross_atr_period` / `..._sl_mult` / `..._tp_mult` | — | — | ✓ MACrossATR bracket sizing | ✓ | — |
+| `macdrsi_macd_fast` / `..._slow` / `..._signal` / `..._rsi_period` | — | — | ✓ MACDRSI windows | ✓ | — |
 | **Liquidation simulator** |  |  |  |  |  |
 | `liquidation_enabled` | ✓ | ✓ | (typically False) | ✗ False (venue handles) | — |
-| `liquidation_min_trade_notional` | ✓ | ✓ | — | — | — |
+| `liquidation_min_trade_notional` | ✓ | ✓ | ✓ AccountAliveMonitor floor | — | — |
 | **Infrastructure** |  |  |  |  |  |
 | `postgres_*` | — | — | ✓ PersistenceActor | ✓ | — |
 | `redis_*` | — | — | ✓ NT cache | ✓ | — |
@@ -98,8 +102,11 @@ different value per `.env`.
   algorithm-implementation choices, not deployment values. Different
   strategies legitimately have different grids. Live in
   `src/strategies/<name>.py`.
-- **Asset, stop_pct in a sweep, individual fast/slow values** — these
-  vary per run by design. CLI flags or cell-1 lists handle them.
+- **Per-sweep fast/slow values, stop_pct in a sweep, asset under test** —
+  these vary per run by design. CLI flags or cell-1 lists handle them.
+  Note: the **single-value** fast/slow used by the sandbox/live runners
+  IS in settings (`MA_FAST`, `MA_SLOW`); only the multi-value grids
+  belong to the strategy module.
 - **API URLs, fee tiers** — platform constants in
   `src/core/constants.py`. They change when an exchange changes their
   fee schedule, not when you redeploy.

@@ -36,7 +36,7 @@ alembic upgrade head       # create tables (first time only)
 python scripts/run_sandbox.py
 ```
 
-Default config: MACross-EMA(10,20) on BTC-USD-PERP, 1-hour bars, $100 USD notional per trade.
+Default config: MACross-EMA(10,40) on BTC-USD-PERP, 4-hour bars, $2000 USD notional per trade (matches the canonical backtest in `notebooks/backtest/ma_cross.ipynb`). All hyperparameters flow from `.env` — see [`CONFIG.md`](CONFIG.md) for the per-system field map.
 
 **What happens:**
 - Registers a `strategy_runs` row in PostgreSQL with a unique `run_id`
@@ -106,6 +106,10 @@ SELECT ts, balance_total FROM account_snapshots ORDER BY ts DESC LIMIT 5;
 
 -- Positions (only after a round-trip trade completes)
 SELECT * FROM positions ORDER BY ts_closed DESC LIMIT 5;
+
+-- Per-bar signal-gate stream (one row per bar after indicator warmup)
+SELECT ts, signal, fast_value, slow_value, acted, bootstrap
+FROM signal_events ORDER BY ts DESC LIMIT 10;
 ```
 
 ### Check Grafana
@@ -125,54 +129,62 @@ You should receive messages for fills, position closes (WIN/LOSS with PnL), and 
 
 ## 5. Switch Strategies
 
-Change these in `.env`:
+All hyperparameters flow from `.env`. Edit, restart `python scripts/run_sandbox.py` (or `docker compose restart trader`). No code edits required.
 
 ```bash
-# Strategy: MACross | …Cross | MACrossLongOnly | …CrossLongOnly | MACrossATR | MACDRSI
-STRATEGY=MACross
+# Strategy + instrument
+STRATEGY=MACross                          # MACross | …Cross | MACrossLongOnly | …CrossLongOnly | MACrossATR | MACDRSI
+INSTRUMENT_ID=BTC-USD-PERP.HYPERLIQUID    # BTC | ETH | SOL
+BAR_INTERVAL=4h                           # friendly form — converted to NT bar-type at the boundary
+TRADE_NOTIONAL=2000
 
-# Instrument: BTC | ETH | SOL
-INSTRUMENT_ID=BTC-USD-PERP.HYPERLIQUID
+# MA crossover family (MACross, *Cross, MACrossLongOnly, *CrossLongOnly)
+MA_FAST=10
+MA_SLOW=40
+MA_TYPE=EMA                               # EMA | SMA | HMA | DEMA | AMA | VIDYA
+                                          # (family-specific aliases like EMACross pin MA_TYPE by name)
 
-# USD notional per trade (all strategies use notional sizing)
-TRADE_NOTIONAL=100
+# MACrossATR
+MACROSS_ATR_PERIOD=14
+MACROSS_ATR_SL_MULT=1.5
+MACROSS_ATR_TP_MULT=3.0
 
-# Timeframe
-BAR_INTERVAL=15-MINUTE-LAST-EXTERNAL
+# MACDRSI
+MACDRSI_MACD_FAST=12
+MACDRSI_MACD_SLOW=26
+MACDRSI_MACD_SIGNAL=9
+MACDRSI_RSI_PERIOD=14
 ```
-
-Then restart: Ctrl+C the running node, `python scripts/run_sandbox.py`.
 
 ### Available strategies
 
 **MA crossover variants** (all use unified `ma_cross.py` via `MovingAverageFactory`):
 
-| Strategy | MA Type | Description | Default params |
-|----------|---------|-------------|----------------|
-| MACross / EMACross | EMA | Exponential MA crossover | fast=10, slow=20 |
-| SMACross | SMA | Simple MA crossover | fast=10, slow=20 |
-| HMACross | HMA | Hull MA crossover (less lag) | fast=10, slow=20 |
-| DEMACross | DEMA | Double Exponential MA crossover (smoother) | fast=10, slow=20 |
-| AMACross | AMA | Kaufman Adaptive MA crossover (volatility-adaptive) | fast=10, slow=20 |
-| VIDYACross | VIDYA | Variable Index Dynamic Average crossover (CMO-adaptive) | fast=10, slow=20 |
+| Strategy | MA Type | Description |
+|----------|---------|-------------|
+| MACross | from `MA_TYPE` | MA crossover; family chosen by `MA_TYPE` env var |
+| EMACross | EMA | Exponential MA (pinned regardless of `MA_TYPE`) |
+| SMACross | SMA | Simple MA (pinned) |
+| HMACross | HMA | Hull MA — less lag (pinned) |
+| DEMACross | DEMA | Double Exponential MA — smoother (pinned) |
+| AMACross | AMA | Kaufman Adaptive MA — volatility-adaptive (pinned) |
+| VIDYACross | VIDYA | Variable Index Dynamic Average — CMO-adaptive (pinned) |
 
-**MA crossover long-only variants** (all use unified `ma_cross_long_only.py` — never opens short positions):
+All MA crossover strategies share `MA_FAST`, `MA_SLOW`. Family-specific aliases override `MA_TYPE`.
 
-| Strategy | MA Type | Description | Default params |
-|----------|---------|-------------|----------------|
-| MACrossLongOnly / EMACrossLongOnly | EMA | Exponential MA long-only | fast=10, slow=20 |
-| SMACrossLongOnly | SMA | Simple MA long-only | fast=10, slow=20 |
-| HMACrossLongOnly | HMA | Hull MA long-only | fast=10, slow=20 |
-| DEMACrossLongOnly | DEMA | Double Exponential MA long-only | fast=10, slow=20 |
-| AMACrossLongOnly | AMA | Kaufman Adaptive MA long-only | fast=10, slow=20 |
-| VIDYACrossLongOnly | VIDYA | Variable Index Dynamic Average long-only | fast=10, slow=20 |
+**MA crossover long-only variants** (`ma_cross_long_only.py` — never shorts):
+
+| Strategy | MA Type |
+|----------|---------|
+| MACrossLongOnly | from `MA_TYPE` |
+| {EMA,SMA,HMA,DEMA,AMA,VIDYA}CrossLongOnly | pinned by alias |
 
 **Other strategies:**
 
-| Strategy | Description | Key params (edit in `_build_strategy()`) |
-|----------|-------------|------------------------------------------|
-| MACrossATR | EMA cross + ATR bracket TP/SL | fast=20, slow=50, atr=14, sl=1.5x, tp=3.0x |
-| MACDRSI | MACD + RSI confluence | macd 12/26/9, rsi=14 |
+| Strategy | Key params (in `.env`) |
+|----------|------------------------|
+| MACrossATR | `MA_FAST`, `MA_SLOW`, `MACROSS_ATR_PERIOD`, `MACROSS_ATR_SL_MULT`, `MACROSS_ATR_TP_MULT` |
+| MACDRSI | `MACDRSI_MACD_FAST`, `MACDRSI_MACD_SLOW`, `MACDRSI_MACD_SIGNAL`, `MACDRSI_RSI_PERIOD` |
 
 ### Available instruments
 
@@ -184,7 +196,90 @@ Then restart: Ctrl+C the running node, `python scripts/run_sandbox.py`.
 
 ### Available timeframes
 
-`1-MINUTE-LAST-EXTERNAL`, `5-MINUTE-LAST-EXTERNAL`, `15-MINUTE-LAST-EXTERNAL`, `1-HOUR-LAST-EXTERNAL`, `4-HOUR-LAST-EXTERNAL`, `1-DAY-LAST-EXTERNAL`
+`1m`, `5m`, `15m`, `1h`, `4h`, `1d` (friendly form — converted to NT bar-type at the boundary).
+
+## 5b. Phase 2.5 Revalidation — Stage A (sandbox) → Stage B (HL testnet)
+
+Phase 2.5 of the roadmap ([`ROADMAP.md`](ROADMAP.md)) confirms the
+cross-gated MACross + protective-stop + liquidation-simulator stack
+behaves the same in paper as in backtest. Two stages:
+
+### Stage A — Sandbox revalidation (~1 week)
+
+Smoke-tests the new wiring (signal_events, AccountAliveMonitor) before
+committing to a 2-week testnet run.
+
+```bash
+alembic upgrade head                      # picks up 002_signal_events
+docker compose up -d                      # or python scripts/run_sandbox.py natively
+```
+
+**Verify after ~16 hours (4 bars at 4h):**
+
+```sql
+-- Per-bar gate stream is flowing
+SELECT COUNT(*) FROM signal_events WHERE run_id = '<id>';   -- should be > 0
+
+-- Acted vs observed split
+SELECT acted, COUNT(*) FROM signal_events WHERE run_id = '<id>' GROUP BY acted;
+```
+
+```bash
+# AccountAliveMonitor is subscribed
+docker compose logs trader | grep "AccountAliveMonitor started"
+
+# Per-bar log line from MACross (one per bar after warmup)
+docker compose logs trader | grep "cross_gate:"
+```
+
+**Stage A pass-through:** any of `{signal_events empty, no AccountAliveMonitor log, blocked-callback warnings}` → fix and re-do. Do NOT proceed to Stage B with broken plumbing.
+
+### Stage B — HL testnet (~2 weeks)
+
+The real revalidation. Uses `scripts/run_live.py` against the actual HL
+testnet exchange (real orders, fake money).
+
+```bash
+# .env settings:
+#   HL_PRIVATE_KEY=<testnet key>
+#   HL_TESTNET=true
+#   LIVE_CONFIRM=yes
+docker compose build trader
+docker compose up -d trader
+```
+
+Pass criteria (gates Phase 2.6):
+
+- [ ] ≥20 closed positions in `positions` table for the run.
+- [ ] Every fill in `order_fills` matches an HL testnet UI fill (spot-check 5).
+- [ ] `docker compose logs trader | grep -c "blocked-callback"` == 0.
+- [ ] At least one drawdown alert OR documented reason none fired.
+- [ ] No unhandled exceptions in `docker compose logs trader`.
+
+### Signal alignment analysis (the roadmap's open question)
+
+After Stage B, in `notebooks/review_live_run.ipynb`, join `signal_events`
+against a fresh backtest re-run over the same window. Useful queries:
+
+```sql
+-- The full per-bar gate stream for the testnet run
+SELECT ts, signal, fast_value, slow_value, acted, bootstrap
+FROM signal_events
+WHERE run_id = '<testnet run_id>'
+ORDER BY ts;
+
+-- Just the acted bars (one per entry/flip)
+SELECT ts, signal, fast_value, slow_value
+FROM signal_events
+WHERE run_id = '<testnet run_id>' AND acted = TRUE
+ORDER BY ts;
+
+-- Per-bar lag (paper ts_received vs bar ts_event) — currently same column,
+-- but if we add ts_received later this is where it'd surface
+SELECT date_trunc('hour', ts) AS bar_hour, COUNT(*)
+FROM signal_events WHERE run_id = '<testnet run_id>'
+GROUP BY bar_hour ORDER BY bar_hour;
+```
 
 ## 6. Daily Monitoring
 

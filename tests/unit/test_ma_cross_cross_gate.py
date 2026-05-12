@@ -197,6 +197,76 @@ class TestEndToEndOnBar:
             "cross-gate isn't suppressing same-signal re-entries."
         )
 
+
+class TestSignalEventEmission:
+    """``on_bar`` must publish a SignalEvent every initialized bar.
+
+    Phase 2.5 verification needs the full per-bar gate stream in PG,
+    not just acted bars.  This pins both the emit-on-every-bar contract
+    and the ``acted`` flag matching the cross-gate decision.
+    """
+
+    def test_emits_one_signal_event_per_bar_after_warmup(self) -> None:
+        from src.core.signal_event import TOPIC_SIGNAL_MA_CROSS, SignalEvent
+
+        engine, _strat = _build_engine_and_strategy(fast_period=3, slow_period=5)
+        captured: list[SignalEvent] = []
+
+        # Subscribe BEFORE engine.run() so the cache is primed for this
+        # concrete topic; the msgbus cache quirk that bites AccountAliveMonitor
+        # would bite us here too.
+        engine.kernel.msgbus.subscribe(
+            topic=TOPIC_SIGNAL_MA_CROSS,
+            handler=lambda e: captured.append(e) if isinstance(e, SignalEvent) else None,
+        )
+
+        engine.run()
+
+        # 120 bars total, slow=5 so first ~5 are warmup-only (no emit).
+        # Expect roughly one emit per bar after warmup, not zero and not
+        # one-per-position. Lower bound is generous to absorb the synthetic
+        # series's single-price-bar guard.
+        assert len(captured) >= 100, (
+            f"Got {len(captured)} SignalEvents on 120 bars — "
+            "expected ~one per bar after warmup."
+        )
+
+        # Every captured event has a valid signal direction.
+        for ev in captured:
+            assert ev.signal in (1, -1), f"unexpected signal value: {ev.signal}"
+            assert isinstance(ev.acted, bool)
+            assert isinstance(ev.bootstrap, bool)
+
+    def test_acted_flag_aligns_with_signal_transition(self) -> None:
+        """``acted=True`` rows should be where the signed signal actually changed."""
+        from src.core.signal_event import TOPIC_SIGNAL_MA_CROSS, SignalEvent
+
+        engine, _strat = _build_engine_and_strategy(fast_period=3, slow_period=5)
+        captured: list[SignalEvent] = []
+        engine.kernel.msgbus.subscribe(
+            topic=TOPIC_SIGNAL_MA_CROSS,
+            handler=lambda e: captured.append(e) if isinstance(e, SignalEvent) else None,
+        )
+        engine.run()
+
+        # Walk the captured stream.  ``acted=True`` should be exactly
+        # the bars where the signal differed from the previous emitted
+        # signal (excluding the very first emit — which counts as a
+        # transition from the initial 0 state).
+        prev_signal = 0
+        acted_count = 0
+        transition_count = 0
+        for ev in captured:
+            if ev.acted:
+                acted_count += 1
+            if ev.signal != prev_signal:
+                transition_count += 1
+            prev_signal = ev.signal
+        assert acted_count == transition_count, (
+            f"acted_count={acted_count} != transition_count={transition_count} — "
+            "acted flag doesn't match signal transitions."
+        )
+
     def test_reset_clears_signal_state(self) -> None:
         """After on_reset, gate is back to (last_signal=0, bootstrap=False)."""
         engine, strat = _build_engine_and_strategy(bootstrap_on_deploy=False)
