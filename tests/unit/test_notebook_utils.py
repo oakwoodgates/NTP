@@ -32,12 +32,14 @@ if str(_NOTEBOOKS_DIR) not in sys.path:
 from utils import (  # type: ignore[import-not-found] # noqa: E402
     baselines_for_strategy,
     build_verdict_matrix,
+    join_signal_streams,
     load_sweeps_filtered,
     load_verdict_jsons,
     print_baselines_verdict,
     print_liquidation_resolution,
     print_sweep_liquidation_diagnostics,
     print_validation_verdict,
+    run_backtest_signal_stream,
     save_notebook_snapshot,
     wilson_score_interval,
 )
@@ -1611,3 +1613,223 @@ class TestBuildVerdictMatrix:
         verdicts = load_verdict_jsons(tmp_path)
         df = build_verdict_matrix(verdicts)
         assert any("fast=10" in p for p in df["pick"].tolist())
+
+
+# ── Phase 2.5 signal-stream helpers ──────────────────────────────────────────
+
+
+def _build_synthetic_bars_and_instrument() -> tuple[Any, list[Any]]:
+    """Build the same synthetic bar series used by the cross-gate tests.
+
+    120 daily bars over a price-oscillation pattern (down → up → down)
+    that guarantees a small finite number of MA crosses inside the run
+    window. Used by every test below — keep the bar list small and
+    deterministic so the engine.run() inside ``run_backtest_signal_stream``
+    completes in a second or two.
+    """
+    from datetime import UTC as _UTC
+    from datetime import datetime
+
+    from nautilus_trader.model.data import Bar, BarType
+    from nautilus_trader.model.objects import Price, Quantity
+    from nautilus_trader.test_kit.providers import TestInstrumentProvider
+
+    from src.core import bar_type_str
+
+    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    bar_type_string = bar_type_str(str(instrument.id), "1d")
+    bar_type = BarType.from_str(bar_type_string)
+
+    px_prec = int(instrument.price_precision)
+    qty_prec = int(instrument.size_precision)
+    px_fmt = f"{{:.{px_prec}f}}"
+    qty_fmt = f"{{:.{qty_prec}f}}"
+
+    closes = (
+        [100.0 - i for i in range(30)]
+        + [70.0 + i for i in range(60)]
+        + [130.0 - i for i in range(30)]
+    )
+    base_ns = int(datetime(2024, 1, 1, tzinfo=_UTC).timestamp() * 1e9)
+    one_day_ns = 86_400 * 10**9
+    bars = []
+    for i, c in enumerate(closes):
+        ts = base_ns + i * one_day_ns
+        bars.append(Bar(
+            bar_type,
+            Price.from_str(px_fmt.format(c - 0.5)),
+            Price.from_str(px_fmt.format(c + 1.0)),
+            Price.from_str(px_fmt.format(c - 1.0)),
+            Price.from_str(px_fmt.format(c)),
+            Quantity.from_str(qty_fmt.format(1.0)),
+            ts, ts,
+        ))
+    return instrument, bars
+
+
+class TestRunBacktestSignalStream:
+    """``run_backtest_signal_stream`` should produce one row per bar after warmup."""
+
+    def test_produces_dense_per_bar_stream(self) -> None:
+        from src.core import get_venue_config
+
+        instrument, bars = _build_synthetic_bars_and_instrument()
+        venue_config = get_venue_config("HYPERLIQUID_PERP")
+
+        df = run_backtest_signal_stream(
+            instrument=instrument,
+            bars=bars,
+            venue_config=venue_config,
+            fast_period=3,
+            slow_period=5,
+            ma_type="EMA",
+            leverage=1,
+        )
+
+        # Schema contract — same columns as load_signal_events.
+        assert list(df.columns) == [
+            "ts", "signal", "fast_value", "slow_value", "acted", "bootstrap",
+        ]
+        # 120 bars, slow=5 → expect ~100+ emits after warmup.
+        assert len(df) >= 100, f"got {len(df)} rows, expected ≥100 after warmup"
+        # All signals are +1 or -1 (never 0 — that's the initial state).
+        assert set(df["signal"].unique()).issubset({1, -1})
+        # acted=True bars are a small fraction (one per cross transition).
+        assert df["acted"].sum() < 25, (
+            f"got {df['acted'].sum()} acted bars — gate may be mis-applied"
+        )
+
+    def test_empty_bars_returns_empty_frame_with_schema(self) -> None:
+        from nautilus_trader.test_kit.providers import TestInstrumentProvider
+
+        from src.core import get_venue_config
+
+        instrument = TestInstrumentProvider.btcusdt_perp_binance()
+        venue_config = get_venue_config("HYPERLIQUID_PERP")
+
+        df = run_backtest_signal_stream(
+            instrument=instrument,
+            bars=[],
+            venue_config=venue_config,
+            fast_period=3,
+            slow_period=5,
+        )
+        # Empty result must still have the right columns so downstream
+        # joins don't blow up on KeyError.
+        assert list(df.columns) == [
+            "ts", "signal", "fast_value", "slow_value", "acted", "bootstrap",
+        ]
+        assert df.empty
+
+
+class TestJoinSignalStreams:
+    """Dense-join paper × backtest by bar timestamp."""
+
+    def _make_stream(
+        self,
+        signals: list[tuple[str, int, float, float, bool]],
+    ) -> pd.DataFrame:
+        """Build a tiny signal stream from a list of (ts, sig, fast, slow, acted)."""
+        return pd.DataFrame([
+            {
+                "ts": pd.Timestamp(ts, tz="UTC"),
+                "signal": sig,
+                "fast_value": Decimal(str(fast)),
+                "slow_value": Decimal(str(slow)),
+                "acted": acted,
+                "bootstrap": False,
+            }
+            for ts, sig, fast, slow, acted in signals
+        ])
+
+    def test_perfect_alignment_zero_divergent(self) -> None:
+        """When paper and backtest agree on every bar, divergent count = 0."""
+        signals = [
+            ("2024-01-01T00:00", 1, 100.0, 99.0, True),
+            ("2024-01-01T04:00", 1, 100.1, 99.5, False),
+            ("2024-01-01T08:00", -1, 99.0, 100.0, True),
+        ]
+        paper = self._make_stream(signals)
+        backtest = self._make_stream(signals)
+
+        joined = join_signal_streams(paper, backtest)
+
+        assert len(joined) == 3
+        assert joined["divergent"].sum() == 0
+        assert joined.attrs["paper_only_bars"] == 0
+        assert joined.attrs["bt_only_bars"] == 0
+        assert list(joined.columns) == [
+            "ts",
+            "paper_signal", "paper_acted", "paper_fast", "paper_slow",
+            "bt_signal", "bt_acted", "bt_fast", "bt_slow",
+            "divergent",
+        ] or set(joined.columns) >= {
+            "ts", "paper_signal", "bt_signal", "paper_fast", "bt_fast",
+            "paper_slow", "bt_slow", "paper_acted", "bt_acted", "divergent",
+        }
+
+    def test_disagreement_marks_divergent(self) -> None:
+        """A single bar where paper and backtest disagree flips ``divergent``."""
+        paper = self._make_stream([
+            ("2024-01-01T00:00", 1, 100.0, 99.0, True),
+            ("2024-01-01T04:00", 1, 100.1, 99.5, False),  # paper says LONG
+        ])
+        backtest = self._make_stream([
+            ("2024-01-01T00:00", 1, 100.0, 99.0, True),
+            ("2024-01-01T04:00", -1, 99.5, 100.1, True),  # backtest says SHORT
+        ])
+
+        joined = join_signal_streams(paper, backtest)
+
+        assert len(joined) == 2
+        assert joined.loc[0, "divergent"] is False or joined.loc[0, "divergent"] == False  # noqa: E712
+        assert joined.loc[1, "divergent"] is True or joined.loc[1, "divergent"] == True  # noqa: E712
+
+    def test_unmatched_bars_surface_on_attrs(self) -> None:
+        """Bars present in only one stream show up as paper_only / bt_only counts."""
+        paper = self._make_stream([
+            ("2024-01-01T00:00", 1, 100.0, 99.0, True),
+            ("2024-01-01T04:00", 1, 100.1, 99.5, False),
+            ("2024-01-01T08:00", 1, 100.2, 99.7, False),  # only in paper
+        ])
+        backtest = self._make_stream([
+            ("2024-01-01T00:00", 1, 100.0, 99.0, True),
+            ("2024-01-01T04:00", 1, 100.1, 99.5, False),
+            ("2024-01-01T12:00", -1, 99.0, 100.0, True),  # only in bt
+        ])
+
+        joined = join_signal_streams(paper, backtest)
+
+        assert len(joined) == 2  # only common ts kept
+        assert joined.attrs["paper_only_bars"] == 1
+        assert joined.attrs["bt_only_bars"] == 1
+
+    def test_one_bar_lag_pattern_detected(self) -> None:
+        """The "paper lags backtest by 1 bar" pattern produces a known divergent count.
+
+        Simulates Phase 2.5 finding "paper sees the cross 1 bar later than
+        backtest" — paper's bar-N signal == backtest's bar-(N-1) signal.
+        """
+        bt_signals = [
+            ("2024-01-01T00:00", 1, 100.0, 99.0, True),
+            ("2024-01-01T04:00", 1, 100.0, 99.0, False),
+            ("2024-01-01T08:00", -1, 99.0, 100.0, True),   # backtest flips here
+            ("2024-01-01T12:00", -1, 99.0, 100.0, False),
+        ]
+        # Paper is 1 bar late on the flip — still long at 08:00.
+        paper_signals = [
+            ("2024-01-01T00:00", 1, 100.0, 99.0, True),
+            ("2024-01-01T04:00", 1, 100.0, 99.0, False),
+            ("2024-01-01T08:00", 1, 100.0, 99.5, False),    # still long
+            ("2024-01-01T12:00", -1, 99.0, 100.0, True),    # flips one bar later
+        ]
+        joined = join_signal_streams(
+            self._make_stream(paper_signals),
+            self._make_stream(bt_signals),
+        )
+        assert len(joined) == 4
+        assert joined["divergent"].sum() == 1
+        # The single divergence is at 08:00 — the bar where backtest already
+        # flipped but paper hasn't seen it yet.
+        divergent_ts = joined[joined["divergent"]]["ts"].iloc[0]
+        assert divergent_ts == pd.Timestamp("2024-01-01T08:00", tz="UTC")

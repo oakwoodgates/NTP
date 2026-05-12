@@ -346,6 +346,251 @@ def load_backtest_data(
     return instrument, bars
 
 
+# ── Phase 2.5 signal-stream helpers ──────────────────────────────────────────
+#
+# Used by ``notebooks/review_live_run.ipynb`` to align paper-trade signals
+# (from PG ``signal_events``) against a re-run-of-the-same-window backtest.
+# Designed to feed Phase 2.6's broader live-vs-backtest harness too — same
+# DataFrame schema, same join semantics.
+
+_SIGNAL_STREAM_COLUMNS = (
+    "ts", "signal", "fast_value", "slow_value", "acted", "bootstrap",
+)
+
+
+async def load_signal_events(
+    dsn: str,
+    run_id: str | Any,
+) -> pd.DataFrame:
+    """Load per-bar SignalEvent rows for one paper-trade run.
+
+    Returns one row per bar after indicator warmup, with the gate state
+    the strategy observed live. Pairs with :func:`run_backtest_signal_stream`
+    to produce the dense paper-vs-backtest join.
+
+    Parameters
+    ----------
+    dsn
+        Postgres connection string (``settings.postgres_dsn``).
+    run_id
+        UUID identifying the ``strategy_runs`` row. Pass a string or
+        ``uuid.UUID`` — coerced to UUID for the asyncpg query.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns ``ts`` (UTC timestamp), ``signal`` (int), ``fast_value``
+        (Decimal), ``slow_value`` (Decimal), ``acted`` (bool),
+        ``bootstrap`` (bool), sorted by ``ts`` ascending. Empty (with
+        the right columns) when the run produced no signals.
+
+    """
+    import uuid as _uuid
+
+    import asyncpg
+    import pandas as pd
+
+    if not isinstance(run_id, _uuid.UUID):
+        run_id = _uuid.UUID(str(run_id))
+
+    conn = await asyncpg.connect(dsn)
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT ts, signal, fast_value, slow_value, acted, bootstrap
+            FROM signal_events
+            WHERE run_id = $1
+            ORDER BY ts
+            """,
+            run_id,
+        )
+    finally:
+        await conn.close()
+
+    if not rows:
+        return pd.DataFrame(columns=list(_SIGNAL_STREAM_COLUMNS))
+
+    df = pd.DataFrame([dict(r) for r in rows])
+    df["ts"] = pd.to_datetime(df["ts"], utc=True)
+    return df[list(_SIGNAL_STREAM_COLUMNS)]
+
+
+def run_backtest_signal_stream(
+    *,
+    instrument: Any,
+    bars: list,
+    venue_config: Any,
+    fast_period: int,
+    slow_period: int,
+    ma_type: str = "EMA",
+    starting_capital: int = 1000,
+    trade_notional: Decimal | None = None,
+    leverage: int = 20,
+) -> pd.DataFrame:
+    """Re-run ``MACross`` over a fixed bar window and capture its signal stream.
+
+    Subscribes to ``signals.ma_cross`` on the engine's msgbus BEFORE
+    ``engine.run()`` (the same pre-subscribe pattern as
+    ``_register_account_alive_monitor`` — late wildcard subscriptions
+    miss events whose concrete-topic cache is already populated).
+    Returns a DataFrame with the same schema as :func:`load_signal_events`
+    so the two streams can be joined directly.
+
+    Liquidation simulator is disabled in the backtest to match what
+    the live runner does on testnet (the venue handles liquidation).
+
+    Parameters
+    ----------
+    instrument
+        Configured NT ``Instrument`` (typically from :func:`load_backtest_data`).
+    bars
+        Bar list, pre-filtered to the run window.
+    venue_config
+        Project ``VenueConfig`` for fees + leverage.
+    fast_period, slow_period
+        MA periods — must match what paper trading used.
+    ma_type
+        MA family (``"EMA"``, ``"SMA"``, ``"HMA"``, ``"DEMA"``,
+        ``"AMA"``, ``"VIDYA"``). Must match the paper run.
+    starting_capital, trade_notional, leverage
+        Account sizing — defaults match the project's canonical config.
+        ``trade_notional`` defaults to ``Decimal("2000")``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Same columns as :func:`load_signal_events`.
+
+    """
+    import pandas as pd
+    from nautilus_trader.model.data import BarType
+
+    from src.backtesting import make_engine
+    from src.backtesting.engine import resolve_strategy_liquidation_config
+    from src.core import LiquidationConfig
+    from src.core.signal_event import TOPIC_SIGNAL_MA_CROSS, SignalEvent
+    from src.strategies.ma_cross import MACross, MACrossConfig
+
+    if trade_notional is None:
+        trade_notional = Decimal("2000")
+
+    # NT's make_engine rejects empty bar lists. Return the empty-schema
+    # frame so callers get the expected columns either way.
+    if not bars:
+        return pd.DataFrame(columns=list(_SIGNAL_STREAM_COLUMNS))
+
+    # Disable the liquidation simulator — testnet/live venues handle this
+    # themselves. We're comparing signal generation here, not liquidation.
+    liq_cfg = LiquidationConfig(
+        enabled=False,
+        halt_on_account_liquidation=False,
+        min_trade_notional=Decimal("10"),
+    )
+    liq_res = resolve_strategy_liquidation_config(liq_cfg, venue_config, instrument)
+
+    engine = make_engine(
+        starting_capital=starting_capital,
+        instrument=instrument,
+        bars=bars,
+        venue=instrument.venue,
+        venue_config=venue_config,
+        liquidation=liq_cfg,
+        leverage=leverage,
+    )
+
+    # bars[0].bar_type is the authoritative bar type for the loaded bars;
+    # using anything else risks subscribe-mismatch warnings.
+    bar_type: BarType = bars[0].bar_type if bars else BarType.from_str(
+        f"{instrument.id}-1-DAY-LAST-EXTERNAL",
+    )
+
+    strategy = MACross(MACrossConfig(
+        instrument_id=instrument.id,
+        bar_type=bar_type,
+        fast_period=fast_period,
+        slow_period=slow_period,
+        ma_type=ma_type,
+        trade_notional=trade_notional,
+        liquidation=liq_res,
+    ))
+    engine.add_strategy(strategy)
+
+    captured: list[SignalEvent] = []
+    engine.kernel.msgbus.subscribe(
+        topic=TOPIC_SIGNAL_MA_CROSS,
+        handler=lambda e: captured.append(e) if isinstance(e, SignalEvent) else None,
+    )
+
+    engine.run()
+
+    if not captured:
+        return pd.DataFrame(columns=list(_SIGNAL_STREAM_COLUMNS))
+
+    rows = [
+        {
+            "ts": pd.Timestamp(ev.ts_event, unit="ns", tz="UTC"),
+            "signal": ev.signal,
+            "fast_value": ev.fast_value,
+            "slow_value": ev.slow_value,
+            "acted": ev.acted,
+            "bootstrap": ev.bootstrap,
+        }
+        for ev in captured
+    ]
+    return pd.DataFrame(rows)[list(_SIGNAL_STREAM_COLUMNS)]
+
+
+def join_signal_streams(
+    paper: pd.DataFrame,
+    backtest: pd.DataFrame,
+) -> pd.DataFrame:
+    """Dense inner-join paper-trade signal stream against backtest stream.
+
+    Joined on bar timestamp ``ts``. Bars present in one stream but not
+    the other are surfaced as separate counts on the result attrs
+    (``.attrs["paper_only_bars"]`` / ``.attrs["bt_only_bars"]``) — those
+    are the "signal-skip" cases the roadmap calls out.
+
+    Parameters
+    ----------
+    paper
+        DataFrame from :func:`load_signal_events` (the live/paper stream).
+    backtest
+        DataFrame from :func:`run_backtest_signal_stream`.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``ts``, ``paper_signal``, ``bt_signal``, ``paper_fast``,
+        ``bt_fast``, ``paper_slow``, ``bt_slow``, ``paper_acted``,
+        ``bt_acted``, ``divergent`` (bool: ``paper_signal != bt_signal``).
+        Sorted by ``ts``. Attrs hold the paper-only / bt-only bar counts.
+
+    """
+    paper_indexed = paper.set_index("ts")[
+        ["signal", "fast_value", "slow_value", "acted"]
+    ].add_prefix("paper_")
+    bt_indexed = backtest.set_index("ts")[
+        ["signal", "fast_value", "slow_value", "acted"]
+    ].add_prefix("bt_")
+
+    paper_only = paper_indexed.index.difference(bt_indexed.index)
+    bt_only = bt_indexed.index.difference(paper_indexed.index)
+
+    joined = paper_indexed.join(bt_indexed, how="inner").reset_index()
+    joined = joined.rename(columns={
+        "paper_fast_value": "paper_fast",
+        "paper_slow_value": "paper_slow",
+        "bt_fast_value": "bt_fast",
+        "bt_slow_value": "bt_slow",
+    })
+    joined["divergent"] = joined["paper_signal"] != joined["bt_signal"]
+    joined = joined.sort_values("ts").reset_index(drop=True)
+    joined.attrs["paper_only_bars"] = len(paper_only)
+    joined.attrs["bt_only_bars"] = len(bt_only)
+    return joined
+
+
 def print_setup_summary(
     instrument: Any,
     bars: list,
