@@ -117,8 +117,11 @@ class Settings(BaseSettings):
     """Fast MA period. Default 10 matches the canonical backtest combo
     used in ``notebooks/backtest/ma_cross.ipynb``."""
 
-    ma_slow: int = 40
-    """Slow MA period. Default 40 matches the canonical backtest combo."""
+    ma_slow: int = 100
+    """Slow MA period. Default 100 was data-driven — picked in
+    ``docs/SANDBOX_CONFIG_DECISION.md`` after a BTC/ETH/SOL × 1h/4h
+    sweep over 2024-05 to 2026-03 (the only combo profitable across
+    all three instruments with PF ≥ 1.3 and ≥30 trades/year)."""
 
     ma_type: str = "EMA"
     """MA family for MACross-style strategies. One of EMA/SMA/HMA/DEMA/AMA/VIDYA.

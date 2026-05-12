@@ -33,7 +33,7 @@ class TestSettings:
         assert s.liquidation_min_trade_notional == Decimal("10")
         # Strategy hyperparameters — flow into sandbox/live runners.
         assert s.ma_fast == 10
-        assert s.ma_slow == 40
+        assert s.ma_slow == 100
         assert s.ma_type == "EMA"
         assert s.macross_atr_period == 14
         assert s.macross_atr_sl_mult == 1.5

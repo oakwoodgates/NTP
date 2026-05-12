@@ -42,6 +42,28 @@ NT's MessageBus dispatches events synchronously on a single thread. Any blocking
 ### Pin NT Version
 NT is pre-v2.0 with breaking changes between releases. The version is pinned in `pyproject.toml`. Never upgrade without testing in a branch first.
 
+### Findings and Decision Outputs Stay Local — Never Commit to Public Repo
+This is a public GitHub repo. **Never commit research findings, picked configs, backtest result numbers, verdict files, or run summaries** — those constitute the project's edge and must not leak.
+
+**Do NOT commit (these go to `reports/` which is `.gitignore`d):**
+- Decision docs naming a picked strategy + params + measured PnL/PF/drawdown (e.g. `SANDBOX_CONFIG_DECISION.md`)
+- Phase verdict docs (`PHASE_2_5_VERDICT.md`, `PHASE_2_6_VERDICT.md`, etc.) with measured numbers
+- Per-(instrument, combo) validate verdict JSONs from `reports/validate/`
+- Sweep parquets and HTML reports (already in gitignored `data/sweeps/` and `reports/sweeps/`)
+- Anything that says "config X works on instrument Y at level Z" with attached numbers
+- Live/paper-trade run summaries with PnL
+
+**OK to commit (tooling, not findings):**
+- Scripts that PRODUCE findings (e.g. `scripts/rank_sandbox_candidates.py`, `scripts/batch_backtest.py`)
+- Schema migrations, helpers, infrastructure code
+- General docs (ROADMAP, CONFIG, PAPER_TRADING_GUIDE, STRATEGY_ENTRY_RULES) that explain HOW the system works without naming a specific picked config
+- Test code
+- Default settings values can change (`MA_SLOW: 40 → 100`) without explaining the data-driven reason in a public commit message — the reason lives in `reports/decisions/`
+
+**Where findings DO live:** `reports/decisions/<NAME>.md` (gitignored). Reference the path from PR descriptions when needed for review, but don't paste contents.
+
+**If you're unsure, don't push. Ask the user.** This rule applies to every PR, every commit message, every code comment. Commit messages should reference WHAT changed (e.g. "data-driven MA_SLOW default") not WHAT was measured ("BTC PnL 74.7%/yr at fast=10/slow=100").
+
 ### Module Dependency Direction
 Dependencies flow inward. Outer layers depend on inner layers, never the reverse.
 
