@@ -32,6 +32,7 @@ if str(_NOTEBOOKS_DIR) not in sys.path:
 from utils import (  # type: ignore[import-not-found] # noqa: E402
     baselines_for_strategy,
     build_verdict_matrix,
+    compare_position_streams,
     join_signal_streams,
     load_sweeps_filtered,
     load_verdict_jsons,
@@ -39,6 +40,7 @@ from utils import (  # type: ignore[import-not-found] # noqa: E402
     print_liquidation_resolution,
     print_sweep_liquidation_diagnostics,
     print_validation_verdict,
+    run_backtest_position_stream,
     run_backtest_signal_stream,
     save_notebook_snapshot,
     wilson_score_interval,
@@ -1833,3 +1835,191 @@ class TestJoinSignalStreams:
         # flipped but paper hasn't seen it yet.
         divergent_ts = joined[joined["divergent"]]["ts"].iloc[0]
         assert divergent_ts == pd.Timestamp("2024-01-01T08:00", tz="UTC")
+
+
+# ── Phase 2.6 Tool 1 position-stream helpers ─────────────────────────────────
+
+
+class TestRunBacktestPositionStream:
+    """``run_backtest_position_stream`` returns one row per closed position."""
+
+    def test_produces_position_stream(self) -> None:
+        from src.core import get_venue_config
+
+        instrument, bars = _build_synthetic_bars_and_instrument()
+        venue_config = get_venue_config("HYPERLIQUID_PERP")
+
+        df = run_backtest_position_stream(
+            instrument=instrument,
+            bars=bars,
+            venue_config=venue_config,
+            fast_period=3,
+            slow_period=5,
+            ma_type="EMA",
+            leverage=1,
+        )
+
+        # Schema contract — same columns as load_paper_positions.
+        assert list(df.columns) == [
+            "ts_opened", "ts_closed", "entry_side", "peak_qty",
+            "avg_px_open", "avg_px_close", "realized_pnl", "realized_return",
+            "duration_ns",
+        ]
+        # 120 bars + clear crosses → at least a couple of closed positions.
+        assert len(df) >= 1, f"got {len(df)} closed positions"
+        # Direction encoding matches the PG schema convention.
+        assert set(df["entry_side"].unique()).issubset({"BUY", "SELL"})
+        # ts_opened must precede ts_closed for every row.
+        assert (df["ts_closed"] >= df["ts_opened"]).all()
+
+    def test_empty_bars_returns_empty_frame_with_schema(self) -> None:
+        from nautilus_trader.test_kit.providers import TestInstrumentProvider
+
+        from src.core import get_venue_config
+
+        instrument = TestInstrumentProvider.btcusdt_perp_binance()
+        venue_config = get_venue_config("HYPERLIQUID_PERP")
+
+        df = run_backtest_position_stream(
+            instrument=instrument,
+            bars=[],
+            venue_config=venue_config,
+            fast_period=3,
+            slow_period=5,
+        )
+        assert list(df.columns) == [
+            "ts_opened", "ts_closed", "entry_side", "peak_qty",
+            "avg_px_open", "avg_px_close", "realized_pnl", "realized_return",
+            "duration_ns",
+        ]
+        assert df.empty
+
+
+class TestComparePositionStreams:
+    """Paper × backtest position match by entry time, with gap columns."""
+
+    def _make_positions(
+        self,
+        rows: list[tuple[str, str, str, float, float, float]],
+    ) -> pd.DataFrame:
+        """Build a tiny position stream from (ts_opened, ts_closed, side, px_open, px_close, pnl) tuples."""
+        return pd.DataFrame([
+            {
+                "ts_opened": pd.Timestamp(opened, tz="UTC"),
+                "ts_closed": pd.Timestamp(closed, tz="UTC"),
+                "entry_side": side,
+                "peak_qty": Decimal("0.1"),
+                "avg_px_open": Decimal(str(px_open)),
+                "avg_px_close": Decimal(str(px_close)),
+                "realized_pnl": Decimal(str(pnl)),
+                "realized_return": Decimal("0"),
+                "duration_ns": 86_400 * 10**9,
+            }
+            for opened, closed, side, px_open, px_close, pnl in rows
+        ])
+
+    def test_perfect_alignment_zero_gaps(self) -> None:
+        rows = [
+            ("2024-01-01T00:00", "2024-01-02T00:00", "BUY", 100.0, 110.0, 1.0),
+            ("2024-01-05T00:00", "2024-01-06T00:00", "SELL", 110.0, 105.0, 0.5),
+        ]
+        paper = self._make_positions(rows)
+        backtest = self._make_positions(rows)
+
+        result = compare_position_streams(paper, backtest, tol=1.0, tol_unit="bars")
+
+        assert len(result) == 2
+        assert (result["entry_time_gap_s"] == 0.0).all()
+        assert (result["entry_px_gap_bps"].abs() < 1e-6).all()
+        assert (result["pnl_gap"].abs() < 1e-6).all()
+        assert result.attrs["paper_unmatched"] == 0
+        assert result.attrs["bt_unmatched"] == 0
+
+    def test_paper_lags_by_one_bar_quantified(self) -> None:
+        """Paper opens 4h later → entry_time_gap_s == bar_seconds (14400)."""
+        backtest_rows = [
+            ("2024-01-01T00:00", "2024-01-02T00:00", "BUY", 100.0, 110.0, 1.0),
+        ]
+        paper_rows = [
+            # Same position, shifted 4h later (= 1 bar at 4h)
+            ("2024-01-01T04:00", "2024-01-02T04:00", "BUY", 100.5, 110.5, 0.95),
+        ]
+        result = compare_position_streams(
+            self._make_positions(paper_rows),
+            self._make_positions(backtest_rows),
+            tol=1.0, tol_unit="bars", bar_seconds=14_400,
+        )
+
+        assert len(result) == 1
+        assert result["entry_time_gap_s"].iloc[0] == 14_400.0
+        # 100.5 vs 100 → +50 bps
+        assert abs(result["entry_px_gap_bps"].iloc[0] - 50.0) < 1e-6
+        # Paper PnL 0.95 vs backtest 1.0 → gap = -0.05
+        assert abs(result["pnl_gap"].iloc[0] - (-0.05)) < 1e-6
+
+    def test_tolerance_rejects_too_distant_match(self) -> None:
+        """Paper opens 8h later with tol=1 bar (4h) → no match."""
+        bt = self._make_positions([
+            ("2024-01-01T00:00", "2024-01-02T00:00", "BUY", 100.0, 110.0, 1.0),
+        ])
+        pp = self._make_positions([
+            ("2024-01-01T08:00", "2024-01-02T08:00", "BUY", 100.0, 110.0, 1.0),
+        ])
+        result = compare_position_streams(
+            pp, bt, tol=1.0, tol_unit="bars", bar_seconds=14_400,
+        )
+        # Match window is ±4h (±tol*bar_seconds); 8h is outside.
+        assert len(result) == 0
+        assert result.attrs["paper_unmatched"] == 1
+        assert result.attrs["bt_unmatched"] == 1
+
+    def test_direction_must_match(self) -> None:
+        """Paper LONG vs backtest SHORT at same ts → not matched (by= clause)."""
+        bt = self._make_positions([
+            ("2024-01-01T00:00", "2024-01-02T00:00", "SELL", 100.0, 95.0, 0.5),
+        ])
+        pp = self._make_positions([
+            ("2024-01-01T00:00", "2024-01-02T00:00", "BUY", 100.0, 110.0, 1.0),
+        ])
+        result = compare_position_streams(pp, bt, tol=1.0, tol_unit="bars")
+        # merge_asof's by= clause partitions on entry_side; opposite-direction
+        # rows can't pair up. Both surface as unmatched.
+        assert len(result) == 0
+        assert result.attrs["paper_unmatched"] == 1
+        assert result.attrs["bt_unmatched"] == 1
+
+    def test_unmatched_bars_surface_on_attrs(self) -> None:
+        bt = self._make_positions([
+            ("2024-01-01T00:00", "2024-01-02T00:00", "BUY", 100.0, 110.0, 1.0),
+            ("2024-01-05T00:00", "2024-01-06T00:00", "SELL", 110.0, 105.0, 0.5),
+            ("2024-01-10T00:00", "2024-01-11T00:00", "BUY", 105.0, 108.0, 0.3),  # only bt
+        ])
+        pp = self._make_positions([
+            ("2024-01-01T00:00", "2024-01-02T00:00", "BUY", 100.0, 110.0, 1.0),
+            ("2024-01-05T00:00", "2024-01-06T00:00", "SELL", 110.0, 105.0, 0.5),
+            ("2024-01-15T00:00", "2024-01-16T00:00", "BUY", 100.0, 103.0, 0.3),  # only paper
+        ])
+        result = compare_position_streams(pp, bt, tol=1.0, tol_unit="bars")
+
+        assert len(result) == 2  # the two matching pairs
+        assert result.attrs["paper_unmatched"] == 1
+        assert result.attrs["bt_unmatched"] == 1
+
+    def test_empty_streams_return_empty_with_schema(self) -> None:
+        empty = pd.DataFrame()
+        result = compare_position_streams(empty, empty, tol=1.0, tol_unit="bars")
+        assert result.empty
+        assert "entry_time_gap_s" in result.columns
+        assert "entry_px_gap_bps" in result.columns
+        assert "pnl_gap" in result.columns
+        assert result.attrs["paper_unmatched"] == 0
+        assert result.attrs["bt_unmatched"] == 0
+
+    def test_invalid_tol_unit_raises(self) -> None:
+        rows = [("2024-01-01T00:00", "2024-01-02T00:00", "BUY", 100.0, 110.0, 1.0)]
+        with pytest.raises(ValueError, match="tol_unit must be"):
+            compare_position_streams(
+                self._make_positions(rows),
+                self._make_positions(rows),
+                tol=1.0, tol_unit="weeks",
+            )

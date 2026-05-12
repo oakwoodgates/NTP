@@ -591,6 +591,319 @@ def join_signal_streams(
     return joined
 
 
+# ── Phase 2.6 Tool 1: paper-vs-backtest position comparison ──────────────────
+#
+# Position-level comparison answers all four Phase 2.6 Tool 1 questions:
+#   - Fill-time gap   → paper.ts_opened - backtest.ts_opened
+#   - Fill-price gap  → (paper.avg_px_open - bt.avg_px_open) / bt.avg_px_open
+#   - Signal-skip rate → paper-only / bt-only positions in the match table
+#   - PnL gap per matched trade → paper.realized_pnl - bt.realized_pnl
+# Position rows already aggregate over fills, so flip-induced ambiguity at
+# the fill level (two same-direction fills per signal) doesn't matter here.
+
+_POSITION_STREAM_COLUMNS = (
+    "ts_opened", "ts_closed", "entry_side", "peak_qty",
+    "avg_px_open", "avg_px_close", "realized_pnl", "realized_return",
+    "duration_ns",
+)
+
+
+async def load_paper_positions(
+    dsn: str,
+    run_id: str | Any,
+) -> pd.DataFrame:
+    """Load closed-position rows for one paper-trade run.
+
+    Mirrors :func:`load_signal_events`. Pairs with
+    :func:`run_backtest_position_stream` to produce the Phase 2.6 Tool 1
+    paper-vs-backtest comparison.
+
+    Parameters
+    ----------
+    dsn
+        Postgres connection string (``settings.postgres_dsn``).
+    run_id
+        UUID identifying the ``strategy_runs`` row.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns: ``ts_opened`` (UTC), ``ts_closed`` (UTC), ``entry_side``
+        (``"BUY"``/``"SELL"``), ``peak_qty`` (Decimal), ``avg_px_open``
+        (Decimal), ``avg_px_close`` (Decimal), ``realized_pnl`` (Decimal),
+        ``realized_return`` (Decimal), ``duration_ns`` (int). Sorted by
+        ``ts_opened``. Empty (with the right columns) when the run
+        produced no closed positions.
+
+    """
+    import uuid as _uuid
+
+    import asyncpg
+    import pandas as pd
+
+    if not isinstance(run_id, _uuid.UUID):
+        run_id = _uuid.UUID(str(run_id))
+
+    conn = await asyncpg.connect(dsn)
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT ts_opened, ts_closed, entry_side, peak_qty,
+                   avg_px_open, avg_px_close,
+                   realized_pnl, realized_return, duration_ns
+            FROM positions
+            WHERE run_id = $1
+            ORDER BY ts_opened
+            """,
+            run_id,
+        )
+    finally:
+        await conn.close()
+
+    if not rows:
+        return pd.DataFrame(columns=list(_POSITION_STREAM_COLUMNS))
+
+    df = pd.DataFrame([dict(r) for r in rows])
+    df["ts_opened"] = pd.to_datetime(df["ts_opened"], utc=True)
+    df["ts_closed"] = pd.to_datetime(df["ts_closed"], utc=True)
+    return df[list(_POSITION_STREAM_COLUMNS)]
+
+
+def run_backtest_position_stream(
+    *,
+    instrument: Any,
+    bars: list,
+    venue_config: Any,
+    fast_period: int,
+    slow_period: int,
+    ma_type: str = "EMA",
+    starting_capital: int = 1000,
+    trade_notional: Decimal | None = None,
+    leverage: int = 20,
+) -> pd.DataFrame:
+    """Re-run ``MACross`` and extract its closed positions as a stream.
+
+    Pairs with :func:`load_paper_positions`; returns the same schema so
+    the two streams can feed :func:`compare_position_streams` directly.
+
+    Liquidation simulator is disabled — matches the live runner behaviour
+    on testnet (venue handles liquidation), so the backtest comparison
+    isolates strategy + matching-engine effects from simulator artefacts.
+
+    Parameters
+    ----------
+    instrument, bars, venue_config
+        Same as :func:`run_backtest_signal_stream`.
+    fast_period, slow_period, ma_type
+        MA params — must match the paper run.
+    starting_capital, trade_notional, leverage
+        Account sizing. ``trade_notional`` defaults to ``Decimal("2000")``.
+
+    Returns
+    -------
+    pd.DataFrame
+        Same columns as :func:`load_paper_positions`.
+
+    """
+    import pandas as pd
+    from nautilus_trader.core.rust.model import PositionSide
+    from nautilus_trader.model.data import BarType
+
+    from src.backtesting import make_engine
+    from src.backtesting.engine import resolve_strategy_liquidation_config
+    from src.core import LiquidationConfig
+    from src.strategies.ma_cross import MACross, MACrossConfig
+
+    if trade_notional is None:
+        trade_notional = Decimal("2000")
+
+    if not bars:
+        return pd.DataFrame(columns=list(_POSITION_STREAM_COLUMNS))
+
+    liq_cfg = LiquidationConfig(
+        enabled=False,
+        halt_on_account_liquidation=False,
+        min_trade_notional=Decimal("10"),
+    )
+    liq_res = resolve_strategy_liquidation_config(liq_cfg, venue_config, instrument)
+
+    engine = make_engine(
+        starting_capital=starting_capital,
+        instrument=instrument,
+        bars=bars,
+        venue=instrument.venue,
+        venue_config=venue_config,
+        liquidation=liq_cfg,
+        leverage=leverage,
+    )
+    bar_type: BarType = bars[0].bar_type
+    strategy = MACross(MACrossConfig(
+        instrument_id=instrument.id,
+        bar_type=bar_type,
+        fast_period=fast_period,
+        slow_period=slow_period,
+        ma_type=ma_type,
+        trade_notional=trade_notional,
+        liquidation=liq_res,
+    ))
+    engine.add_strategy(strategy)
+    engine.run()
+
+    # NETTING-mode position stats: closed positions are stored as
+    # snapshots; only the current open Position is in .positions().
+    # Per CLAUDE.md, the union of the two is the right thing to query
+    # for "all positions this run produced."
+    all_positions = list(engine.cache.position_snapshots()) + list(engine.cache.positions())
+    closed = [p for p in all_positions if p.is_closed]
+
+    if not closed:
+        return pd.DataFrame(columns=list(_POSITION_STREAM_COLUMNS))
+
+    rows = [
+        {
+            "ts_opened": pd.Timestamp(p.ts_opened, unit="ns", tz="UTC"),
+            "ts_closed": pd.Timestamp(p.ts_closed, unit="ns", tz="UTC"),
+            # PositionSide.LONG → entry_side "BUY"; SHORT → "SELL". Matches
+            # the convention in ``src/persistence/schema.py``.
+            "entry_side": "BUY" if p.entry == PositionSide.LONG else "SELL",
+            "peak_qty": Decimal(str(p.peak_qty)),
+            "avg_px_open": Decimal(str(p.avg_px_open)),
+            "avg_px_close": Decimal(str(p.avg_px_close)),
+            "realized_pnl": (
+                Decimal(str(p.realized_pnl.as_decimal()))
+                if p.realized_pnl is not None else Decimal("0")
+            ),
+            "realized_return": Decimal(str(p.realized_return)),
+            "duration_ns": int(p.duration_ns),
+        }
+        for p in closed
+    ]
+    df = pd.DataFrame(rows).sort_values("ts_opened").reset_index(drop=True)
+    return df[list(_POSITION_STREAM_COLUMNS)]
+
+
+def compare_position_streams(
+    paper: pd.DataFrame,
+    backtest: pd.DataFrame,
+    *,
+    tol: Decimal | float = 1.0,
+    tol_unit: str = "bars",
+    bar_seconds: int = 14_400,
+) -> pd.DataFrame:
+    """Nearest-match paper vs backtest positions by entry time.
+
+    For each paper position, finds the backtest position with the closest
+    ``ts_opened`` that falls within ``tol`` (bars or seconds, controlled
+    by ``tol_unit``). Unmatched positions on either side are surfaced as
+    counts on the result's ``.attrs``.
+
+    Parameters
+    ----------
+    paper
+        DataFrame from :func:`load_paper_positions`.
+    backtest
+        DataFrame from :func:`run_backtest_position_stream`.
+    tol
+        Match tolerance for entry-time difference.
+    tol_unit
+        ``"bars"`` (multiplied by ``bar_seconds``) or ``"seconds"``.
+    bar_seconds
+        Seconds per bar — defaults to 14400 (4h), the canonical config.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per matched pair plus columns: ``entry_time_gap_s`` (paper
+        minus backtest, seconds; positive = paper later), ``entry_px_gap_bps``
+        ((paper - bt) / bt * 10000), ``pnl_gap`` (paper - bt, USDC).
+        Attrs: ``paper_unmatched`` and ``bt_unmatched`` counts.
+
+    """
+    import pandas as pd
+
+    if tol_unit not in ("bars", "seconds"):
+        raise ValueError(f"tol_unit must be 'bars' or 'seconds', got {tol_unit!r}")
+
+    tol_seconds = float(tol) * bar_seconds if tol_unit == "bars" else float(tol)
+    tol_delta = pd.Timedelta(seconds=tol_seconds)
+
+    if paper.empty or backtest.empty:
+        result = pd.DataFrame(columns=[
+            "ts_opened_paper", "ts_opened_bt", "entry_side",
+            "paper_px_open", "bt_px_open", "entry_px_gap_bps",
+            "paper_pnl", "bt_pnl", "pnl_gap",
+            "entry_time_gap_s",
+        ])
+        result.attrs["paper_unmatched"] = len(paper)
+        result.attrs["bt_unmatched"] = len(backtest)
+        return result
+
+    paper_sorted = paper.sort_values("ts_opened").reset_index(drop=True)
+    bt_sorted = backtest.sort_values("ts_opened").reset_index(drop=True)
+
+    # pandas.merge_asof handles nearest-match with tolerance natively.
+    matched = pd.merge_asof(
+        paper_sorted.rename(columns={
+            "ts_opened": "ts_opened_paper",
+            "avg_px_open": "paper_px_open",
+            "realized_pnl": "paper_pnl",
+        }),
+        bt_sorted.rename(columns={
+            "ts_opened": "ts_opened_bt",
+            "avg_px_open": "bt_px_open",
+            "realized_pnl": "bt_pnl",
+        })[["ts_opened_bt", "entry_side", "bt_px_open", "bt_pnl"]],
+        left_on="ts_opened_paper",
+        right_on="ts_opened_bt",
+        by="entry_side",
+        direction="nearest",
+        tolerance=tol_delta,
+    )
+
+    # Rows where merge_asof found no match within tolerance have NaN
+    # on the bt_* columns; drop them and count separately.
+    matched_clean = matched.dropna(subset=["ts_opened_bt"]).copy()
+    paper_unmatched = len(matched) - len(matched_clean)
+
+    # Backtest positions never paired up against any paper position.
+    matched_bt_ts = set(matched_clean["ts_opened_bt"])
+    bt_unmatched = sum(1 for ts in bt_sorted["ts_opened"] if ts not in matched_bt_ts)
+
+    if matched_clean.empty:
+        result = pd.DataFrame(columns=[
+            "ts_opened_paper", "ts_opened_bt", "entry_side",
+            "paper_px_open", "bt_px_open", "entry_px_gap_bps",
+            "paper_pnl", "bt_pnl", "pnl_gap",
+            "entry_time_gap_s",
+        ])
+        result.attrs["paper_unmatched"] = paper_unmatched
+        result.attrs["bt_unmatched"] = bt_unmatched
+        return result
+
+    matched_clean["entry_time_gap_s"] = (
+        (matched_clean["ts_opened_paper"] - matched_clean["ts_opened_bt"])
+        .dt.total_seconds()
+    )
+    bt_px = matched_clean["bt_px_open"].astype(float)
+    matched_clean["entry_px_gap_bps"] = (
+        (matched_clean["paper_px_open"].astype(float) - bt_px) / bt_px * 10_000
+    )
+    matched_clean["pnl_gap"] = (
+        matched_clean["paper_pnl"].astype(float)
+        - matched_clean["bt_pnl"].astype(float)
+    )
+
+    result = matched_clean[[
+        "ts_opened_paper", "ts_opened_bt", "entry_side",
+        "paper_px_open", "bt_px_open", "entry_px_gap_bps",
+        "paper_pnl", "bt_pnl", "pnl_gap",
+        "entry_time_gap_s",
+    ]].reset_index(drop=True)
+    result.attrs["paper_unmatched"] = paper_unmatched
+    result.attrs["bt_unmatched"] = bt_unmatched
+    return result
+
+
 def print_setup_summary(
     instrument: Any,
     bars: list,
