@@ -677,7 +677,7 @@ def print_baselines_verdict(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def classify_position_exits(positions: list, engine: Any) -> "pd.DataFrame":
+def classify_position_exits(positions: list, engine: Any) -> pd.DataFrame:
     """Classify each closed position by what closed it.
 
     For every position in *positions* that is closed, looks up the closing
@@ -844,7 +844,7 @@ def _first_opening_order_id(pos: Any) -> Any:
 def find_account_liq_culprit(
     account_liq_events: list,
     positions: list,
-    account_report: "pd.DataFrame",
+    account_report: pd.DataFrame,
 ) -> dict[str, Any]:
     """Identify the position(s) that drained the account to liquidation.
 
@@ -1176,7 +1176,7 @@ def load_verdict_jsons(
 
 def build_verdict_matrix(
     verdicts: list[dict[str, Any]],
-) -> "pd.DataFrame":
+) -> pd.DataFrame:
     """Compile a list of verdict dicts into a comparison-matrix DataFrame.
 
     Each row is one validate run.  Columns:
@@ -1368,10 +1368,7 @@ def load_sweeps_filtered(
         kwargs["instrument_id"] = instrument_id
     if bar_interval is not None:
         kwargs["bar_interval"] = bar_interval
-    if sweep_dir is not None:
-        sweeps = load_sweeps(sweep_dir, **kwargs)
-    else:
-        sweeps = load_sweeps(**kwargs)
+    sweeps = load_sweeps(sweep_dir, **kwargs) if sweep_dir is not None else load_sweeps(**kwargs)
 
     if not sweeps:
         return sweeps
