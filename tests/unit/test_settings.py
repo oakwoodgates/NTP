@@ -31,11 +31,37 @@ class TestSettings:
         assert s.default_stop_pct == 0.05
         assert s.liquidation_enabled is True
         assert s.liquidation_min_trade_notional == Decimal("10")
+        # Strategy hyperparameters — flow into sandbox/live runners.
+        assert s.ma_fast == 10
+        assert s.ma_slow == 40
+        assert s.ma_type == "EMA"
+        assert s.macross_atr_period == 14
+        assert s.macross_atr_sl_mult == 1.5
+        assert s.macross_atr_tp_mult == 3.0
+        assert s.macdrsi_macd_fast == 12
+        assert s.macdrsi_macd_slow == 26
+        assert s.macdrsi_macd_signal == 9
+        assert s.macdrsi_rsi_period == 14
         # Default test universe.
         assert s.default_assets == ["BTC", "ETH", "SOL"]
         assert s.default_intervals == ["4h", "1d"]
         # Back-compat alias.
         assert s.starting_balance == 1000
+
+    def test_strategy_hyperparams_overridable(self) -> None:
+        s = Settings(
+            postgres_password="test",
+            ma_fast=20,
+            ma_slow=80,
+            ma_type="HMA",
+            macross_atr_sl_mult=2.5,
+            macdrsi_rsi_period=10,
+        )
+        assert s.ma_fast == 20
+        assert s.ma_slow == 80
+        assert s.ma_type == "HMA"
+        assert s.macross_atr_sl_mult == 2.5
+        assert s.macdrsi_rsi_period == 10
 
     def test_postgres_dsn(self) -> None:
         s = Settings(

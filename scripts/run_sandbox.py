@@ -32,15 +32,17 @@ from nautilus_trader.adapters.sandbox.factory import SandboxLiveExecClientFactor
 from nautilus_trader.cache.config import CacheConfig
 from nautilus_trader.common.config import DatabaseConfig, InstrumentProviderConfig, LoggingConfig
 from nautilus_trader.config import TradingNodeConfig
+from nautilus_trader.core.rust.model import TradingState
 from nautilus_trader.live.config import LiveExecEngineConfig
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.data import BarType
 from nautilus_trader.model.identifiers import InstrumentId
 
+from src.actors.account_alive import AccountAliveMonitor, AccountAliveMonitorConfig
 from src.actors.alert import AlertActor, AlertActorConfig
 from src.actors.persistence import PersistenceActor, PersistenceActorConfig
-from src.config.settings import get_settings
-from src.core import bar_type_str
+from src.config.settings import Settings, get_settings
+from src.core import bar_type_str, get_venue_config
 
 RUN_MODE = "sandbox"
 
@@ -50,19 +52,23 @@ def _build_strategy(
     instrument_id: InstrumentId,
     bar_type: BarType,
     trade_notional: Decimal,
+    settings: Settings,
 ) -> tuple[object, str, dict[str, object]]:
-    """Build the selected strategy with default parameters.
+    """Build the selected strategy with hyperparameters from ``settings``.
 
-    To customize strategy-specific parameters, edit the defaults below.
+    Family-specific aliases (``EMACross``, ``SMACross``, ...) pin the MA
+    family by their name; the generic ``MACross`` reads ``settings.ma_type``.
+    All shared hyperparameters (fast/slow periods, ATR multipliers, MACD/RSI
+    lookbacks) come from ``settings`` — see :class:`src.config.settings.Settings`.
     """
-    _ma_cross_types = {
-        "MACross": "EMA", "EMACross": "EMA", "SMACross": "SMA", "HMACross": "HMA",
+    _ma_cross_aliases = {
+        "EMACross": "EMA", "SMACross": "SMA", "HMACross": "HMA",
         "DEMACross": "DEMA", "AMACross": "AMA", "VIDYACross": "VIDYA",
     }
-    if strategy_name in _ma_cross_types:
+    if strategy_name == "MACross" or strategy_name in _ma_cross_aliases:
         from src.strategies.ma_cross import MACross, MACrossConfig
-        ma_type = _ma_cross_types[strategy_name]
-        fast, slow = 5, 45
+        ma_type = _ma_cross_aliases.get(strategy_name, settings.ma_type)
+        fast, slow = settings.ma_fast, settings.ma_slow
         return MACross(MACrossConfig(
             instrument_id=instrument_id,
             bar_type=bar_type,
@@ -74,16 +80,14 @@ def _build_strategy(
             "ma_type": ma_type, "fast": fast, "slow": slow, "notional": str(trade_notional),
         }
 
-    _ma_cross_lo_types = {
-        "MACrossLongOnly": "EMA", "EMACrossLongOnly": "EMA",
-        "SMACrossLongOnly": "SMA", "HMACrossLongOnly": "HMA",
-        "DEMACrossLongOnly": "DEMA", "AMACrossLongOnly": "AMA",
-        "VIDYACrossLongOnly": "VIDYA",
+    _ma_cross_lo_aliases = {
+        "EMACrossLongOnly": "EMA", "SMACrossLongOnly": "SMA", "HMACrossLongOnly": "HMA",
+        "DEMACrossLongOnly": "DEMA", "AMACrossLongOnly": "AMA", "VIDYACrossLongOnly": "VIDYA",
     }
-    if strategy_name in _ma_cross_lo_types:
+    if strategy_name == "MACrossLongOnly" or strategy_name in _ma_cross_lo_aliases:
         from src.strategies.ma_cross_long_only import MACrossLongOnly, MACrossLongOnlyConfig
-        ma_type = _ma_cross_lo_types[strategy_name]
-        fast, slow = 10, 20
+        ma_type = _ma_cross_lo_aliases.get(strategy_name, settings.ma_type)
+        fast, slow = settings.ma_fast, settings.ma_slow
         return MACrossLongOnly(MACrossLongOnlyConfig(
             instrument_id=instrument_id,
             bar_type=bar_type,
@@ -97,8 +101,9 @@ def _build_strategy(
 
     if strategy_name == "MACrossATR":
         from src.strategies.ma_cross_atr import MACrossATR, MACrossATRConfig
-        fast, slow, atr = 20, 50, 14
-        sl_mult, tp_mult = 1.5, 3.0
+        fast, slow = settings.ma_fast, settings.ma_slow
+        atr = settings.macross_atr_period
+        sl_mult, tp_mult = settings.macross_atr_sl_mult, settings.macross_atr_tp_mult
         return MACrossATR(MACrossATRConfig(
             instrument_id=instrument_id,
             bar_type=bar_type,
@@ -115,18 +120,21 @@ def _build_strategy(
 
     if strategy_name == "MACDRSI":
         from src.strategies.macd_rsi import MACDRSI, MACDRSIConfig
-        macd_fast, macd_slow, signal, rsi = 12, 26, 9, 14
+        macd_fast = settings.macdrsi_macd_fast
+        macd_slow = settings.macdrsi_macd_slow
+        signal_period = settings.macdrsi_macd_signal
+        rsi = settings.macdrsi_rsi_period
         return MACDRSI(MACDRSIConfig(
             instrument_id=instrument_id,
             bar_type=bar_type,
             trade_notional=trade_notional,
             macd_fast_period=macd_fast,
             macd_slow_period=macd_slow,
-            macd_signal_period=signal,
+            macd_signal_period=signal_period,
             rsi_period=rsi,
-        )), f"MACDRSI-{macd_fast}-{macd_slow}-{signal}-{rsi}", {
+        )), f"MACDRSI-{macd_fast}-{macd_slow}-{signal_period}-{rsi}", {
             "macd_fast": macd_fast, "macd_slow": macd_slow,
-            "signal": signal, "rsi": rsi, "notional": str(trade_notional),
+            "signal": signal_period, "rsi": rsi, "notional": str(trade_notional),
         }
 
     valid = [
@@ -160,7 +168,7 @@ def main() -> None:
 
     strategy, strategy_id, config_dict = _build_strategy(
         settings.strategy, instrument_id, bar_type,
-        settings.trade_notional,
+        settings.trade_notional, settings,
     )
 
     print(f"Starting {RUN_MODE} run: {strategy_id} on {instrument_id} ({settings.bar_interval})")
@@ -224,10 +232,44 @@ def main() -> None:
         instrument_id=instrument_id_str,
     )))
 
+    # AccountAliveMonitor — halts the trader when equity drops below the
+    # alive floor. Wired in sandbox only; run_live.py leaves it disabled
+    # because the real venue handles its own liquidation. See the matching
+    # pattern in src/backtesting/engine.py:_register_account_alive_monitor.
+    venue_config = get_venue_config(settings.exec_venue)
+    monitor = AccountAliveMonitor(
+        AccountAliveMonitorConfig(
+            venue="HYPERLIQUID",
+            settlement_currency=venue_config.settlement_currency,
+            venue_leverage=settings.leverage,
+            min_trade_notional=settings.liquidation_min_trade_notional,
+            fee_rate=venue_config.taker_fee,
+            alive_trades_buffer=1,
+        ),
+        # Lazy callback — resolves node.trader.kernel.risk_engine at fire
+        # time, after node.build() has populated it.
+        halt_callback=lambda: node.trader.kernel.risk_engine.set_trading_state(
+            TradingState.HALTED,
+        ),
+    )
+    node.trader.add_actor(monitor)
+
     # Add strategy
     node.trader.add_strategy(strategy)
 
     node.build()
+
+    # NT MessageBus caches concrete-topic → subscriber lists on first publish.
+    # The exec client publishes an initial AccountState as soon as it starts;
+    # a wildcard subscription added later (e.g. inside actor.on_start during
+    # node.run()) misses that and any subsequent AccountState whose cache is
+    # already populated. Subscribe BEFORE node.run(). See the long comment
+    # at _register_account_alive_monitor in src/backtesting/engine.py for
+    # the full mechanics.
+    node.trader.kernel.msgbus.subscribe(
+        topic="events.account.*",
+        handler=monitor._on_account_state,
+    )
     interrupted = False
     try:
         node.run()

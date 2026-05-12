@@ -24,6 +24,7 @@ from nautilus_trader.trading.strategy import Strategy
 from src.core.liquidation import LiquidationConfig  # noqa: TC001
 from src.core.liquidation_mixin import LiquidationAware
 from src.core.protective_stop_mixin import ProtectiveStopAware
+from src.core.signal_event import TOPIC_SIGNAL_MA_CROSS, SignalEvent
 from src.core.sizing import (
     SizingConfig,  # noqa: TC001
     compute_notional,
@@ -347,6 +348,34 @@ class MACross(ProtectiveStopAware, LiquidationAware, Strategy):
         should_act = new_signal != last_signal or bootstrap_pending
         return new_signal, should_act
 
+    def _publish_signal_event(
+        self,
+        *,
+        ts_event: int,
+        signal: int,
+        fast_value: float,
+        slow_value: float,
+        acted: bool,
+        bootstrap: bool,
+    ) -> None:
+        """Publish a :class:`SignalEvent` on the message bus for persistence.
+
+        The PersistenceActor subscribes to ``signals.*`` and writes one
+        row per event to the ``signal_events`` PG table. Emitted on every
+        initialized bar (not just acted ones).
+        """
+        event = SignalEvent(
+            ts_event=ts_event,
+            strategy_id=str(self.id),
+            instrument_id=str(self.config.instrument_id),
+            signal=signal,
+            fast_value=Decimal(str(fast_value)),
+            slow_value=Decimal(str(slow_value)),
+            acted=acted,
+            bootstrap=bootstrap,
+        )
+        self.msgbus.publish(topic=TOPIC_SIGNAL_MA_CROSS, msg=event)
+
     def on_bar(self, bar: Bar) -> None:
         """Evaluate MA crossover on each bar.
 
@@ -364,12 +393,32 @@ class MACross(ProtectiveStopAware, LiquidationAware, Strategy):
         if bar.is_single_price():
             return
 
+        fast_value = float(self.fast_ma.value)
+        slow_value = float(self.slow_ma.value)
         signal, should_act = self._cross_gate_decision(
-            float(self.fast_ma.value),
-            float(self.slow_ma.value),
+            fast_value,
+            slow_value,
             self._last_signal,
             self._bootstrap_pending,
         )
+
+        # Emit a SignalEvent EVERY initialized bar (not just acted ones)
+        # so Phase 2.5 analysis can reconstruct the full per-bar gate
+        # stream from PG and align it against backtest cross times.
+        self._publish_signal_event(
+            ts_event=bar.ts_event,
+            signal=signal,
+            fast_value=fast_value,
+            slow_value=slow_value,
+            acted=should_act,
+            bootstrap=self._bootstrap_pending,
+        )
+        self.log.info(
+            f"cross_gate: signal={signal:+d} fast={fast_value:.4f} "
+            f"slow={slow_value:.4f} bootstrap={self._bootstrap_pending} "
+            f"acted={should_act}",
+        )
+
         if not should_act:
             return
         self._bootstrap_pending = False

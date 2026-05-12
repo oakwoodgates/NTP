@@ -73,3 +73,22 @@ account_snapshots = sa.Table(
     sa.Column("balance_free", sa.Numeric, nullable=False),
     sa.Column("balance_locked", sa.Numeric, nullable=False),
 )
+
+# Per-bar signal-gate output. One row per bar after indicator warmup,
+# emitted by signal-generating strategies (e.g., MACross). ``acted=true``
+# rows are the bars the strategy actually entered/flipped on; the rest
+# record the gate state so we can reconstruct the full signal stream and
+# align it against backtest cross times (Phase 2.5 verification).
+signal_events = sa.Table(
+    "signal_events",
+    metadata,
+    sa.Column("ts", sa.TIMESTAMP(timezone=True), nullable=False),
+    sa.Column("run_id", sa.UUID, sa.ForeignKey("strategy_runs.id"), nullable=False),
+    sa.Column("strategy_id", sa.Text, nullable=False),
+    sa.Column("instrument_id", sa.Text, nullable=False),
+    sa.Column("signal", sa.SmallInteger, nullable=False),  # +1 LONG, -1 SHORT, 0 NONE
+    sa.Column("fast_value", sa.Numeric, nullable=False),
+    sa.Column("slow_value", sa.Numeric, nullable=False),
+    sa.Column("acted", sa.Boolean, nullable=False),
+    sa.Column("bootstrap", sa.Boolean, nullable=False),
+)

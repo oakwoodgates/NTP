@@ -48,7 +48,7 @@ from nautilus_trader.model.identifiers import InstrumentId
 
 from src.actors.alert import AlertActor, AlertActorConfig
 from src.actors.persistence import PersistenceActor, PersistenceActorConfig
-from src.config.settings import get_settings
+from src.config.settings import Settings, get_settings
 from src.core import bar_type_str
 
 RUN_MODE = "live"
@@ -59,19 +59,23 @@ def _build_strategy(
     instrument_id: InstrumentId,
     bar_type: BarType,
     trade_notional: Decimal,
+    settings: Settings,
 ) -> tuple[object, str, dict[str, object]]:
-    """Build the selected strategy with default parameters.
+    """Build the selected strategy with hyperparameters from ``settings``.
 
-    To customize strategy-specific parameters, edit the defaults below.
+    Family-specific aliases (``EMACross``, ``SMACross``, ...) pin the MA
+    family by their name; the generic ``MACross`` reads ``settings.ma_type``.
+    All shared hyperparameters (fast/slow periods, ATR multipliers, MACD/RSI
+    lookbacks) come from ``settings`` — see :class:`src.config.settings.Settings`.
     """
-    _ma_cross_types = {
-        "MACross": "EMA", "EMACross": "EMA", "SMACross": "SMA", "HMACross": "HMA",
+    _ma_cross_aliases = {
+        "EMACross": "EMA", "SMACross": "SMA", "HMACross": "HMA",
         "DEMACross": "DEMA", "AMACross": "AMA", "VIDYACross": "VIDYA",
     }
-    if strategy_name in _ma_cross_types:
+    if strategy_name == "MACross" or strategy_name in _ma_cross_aliases:
         from src.strategies.ma_cross import MACross, MACrossConfig
-        ma_type = _ma_cross_types[strategy_name]
-        fast, slow = 10, 20
+        ma_type = _ma_cross_aliases.get(strategy_name, settings.ma_type)
+        fast, slow = settings.ma_fast, settings.ma_slow
         return MACross(MACrossConfig(
             instrument_id=instrument_id,
             bar_type=bar_type,
@@ -87,16 +91,14 @@ def _build_strategy(
             "ma_type": ma_type, "fast": fast, "slow": slow, "notional": str(trade_notional),
         }
 
-    _ma_cross_lo_types = {
-        "MACrossLongOnly": "EMA", "EMACrossLongOnly": "EMA",
-        "SMACrossLongOnly": "SMA", "HMACrossLongOnly": "HMA",
-        "DEMACrossLongOnly": "DEMA", "AMACrossLongOnly": "AMA",
-        "VIDYACrossLongOnly": "VIDYA",
+    _ma_cross_lo_aliases = {
+        "EMACrossLongOnly": "EMA", "SMACrossLongOnly": "SMA", "HMACrossLongOnly": "HMA",
+        "DEMACrossLongOnly": "DEMA", "AMACrossLongOnly": "AMA", "VIDYACrossLongOnly": "VIDYA",
     }
-    if strategy_name in _ma_cross_lo_types:
+    if strategy_name == "MACrossLongOnly" or strategy_name in _ma_cross_lo_aliases:
         from src.strategies.ma_cross_long_only import MACrossLongOnly, MACrossLongOnlyConfig
-        ma_type = _ma_cross_lo_types[strategy_name]
-        fast, slow = 10, 20
+        ma_type = _ma_cross_lo_aliases.get(strategy_name, settings.ma_type)
+        fast, slow = settings.ma_fast, settings.ma_slow
         return MACrossLongOnly(MACrossLongOnlyConfig(
             instrument_id=instrument_id,
             bar_type=bar_type,
@@ -110,8 +112,9 @@ def _build_strategy(
 
     if strategy_name == "MACrossATR":
         from src.strategies.ma_cross_atr import MACrossATR, MACrossATRConfig
-        fast, slow, atr = 20, 50, 14
-        sl_mult, tp_mult = 1.5, 3.0
+        fast, slow = settings.ma_fast, settings.ma_slow
+        atr = settings.macross_atr_period
+        sl_mult, tp_mult = settings.macross_atr_sl_mult, settings.macross_atr_tp_mult
         return MACrossATR(MACrossATRConfig(
             instrument_id=instrument_id,
             bar_type=bar_type,
@@ -128,18 +131,21 @@ def _build_strategy(
 
     if strategy_name == "MACDRSI":
         from src.strategies.macd_rsi import MACDRSI, MACDRSIConfig
-        macd_fast, macd_slow, signal, rsi = 12, 26, 9, 14
+        macd_fast = settings.macdrsi_macd_fast
+        macd_slow = settings.macdrsi_macd_slow
+        signal_period = settings.macdrsi_macd_signal
+        rsi = settings.macdrsi_rsi_period
         return MACDRSI(MACDRSIConfig(
             instrument_id=instrument_id,
             bar_type=bar_type,
             trade_notional=trade_notional,
             macd_fast_period=macd_fast,
             macd_slow_period=macd_slow,
-            macd_signal_period=signal,
+            macd_signal_period=signal_period,
             rsi_period=rsi,
-        )), f"MACDRSI-{macd_fast}-{macd_slow}-{signal}-{rsi}", {
+        )), f"MACDRSI-{macd_fast}-{macd_slow}-{signal_period}-{rsi}", {
             "macd_fast": macd_fast, "macd_slow": macd_slow,
-            "signal": signal, "rsi": rsi, "notional": str(trade_notional),
+            "signal": signal_period, "rsi": rsi, "notional": str(trade_notional),
         }
 
     valid = [
@@ -193,7 +199,7 @@ def main() -> None:
 
     strategy, strategy_id, config_dict = _build_strategy(
         settings.strategy, instrument_id, bar_type,
-        settings.trade_notional,
+        settings.trade_notional, settings,
     )
 
     print(f"Starting {RUN_MODE} run: {strategy_id} on {instrument_id} ({settings.bar_interval})")
