@@ -29,10 +29,14 @@ CLI
     python scripts/batch_backtest.py \\
         --assets BTC ETH SOL \\
         --intervals 1d 4h \\
-        --stop-pcts 0.05 0.10
+        --stop-pcts 0.05 0.10 \\
+        --date-start 2024-05-01 \\
+        --date-end 2026-03-29
 
 Defaults match the typical MACross EMA 10/40 setup at 20x leverage.
 ``--dry-run`` lists the combos without running anything.
+``--date-start`` / ``--date-end`` (ISO dates) clip the bar window — both
+optional, ``None`` = use catalog's earliest / latest available.
 """
 from __future__ import annotations
 
@@ -138,14 +142,21 @@ def run_combo(
     leverage: int,
     catalog_path: str,
     out_dirs: dict[str, Path],
+    date_start: str | None = None,
+    date_end: str | None = None,
 ) -> ComboResult:
-    """Run single-config backtest + sweep for one combo. Returns ComboResult."""
+    """Run single-config backtest + sweep for one combo. Returns ComboResult.
+
+    ``date_start`` / ``date_end`` (ISO strings, e.g. ``"2024-05-01"``) clip
+    the bar window — useful for excluding regimes you don't want in the
+    sweep, or for paper-vs-backtest re-runs over a specific run window.
+    """
     started = time.time()
     instrument_id = utils.make_instrument_id(asset, data_source)
     bar_t_str     = bar_type_str(instrument_id, interval)
     sweep_name    = f"{ma_type}_{asset}_{exec_venue}_{interval}_stop{int(stop_pct * 100)}"
 
-    print(f"\n=== {asset} {interval} stop={stop_pct:.0%}  →  {sweep_name} ===")
+    print(f"\n=== {asset} {interval} stop={stop_pct:.0%}  ->  {sweep_name} ===")
 
     venue_cfg = get_venue_config(exec_venue)
     venue     = Venue(get_venue_config(data_source).nt_venue)
@@ -155,6 +166,8 @@ def run_combo(
         catalog_path=catalog_path,
         instrument_id=instrument_id,
         bar_type_str=bar_t_str,
+        date_start=date_start,
+        date_end=date_end,
     )
     if not bars:
         return _empty_result(asset, interval, stop_pct, instrument_id,
@@ -296,7 +309,7 @@ def run_combo(
     )
 
     elapsed = time.time() - started
-    print(f"  done in {elapsed:.1f}s — {n_trades} trades, total_pnl={total_pnl:,.0f}, "
+    print(f"  done in {elapsed:.1f}s -- {n_trades} trades, total_pnl={total_pnl:,.0f}, "
           f"sweep best={sweep_best_pnl:,.0f}")
 
     return ComboResult(
@@ -421,7 +434,7 @@ def write_master_index(results: list[ComboResult], out_path: Path, run_id: str) 
 </tbody></table>
 </body></html>"""
     out_path.write_text(html_doc, encoding="utf-8")
-    print(f"\n=== Master index → {out_path}")
+    print(f"\n=== Master index -> {out_path}")
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────
@@ -448,6 +461,14 @@ def main() -> int:
     parser.add_argument("--starting-capital", type=int, default=settings.starting_capital)
     parser.add_argument("--leverage",   type=int, default=settings.leverage)
     parser.add_argument("--catalog-path", default=str(default_catalog))
+    parser.add_argument(
+        "--date-start", default=None,
+        help="ISO date (e.g. 2024-05-01) — clip bars before this. None = use earliest available.",
+    )
+    parser.add_argument(
+        "--date-end", default=None,
+        help="ISO date — clip bars after this. None = use latest available.",
+    )
     parser.add_argument("--dry-run", action="store_true",
                         help="List combos and exit without running.")
     args = parser.parse_args()
@@ -458,9 +479,13 @@ def main() -> int:
         for interval in args.intervals
         for stop in args.stop_pcts
     ]
+    date_window = (
+        f"{args.date_start or 'earliest'} .. {args.date_end or 'latest'}"
+    )
     print(f"Batch: {len(combos)} combos planned "
           f"({len(args.assets)} assets x {len(args.intervals)} intervals "
-          f"x {len(args.stop_pcts)} stops)")
+          f"x {len(args.stop_pcts)} stops)  "
+          f"window={date_window}")
     for c in combos:
         print(f"  {c[0]}  {c[1]}  stop={c[2]:.0%}")
     if args.dry_run:
@@ -502,6 +527,8 @@ def main() -> int:
                 leverage=args.leverage,
                 catalog_path=args.catalog_path,
                 out_dirs=out_dirs,
+                date_start=args.date_start,
+                date_end=args.date_end,
             )
         except Exception as e:  # noqa: BLE001
             print(f"  ERROR: {e!r}")
