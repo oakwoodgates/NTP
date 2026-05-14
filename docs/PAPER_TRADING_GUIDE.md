@@ -55,36 +55,100 @@ Instead of running natively, you can run the trading node as a Docker container.
 This is recommended for multi-day/week runs — the container restarts automatically
 on crashes and survives terminal disconnects.
 
+**Trader services are profile-gated.** `docker compose up -d` on its own
+now starts only infrastructure (postgres, redis, grafana). To start a
+trader, pick a profile:
+
+| Profile | What it starts | When to use |
+|---|---|---|
+| `single` | Legacy single-instrument `trader` service driven by `.env` | Default Phase 2 single-strategy paper trading |
+| `eth` / `btc` / `sol` | One per-instrument trader with config baked into compose | Phase 2.5/2.6 verification — launch instruments one at a time |
+| `multi` | All three per-instrument traders at once | Phase 2.5/2.6 full multi-instrument verification |
+
+### Single-instrument (legacy) deploy
+
 ```bash
 # Build the trader image (first time, or after code changes)
 docker compose build trader
 
 # Run migrations (first time only — before starting the trader)
-docker compose run --rm trader alembic upgrade head
+docker compose --profile single run --rm trader alembic upgrade head
 
-# Start everything (infra + trader)
-docker compose up -d
+# Start infra + single-instrument trader
+docker compose --profile single up -d
 
-# Tail logs (replaces the terminal session)
+# Tail logs
 docker compose logs -f trader --tail 200
 ```
 
-**Managing the container:**
+### Multi-instrument deploy
+
+Three trader containers, one per instrument, each reading its strategy
+config from a **gitignored per-service env file**: `.env.eth`,
+`.env.btc`, `.env.sol`. Distinct `TRADER_ID` per container keeps PG
+`strategy_runs` rows + NT MessageBus topics from colliding.
+
+**Why per-service env files (not values in compose):** strategy picks
+(MA windows, stops, bar intervals, instrument choice) are findings, not
+infrastructure. They stay on the deploy host. Templates with empty
+values are committed at `.env.eth.example` / `.env.btc.example` /
+`.env.sol.example` to show the schema.
+
+**First-time setup on the deploy host:**
+
+```bash
+# Copy the templates and fill in your picks for each instrument
+cp .env.eth.example .env.eth        # then edit with your ETH config
+cp .env.btc.example .env.btc        # then edit with your BTC config
+cp .env.sol.example .env.sol        # then edit with your SOL config
+```
+
+If you don't create a per-service env file, `docker compose up` fails
+loudly when that profile is requested — better than silently using
+`.env` defaults and trading the wrong instrument.
+
+**Build + migrate + launch:**
+
+```bash
+# Build once (all trader services share the image)
+docker compose build trader
+
+# Run migrations (one-shot via the single profile)
+docker compose --profile single run --rm trader alembic upgrade head
+
+# Launch one instrument at a time (e.g. ETH first)
+docker compose --profile eth up -d trader-eth
+docker compose logs -f trader-eth --tail 200
+
+# Add more instruments as you go
+docker compose --profile btc up -d trader-btc
+docker compose --profile sol up -d trader-sol
+
+# OR launch all three at once (requires all 3 .env.{asset} files to exist)
+docker compose --profile multi up -d
+docker compose logs -f trader-eth trader-btc trader-sol --tail 200
+```
+
+**Managing per-instrument containers:**
 
 | Action | Command |
 |--------|---------|
-| Stop trading (graceful) | `docker compose stop trader` |
-| Start trading | `docker compose start trader` |
-| Restart after `.env` change | `docker compose restart trader` |
-| Restart after code change | `docker compose build trader && docker compose up -d trader` |
-| Run migrations (trader running) | `docker compose exec trader alembic upgrade head` |
-| Run migrations (trader stopped) | `docker compose run --rm trader alembic upgrade head` |
+| Stop one instrument (graceful) | `docker compose stop trader-eth` |
+| Stop all multi-instrument | `docker compose --profile multi stop` |
+| Restart after `.env` change | `docker compose restart trader-eth` |
+| Restart after code change | `docker compose build trader && docker compose --profile eth up -d trader-eth` |
 | Check status | `docker compose ps` |
 
-The container uses `restart: unless-stopped` — it restarts automatically on
-crashes and host reboots, but stays stopped after `docker compose stop`.
+Each container has `restart: unless-stopped` — restarts automatically on
+crashes and host reboots, stays stopped after `docker compose stop`.
 
-Each restart creates a new `run_id` in `strategy_runs`. Filter by run in Grafana.
+Each restart creates a new `run_id` in `strategy_runs`. Filter by
+`(trader_id, strategy_id)` in Grafana to keep the three streams separate.
+
+**Important:** Multi-instrument deploys do NOT include the legacy
+single-instrument `trader` service. If you previously had `trader`
+running and switch to multi-instrument, `docker compose stop trader`
+first or the legacy service keeps running on the old `.env` config.
 
 ## 4. Verify the Pipeline
 

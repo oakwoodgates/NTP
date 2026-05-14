@@ -1,3 +1,31 @@
+# Trader services (single + multi-instrument) all share the same image, env_file,
+# infra deps, restart policy, and logging. Anchor + merge avoids duplicating
+# this in each service block.
+x-trader-common: &trader-common
+  build: .
+  env_file: .env
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+  stop_grace_period: 30s
+  logging:
+    driver: json-file
+    options:
+      max-size: "50m"
+      max-file: "3"
+
+# Environment overrides every trader needs (Docker DNS names for infra +
+# Postgres/Redis ports). Compose `environment:` shadows `env_file:`, so these
+# stay in YAML rather than .env.
+x-trader-env: &trader-env
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+
 services:
   postgres:
     image: timescale/timescaledb:2.17.2-pg16
@@ -45,30 +73,67 @@ services:
       postgres:
         condition: service_healthy
 
+  # Single-instrument trader (legacy default). Strategy + instrument come
+  # straight from .env. Now profile-gated: `docker compose up -d` runs only
+  # infra; use `--profile single` to start this trader, or one of the
+  # per-instrument profiles below for multi-instrument verification.
   trader:
-    build: .
-    env_file: .env
+    <<: *trader-common
     environment:
-      # TRADING_SCRIPT is controlled via .env (not here — compose environment:
-      # overrides env_file:, so setting it here would silently ignore .env).
-      # Inside the Docker network, services use Docker DNS names.
-      # Settings defaults are localhost — these overrides are required.
-      POSTGRES_HOST: postgres
-      POSTGRES_PORT: "5432"
-      REDIS_HOST: redis
-      REDIS_PORT: "6379"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-    stop_grace_period: 30s
-    logging:
-      driver: json-file
-      options:
-        max-size: "50m"
-        max-file: "3"
+      <<: *trader-env
+      # TRADING_SCRIPT, STRATEGY, INSTRUMENT_ID, MA_FAST/SLOW/TYPE, etc. all
+      # come from .env. No per-service overrides here.
+    profiles: ["single"]
+
+  # ── Multi-instrument trader topology ───────────────────────────────────────
+  # Three trader containers, one per instrument. Each reads its strategy +
+  # instrument config from a per-service env file (`.env.{asset}`) which is
+  # gitignored. Templates at `.env.{asset}.example` show what to fill in;
+  # actual values stay on the deploy host only.
+  #
+  # Launch individually (`--profile eth`) or all at once (`--profile multi`).
+  # Each container has a distinct TRADER_ID so PG strategy_runs rows + NT
+  # MessageBus strategy-id topics don't collide between containers.
+  #
+  # If `.env.{asset}` doesn't exist on the host, compose will fail loudly at
+  # `up` time — that's intentional: better than silently using `.env` defaults
+  # and trading the wrong instrument.
+
+  trader-eth:
+    <<: *trader-common
+    profiles: ["eth", "multi"]
+    env_file:
+      - path: .env
+        required: true
+      - path: .env.eth
+        required: true
+    environment:
+      <<: *trader-env
+      TRADER_ID: trader-eth
+
+  trader-btc:
+    <<: *trader-common
+    profiles: ["btc", "multi"]
+    env_file:
+      - path: .env
+        required: true
+      - path: .env.btc
+        required: true
+    environment:
+      <<: *trader-env
+      TRADER_ID: trader-btc
+
+  trader-sol:
+    <<: *trader-common
+    profiles: ["sol", "multi"]
+    env_file:
+      - path: .env
+        required: true
+      - path: .env.sol
+        required: true
+    environment:
+      <<: *trader-env
+      TRADER_ID: trader-sol
 
 volumes:
   pgdata:

@@ -19,6 +19,9 @@ venv/
 .env
 .env.*
 !.env.example
+# Per-instrument templates (e.g. .env.eth.example) are committed; actual
+# .env.{asset} files stay local on the deploy host.
+!.env.*.example
 
 # Data — ParquetDataCatalog and market data (large, regenerable)
 data/
