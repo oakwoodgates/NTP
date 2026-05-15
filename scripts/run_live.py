@@ -76,6 +76,8 @@ def _build_strategy(
         from src.strategies.ma_cross import MACross, MACrossConfig
         ma_type = _ma_cross_aliases.get(strategy_name, settings.ma_type)
         fast, slow = settings.ma_fast, settings.ma_slow
+        stop_pct = settings.stop_pct
+        bootstrap_on_deploy = settings.bootstrap_on_deploy
         return MACross(MACrossConfig(
             instrument_id=instrument_id,
             bar_type=bar_type,
@@ -83,12 +85,16 @@ def _build_strategy(
             ma_type=ma_type,
             fast_period=fast,
             slow_period=slow,
+            stop_pct=stop_pct,
+            bootstrap_on_deploy=bootstrap_on_deploy,
             # Liquidation simulator is backtest-only — disable for live so
             # the LiquidationAware mixin doesn't place reduce-only stops
             # on the real venue's order book. See docs/LIQUIDATION_AND_SIZING.md.
             liquidation=None,
         )), f"MACross-{ma_type}-{fast}-{slow}", {
-            "ma_type": ma_type, "fast": fast, "slow": slow, "notional": str(trade_notional),
+            "ma_type": ma_type, "fast": fast, "slow": slow,
+            "notional": str(trade_notional), "stop_pct": stop_pct,
+            "bootstrap_on_deploy": bootstrap_on_deploy,
         }
 
     _ma_cross_lo_aliases = {

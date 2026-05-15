@@ -12,7 +12,7 @@ Override per environment via ``.env``::
     TRADE_NOTIONAL=2000
     LEVERAGE=20
     BAR_INTERVAL=4h
-    DEFAULT_STOP_PCT=0.05
+    STOP_PCT=0.05
 
 For one-off experiments (different capital, different leverage), set
 the env var or override the imported value locally in cell 1::
@@ -97,11 +97,16 @@ class Settings(BaseSettings):
     everywhere user-facing."""
 
     # ── Risk management ─────────────────────────────────────────────────
-    default_stop_pct: float | None = 0.05
-    """Default protective-stop fraction (``0.05`` = 5%). At
-    ``stop_pct = 1/leverage`` (20× → 0.05) worst-case loss per trade
-    equals the initial margin committed. Set to ``None`` to disable
-    the protective-stop mixin by default."""
+    stop_pct: float | None = 0.05
+    """Protective-stop fraction (``0.05`` = 5%). The MACross runner
+    (`scripts/run_sandbox.py`, `scripts/run_live.py`) passes this into
+    `MACrossConfig.stop_pct`, which the `ProtectiveStopAware` mixin uses
+    to arm a reduce-only `StopMarketOrder` at ``entry × (1 ± stop_pct)``
+    on every position open. The batch backtest script also uses this as
+    the default for its ``--stop-pcts`` CLI flag. At ``stop_pct =
+    1/leverage`` (20× → 0.05) worst-case loss per trade equals the
+    initial margin committed. Set to ``None`` to disable the protective
+    stop entirely."""
 
     # ── Strategy hyperparameters ────────────────────────────────────────
     # Pulled out of the runners so swapping fast/slow / ATR multipliers /
@@ -127,6 +132,19 @@ class Settings(BaseSettings):
     """MA family for MACross-style strategies. One of EMA/SMA/HMA/DEMA/AMA/VIDYA.
     Sandbox/live runners use this when ``strategy`` is the generic ``MACross``;
     the family-specific aliases (``EMACross``, ``SMACross``, ...) override this."""
+
+    bootstrap_on_deploy: bool = False
+    """If ``True``, MACross treats the *first* observed signal direction
+    after warmup as a synthetic cross — fires immediately on deploy
+    instead of waiting for a real MA transition. Default ``False``:
+    wait for a fresh cross.
+
+    Phase 3 live deploys mid-trend often want ``True`` to catch the
+    current move rather than wait weeks for the next cross. Phase 2.5/2.6
+    verification deploys should leave it ``False`` so backtest and paper
+    use the same cross-gate behavior and Tool 1's signal-alignment
+    analysis isn't muddied by a synthetic deploy-time entry. See
+    ``docs/STRATEGY_ENTRY_RULES.md`` for the full rationale."""
 
     # — MACrossATR
     macross_atr_period: int = 14

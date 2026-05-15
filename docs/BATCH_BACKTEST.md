@@ -30,7 +30,7 @@ EMA `MA_TYPE`, fast=10 / slow=40 single-config plus full 12×12 grid sweep.
 ```
 --assets BTC ETH SOL              # default from settings.default_assets
 --intervals 1d 4h                  # default from settings.default_intervals
---stop-pcts 0.05 0.10              # default from [settings.default_stop_pct]
+--stop-pcts 0.05 0.10              # default from [settings.stop_pct]
 --ma-type EMA                      # one of: EMA SMA HMA DEMA AMA VIDYA
 --fast-ma 10                       # primary single-config fast period
 --slow-ma 40                       # primary single-config slow period

@@ -28,7 +28,8 @@ class TestSettings:
         assert s.exec_venue == "HYPERLIQUID_PERP"
         assert s.bar_interval == "4h"
         # Risk + liquidation.
-        assert s.default_stop_pct == 0.05
+        assert s.stop_pct == 0.05
+        assert s.bootstrap_on_deploy is False
         assert s.liquidation_enabled is True
         assert s.liquidation_min_trade_notional == Decimal("10")
         # Strategy hyperparameters — flow into sandbox/live runners.
