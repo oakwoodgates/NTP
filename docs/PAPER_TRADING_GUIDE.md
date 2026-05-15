@@ -186,12 +186,44 @@ FROM signal_events ORDER BY ts DESC LIMIT 10;
 
 Open [http://localhost:3000](http://localhost:3000) (login: `admin` / `changeme` or your `GRAFANA_PASSWORD`).
 
-The "Trading Overview" dashboard has:
-- Account balance and cumulative PnL charts
-- Drawdown % chart
-- Win rate, total PnL, trade count stats
-- Fill and position tables
-- Template dropdowns to filter by strategy and run
+If running on a remote droplet, prefer an SSH tunnel over exposing port 3000:
+
+```bash
+ssh -L 3000:localhost:3000 root@<droplet-ip>
+# then open http://localhost:3000 in your browser
+```
+
+The "Trading Overview" dashboard has five template variables (cascade in this order):
+
+| Variable | Filters |
+|---|---|
+| `trader_id` | One per running container (e.g. `nt-trader-eth`) |
+| `strategy_id` | Per-instance strategy ID |
+| `instrument_id` | `ETH-USD-PERP.HYPERLIQUID` etc. |
+| `run_mode` | `sandbox` \| `live` |
+| `run_id` | UUID of the strategy run; refreshes when an upstream variable changes |
+
+**Panel rows (top to bottom):**
+
+1. **Operational Health** (always visible) — four stats that turn yellow/red when the trader is not keeping up:
+   - *Time Since Last Bar* — seconds since the last `signal_events` row. For 15m bars, stays under ~16 min in normal operation; yellow at 15 min, red at 30 min.
+   - *Time Since Last Fill* — seconds since the last `order_fills` row. High during ranging markets is normal; investigate after > 1 day of no fills.
+   - *Last Account Snapshot Age* — `PersistenceActor` writes one every 60s. Yellow > 2 min, red > 5 min indicates executor lag or wedge.
+   - *Active Runs* — count of `strategy_runs` with `stopped_at IS NULL` matching the picker filters. Should equal your expected container count.
+2. **Signal Gate (Phase 2.5)** (collapsed by default — click the row title to expand):
+   - *Signal Stream* — stepwise +1/-1/0 chart of the cross-gate state.
+   - *MA Divergence* — relative gap `(fast - slow) / slow`; zero-crossings cause flips.
+   - *Bars Since Last Flip*, *Acted / Emitted (24h)*, *Bootstrap Bars* — gate-health stats.
+   - *Recent Signal Events* — last 50 rows with `acted=true` highlighted yellow.
+3. Balance / PnL / Drawdown / Position-PnL panels (unchanged from prior version).
+4. Stats row: Win Rate, Total PnL, Total Trades, Positions Closed, Avg Win / Avg Loss, Max Drawdown.
+5. Recent Fills, Recent Positions tables.
+6. *All Runs (matching filters)* table — active runs (no `stopped_at`) highlighted green.
+
+**Annotations** are rendered as vertical lines on every timeseries panel:
+- *Run starts* (blue) — `started_at` markers for matching runs.
+- *Run stops* (red) — `stopped_at` markers.
+- *Acted signals* (yellow) — disabled by default. Enable from the annotation control in the top bar when investigating cross-gate alignment.
 
 ### Check Telegram (if configured)
 
