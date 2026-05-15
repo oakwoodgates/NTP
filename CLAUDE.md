@@ -296,7 +296,7 @@ gates between phases. The condensed status here:
 
 **Phase 1 (complete):** Backtesting with NT's `BacktestEngine`, project conveniences (`make_engine`, `run_sweep`, fee overrides, MA-cross + BB + Donchian + MACD-RSI), v2 metrics schema with realized-PnL-only stats.
 
-**Phase 2 (complete):** TradingNode + PersistenceActor + AlertActor, paper trading via NT Sandbox adapter, PostgreSQL persistence, Telegram alerts, Grafana monitoring, Docker on Digital Ocean. Validated against original (polling-mode) MACross; needs revalidation against the post-cross-gate strategy as the first task of Phase 2.5.
+**Phase 2 (complete):** TradingNode + PersistenceActor + AlertActor, paper trading via NT Sandbox adapter, PostgreSQL persistence, Telegram alerts, Grafana monitoring, Docker on Digital Ocean. Validated against original (polling-mode) MACross; the post-cross-gate stack is revalidated in Phase 2.5 (next).
 
 **Phase 3a (complete) — Research tooling + strategy validation:**
 - `run_sweep()` — parameter grid search with automatic Parquet persistence to `data/sweeps/`.
@@ -313,9 +313,11 @@ gates between phases. The condensed status here:
 - `LiquidationAware` + `ProtectiveStopAware` strategy mixins; `AccountAliveMonitor` actor.
 - **Cross-gate entry semantics** in `MACross` (signal-event-driven, not state-polled). See [`docs/STRATEGY_ENTRY_RULES.md`](docs/STRATEGY_ENTRY_RULES.md).
 - **Centralized configuration** via `src/config/settings.py`; same `.env` flows through backtest → paper → live. See [`docs/CONFIG.md`](docs/CONFIG.md).
-- `scripts/batch_backtest.py` headless cross-product runner with embedded sweep heatmaps and master-index summary. See [`docs/BATCH_BACKTEST.md`](docs/BATCH_BACKTEST.md).
+- `scripts/batch_backtest.py` headless cross-product runner with embedded sweep heatmaps and master-index summary. Supports date-windowing (`--date-start` / `--date-end`). See [`docs/BATCH_BACKTEST.md`](docs/BATCH_BACKTEST.md).
+- **Phase 2.5 prep wiring (deployed but unexercised):** `signal_events` PG table + per-bar `SignalEvent` publication from MACross (cross-gate alignment telemetry for the Phase 2.5 open question); `AccountAliveMonitor` wired into `run_sandbox.py`; `STOP_PCT` and `BOOTSTRAP_ON_DEPLOY` env vars wired into `MACrossConfig` (previously code-only knobs); multi-instrument compose topology with profile-gated `trader-eth` / `trader-btc` / `trader-sol` services that read per-instrument `.env.{asset}` files (gitignored).
+- **Phase 2.6 Tool 1 scaffold:** `notebooks/paper_vs_backtest.ipynb` runs the live-vs-backtest position comparison once paper data exists. Helpers (`load_paper_positions`, `run_backtest_position_stream`, `compare_position_streams`) live in `notebooks/utils.py` with unit tests against synthetic data.
 
-**Phase 2.5 (next) — Paper-trading revalidation.** Confirm the cross-gated MACross + protective-stop + liquidation-simulator stack behaves the same in paper as in backtest. Two-week minimum run on Hyperliquid testnet. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
+**Phase 2.5 (next) — Paper-trading revalidation.** All prep wiring shipped; nothing deployed yet. First operator action is to create per-instrument `.env.{asset}` files on the DO box from the committed templates, then `docker compose --profile eth up -d trader-eth`. Verification window is 1-2 weeks on sandbox (Stage A) then 2 weeks on HL testnet (Stage B). See [`docs/ROADMAP.md`](docs/ROADMAP.md), [`docs/PAPER_TRADING_GUIDE.md`](docs/PAPER_TRADING_GUIDE.md), [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
 **Phase 2.6 — Backtest accuracy validation.** The keystone phase: build the comparison framework that answers "are our backtests accurate?" Live-vs-backtest harness, rolling accuracy regression, accuracy gate between research and live. See [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
@@ -363,18 +365,25 @@ python scripts/fetch_binance_candles.py --update
 8. Set `log_level` to `"ERROR"` in `LoggingConfig` to avoid stdout flooding.
 
 ### Phase 2 workflow (paper trading)
+
+Trader services are **profile-gated**. Plain `docker compose up -d` starts only infra. See [`docs/DEPLOY.md`](docs/DEPLOY.md) and [`docs/PAPER_TRADING_GUIDE.md`](docs/PAPER_TRADING_GUIDE.md) for the full multi-instrument flow.
+
 1. Build trader image: `docker compose build trader`
-2. Run migrations: `docker compose run --rm trader alembic upgrade head`
-3. Start everything: `docker compose up -d` (infra + trader container; auto-restarts on crash)
-4. Tail logs: `docker compose logs -f trader --tail 200`
-5. Verify Telegram alert fires on first fill.
-6. Verify `order_fills` table has rows after first fill: `SELECT COUNT(*) FROM order_fills;`
-7. Open Grafana at `http://localhost:3000` — check balance and fill panels.
-8. Let it run. Check daily. After 2+ weeks with stable behavior, proceed to live.
+2. Start infra: `docker compose up -d` (no trader yet — infra only)
+3. Run migrations: `docker compose --profile single run --rm trader alembic upgrade head`
+4. Pick a profile and start a trader:
+   - Single-instrument: `docker compose --profile single up -d trader`
+   - Per-instrument: `cp .env.eth.example .env.eth` → edit → `docker compose --profile eth up -d trader-eth` (similarly for btc/sol)
+   - All three multi: `docker compose --profile multi up -d`
+5. Tail logs: `docker compose logs -f trader --tail 200` (substitute `trader-eth`/`btc`/`sol` for multi-instrument)
+6. Verify per-bar gate stream: `SELECT COUNT(*) FROM signal_events;` should accumulate one row per bar after MA warmup
+7. Verify Telegram alert fires on first fill, `order_fills` has rows: `SELECT COUNT(*) FROM order_fills;`
+8. Open Grafana at `http://localhost:3000` — filter by `(trader_id, strategy_id)` if running multi-instrument
+9. Let it run. Check daily. Phase 2.5 verification = at least 1-2 weeks; Phase 3 live deployment gates on Phase 2.5 + 2.6 passing.
 
-**Graceful shutdown:** `docker compose stop trader` sends SIGTERM → Python SIGTERM handler raises `KeyboardInterrupt` → `finally` block calls `node.stop()`, `node.dispose()`, `_close_run()`. Verify `strategy_runs.stopped_at` is not NULL after stop.
+**Graceful shutdown:** `docker compose stop <svc>` sends SIGTERM → Python SIGTERM handler raises `KeyboardInterrupt` → `finally` block calls `node.stop()`, `node.dispose()`, `_close_run()`. Verify `strategy_runs.stopped_at` is not NULL after stop.
 
-**For quick iteration/debugging:** `docker compose up -d postgres redis grafana` then `python scripts/run_sandbox.py` natively.
+**For quick iteration/debugging:** `docker compose up -d` (infra only) + `python scripts/run_sandbox.py` natively against the base `.env` config.
 
 ### Phase 3a workflow (research + validation)
 1. Create or open a notebook in `notebooks/backtest/` for the strategy.

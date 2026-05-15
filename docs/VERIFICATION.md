@@ -281,13 +281,13 @@ Run notebooks in this order — each depends on the previous:
 
 | Step | Notebook | What it proves |
 |------|----------|----------------|
-| 1 | `verify_pipeline.ipynb` | NT can load data, run a strategy, produce fills |
-| 2 | `verify_data.ipynb` | OHLCV data matches exchange, no corruption/gaps |
-| 3 | `verify_signals.ipynb` | Indicators and trade entries are correct |
-| 4 | `verify_persistence.ipynb` | Live fills/positions persist to PostgreSQL correctly |
+| 1 | `notebooks/verify/01_pipeline.ipynb` | NT can load data, run a strategy, produce fills |
+| 2 | `notebooks/verify/02_data.ipynb` | OHLCV data matches exchange, no corruption/gaps |
+| 3 | `notebooks/verify/03_signals.ipynb` | Indicators and trade entries are correct |
+| 4 | `notebooks/verify/04_persistence.ipynb` | Live fills/positions persist to PostgreSQL correctly |
 
-Layers 5 (walk-forward spot check) is done inside `verify_signals.ipynb` or
-`validate_strategy.ipynb`, not as a separate notebook.
+Layer 5 (walk-forward spot check) is done inside `notebooks/verify/03_signals.ipynb` or
+`notebooks/validate_strategy.ipynb`, not as a separate notebook.
 
 ---
 
@@ -320,8 +320,8 @@ Layers 5 (walk-forward spot check) is done inside `verify_signals.ipynb` or
 
 | File | Purpose | Status |
 |------|---------|--------|
-| `notebooks/verify_pipeline.ipynb` | Smoke test — NT loads data, runs, produces fills | ✅ Exists |
-| `notebooks/verify_data.ipynb` | Layer 1 — OHLCV integrity, exchange spot-check | ✅ Created |
-| `notebooks/verify_signals.ipynb` | Layers 2–5 — indicators, signals, walk-forward spot check | **Create** |
-| `notebooks/verify_persistence.ipynb` | Layer 6 — PostgreSQL write completeness and types | ✅ Created |
+| `notebooks/verify/01_pipeline.ipynb` | Smoke test — NT loads data, runs, produces fills | ✅ Exists |
+| `notebooks/verify/02_data.ipynb` | Layer 1 — OHLCV integrity, exchange spot-check | ✅ Exists |
+| `notebooks/verify/03_signals.ipynb` | Layers 2–5 — indicators, signals, walk-forward spot check | ✅ Exists |
+| `notebooks/verify/04_persistence.ipynb` | Layer 6 — PostgreSQL write completeness and types | ✅ Exists |
 | `VERIFICATION.md` | This document | ✅ This file |

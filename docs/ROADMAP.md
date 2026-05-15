@@ -15,8 +15,27 @@ schema with realized-PnL-only stats).
 + `AlertActor` write fills/positions to PostgreSQL and send Telegram
 alerts. `run_sandbox.py` runs paper-trading via NT's `SandboxExecutionClient`
 against live Hyperliquid market data. Containerized; runs on Digital
-Ocean. Has been used end-to-end but has not been re-validated against
-the post-cross-gate `MACross` — that's the very first thing in Phase 2.5.
+Ocean. The original (polling-mode) MACross was validated end-to-end on
+this stack; the cross-gated stack is revalidated in Phase 2.5.
+
+**Phase 2.5 wiring — prep complete, deploy pending.** All
+infrastructure for paper-trading revalidation is in place:
+- `signal_events` PG table + per-bar `SignalEvent` publication from
+  MACross (the key Phase 2.5 telemetry — answers the open question
+  about cross-gate firing alignment).
+- `AccountAliveMonitor` wired into `run_sandbox.py` for the
+  halt-on-equity-floor verification.
+- `STOP_PCT` and `BOOTSTRAP_ON_DEPLOY` env vars now wired from
+  `Settings` into `MACrossConfig` (previously code-only knobs that
+  silently no-op'd at runtime regardless of `.env`).
+- Multi-instrument compose topology: profile-gated `trader-eth` /
+  `trader-btc` / `trader-sol` services, each reading per-instrument
+  strategy config from gitignored `.env.{asset}` files.
+- Verification config picked locally (see project-local
+  `reports/decisions/`); the picks are deployment-host-only and stay
+  off GitHub per the findings-stay-local rule.
+
+What's left for Phase 2.5: actually deploy and run for 1-2 weeks.
 
 **Phase 3a — Research tooling.** Complete (this milestone). Closed with:
 
@@ -53,31 +72,60 @@ and 2.6.
 liquidation-simulator stack behaves the same in paper as in backtest,
 end to end.
 
+**Two-stage flow:** Stage A on sandbox (simulated fills against real
+HL data feed, ~1 week of smoke-test), Stage B on HL testnet (real
+testnet exchange, real fills/rejections/latency, ~2 weeks of
+revalidation). See [`PAPER_TRADING_GUIDE.md`](PAPER_TRADING_GUIDE.md)
+section 5b for operational detail; [`DEPLOY.md`](DEPLOY.md) for the
+DO-specific commands.
+
+**Topology:** multi-instrument compose (profile-gated `trader-eth` /
+`trader-btc` / `trader-sol` containers, one per instrument). The
+verification config — picked from data and recorded in a
+project-local `reports/decisions/SANDBOX_CONFIG_VERIFICATION.md` (off
+GitHub per the findings-stay-local rule) — is deliberately distinct
+from the live-target config. The verification config maximizes event
+volume in a 2-week window (more trades = sharper Phase 2.6 statistics);
+the live-target config (also picked locally) optimizes cross-instrument
+robustness for actual capital deployment.
+
 **Concrete steps:**
 
-1. Deploy the standard config to Hyperliquid testnet (`HL_TESTNET=true`).
-   Settings: `STARTING_CAPITAL=1000`, `TRADE_NOTIONAL=2000`,
-   `LEVERAGE=20`, `STOP_PCT=0.05`, `BAR_INTERVAL=4h` — same values that
-   flow through backtests now via `src/config/settings.py`.
-2. Let it run for at least two weeks of real market activity.
-3. Verify per-event capture in PostgreSQL: every fill, every position
-   change, account snapshots.
+1. On the DO box, populate `.env.eth` / `.env.btc` / `.env.sol` from
+   committed templates (`.env.{asset}.example`) using the picks from
+   the local decision doc. Base `.env` carries shared infrastructure
+   + sizing knobs (`STARTING_CAPITAL`, `TRADE_NOTIONAL`, `LEVERAGE`,
+   `STOP_PCT`, `BOOTSTRAP_ON_DEPLOY=false`).
+2. Stage A: `docker compose --profile eth up -d trader-eth` (and
+   similarly for btc/sol, or `--profile multi` for all three). Run
+   ~1 week in sandbox mode (`TRADING_SCRIPT=scripts/run_sandbox.py`).
+3. Verify wiring within first bar window: `signal_events` rows
+   accumulating, `AccountAliveMonitor started` log line present, per-bar
+   `cross_gate:` log line firing, zero `blocked-callback` warnings.
 4. Verify Telegram alerts fire on fills + position changes + drawdown
    threshold breaches.
-5. Verify `AccountAliveMonitor` triggers correctly when equity drops to
-   the floor.
+5. Stage B: flip `.env` to live mode (`TRADING_SCRIPT=scripts/run_live.py`,
+   `HL_TESTNET=true`, `HL_PRIVATE_KEY` set, `LIVE_CONFIRM=yes`),
+   `docker compose restart`. Run ~2 weeks on HL testnet.
 
 **Pass criteria for Phase 2.6:**
 
-- At least 20 paper trades executed across the run
-- Every fill present in `order_fills` table
-- Zero `Actor blocked-callback` warnings in logs
-- Drawdown alerts confirmed working
-- No unexpected exceptions in the trader process
+- Sufficient closed positions to spot-check the persistence + alert
+  pipeline (originally targeted ≥20; multi-instrument deploys may
+  reach this combined across containers — document the actual count
+  + your justification in the verdict doc).
+- Every fill in `order_fills` matches an HL testnet UI fill (spot-check 5).
+- Zero `Actor blocked-callback` warnings in logs.
+- Drawdown alerts confirmed working OR documented reason none fired.
+- No unexpected exceptions in the trader process.
+- At least one protective-stop fill present (verifies the post-PR-#29
+  `STOP_PCT` wiring fires in live conditions).
 
 **Open question to resolve here:** does the cross-gate signal-detection
 fire in live in the same place it fires in backtest, given the lag
-between bar-close on NT vs bar-close on the venue's actual feed?
+between bar-close on NT vs bar-close on the venue's actual feed? The
+`signal_events` stream + `notebooks/paper_vs_backtest.ipynb` answer
+this directly.
 
 ---
 
@@ -92,20 +140,29 @@ measurable haircut between backtest predictions and reality.
 
 **Concrete deliverables:**
 
-### Tool 1 — Live-vs-backtest comparison harness
+### Tool 1 — Live-vs-backtest comparison harness *(scaffolded)*
 
-A research notebook (`research/paper_vs_backtest.ipynb` or similar) that:
+The research notebook `notebooks/paper_vs_backtest.ipynb` exists with
+the full join + reporting logic. Helpers live in `notebooks/utils.py`:
 
-- Loads paper-trade fills from PostgreSQL for a given run window
-- Re-runs the same strategy + config in `BacktestEngine` over the same
-  window's data
-- Joins by entry signal time and reports the divergence:
-  - Fill-time gap (how many bars late did paper fire vs backtest?)
-  - Fill-price gap (how much slippage worse than backtest's
-    optimistic trigger fill?)
-  - Signal-skip rate (signals the backtest took that paper missed,
-    or vice versa)
-  - PnL gap per matched trade
+- `load_paper_positions(dsn, run_id)` — async PG loader for the
+  `positions` table.
+- `run_backtest_position_stream(...)` — re-runs `MACross` in
+  `BacktestEngine` over a fixed bar window and returns closed positions
+  in the same schema.
+- `compare_position_streams(paper, backtest, tol_bars=2)` —
+  nearest-time-match join, with `entry_time_gap_s`, `entry_px_gap_bps`,
+  `pnl_gap` columns + `paper_only` / `bt_only` counts on `.attrs`.
+
+Notebook also supports a `USE_SYNTHETIC_DATA=True` mode (with a
+1-bar-lag + 20bps slippage injection on the synthetic paper stream) so
+it can be Run-All-d against synthetic data today, before Stage B
+real data exists. Unit tests in `tests/unit/test_notebook_utils.py`
+pin the contract.
+
+What's missing: real data. Once Stage B accumulates paired positions,
+flip the toggle, point at the run_id, and the notebook produces the
+fill-time / fill-price / PnL gap distributions.
 
 ### Tool 2 — Rolling accuracy metric
 
