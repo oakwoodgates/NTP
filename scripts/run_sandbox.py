@@ -252,9 +252,10 @@ def main() -> None:
             fee_rate=venue_config.taker_fee,
             alive_trades_buffer=1,
         ),
-        # Lazy callback — resolves node.trader.kernel.risk_engine at fire
-        # time, after node.build() has populated it.
-        halt_callback=lambda: node.trader.kernel.risk_engine.set_trading_state(
+        # Lazy callback — resolves node.kernel.risk_engine at fire time,
+        # after node.build() has populated it. The kernel lives directly
+        # on TradingNode; Trader does NOT have a .kernel attribute.
+        halt_callback=lambda: node.kernel.risk_engine.set_trading_state(
             TradingState.HALTED,
         ),
     )
@@ -272,7 +273,12 @@ def main() -> None:
     # already populated. Subscribe BEFORE node.run(). See the long comment
     # at _register_account_alive_monitor in src/backtesting/engine.py for
     # the full mechanics.
-    node.trader.kernel.msgbus.subscribe(
+    #
+    # NB: msgbus lives on `node.kernel`, NOT `node.trader.kernel` (Trader has
+    # no .kernel attribute; the original Phase 2.5 plan doc had this wrong
+    # and the original commit slipped through CI because none of the wiring
+    # tests construct a real TradingNode).
+    node.kernel.msgbus.subscribe(
         topic="events.account.*",
         handler=monitor._on_account_state,
     )
