@@ -36,18 +36,22 @@ alembic upgrade head       # create tables (first time only)
 python scripts/run_sandbox.py
 ```
 
-Default config: MACross-EMA(10,40) on BTC-USD-PERP, 4-hour bars, $2000 USD notional per trade (matches the canonical backtest in `notebooks/backtest/ma_cross.ipynb`). All hyperparameters flow from `.env` — see [`CONFIG.md`](CONFIG.md) for the per-system field map.
+Default config: MACross-EMA(`MA_FAST=10`, `MA_SLOW=100`) on `BTC-USD-PERP.HYPERLIQUID`, 4-hour bars, $2000 USD notional per trade, 5% protective stop. All hyperparameters flow from `.env` — see [`CONFIG.md`](CONFIG.md) for the per-system field map.
 
 **What happens:**
-- Registers a `strategy_runs` row in PostgreSQL with a unique `run_id`
-- Connects to live Hyperliquid market data (real prices, simulated execution)
-- MACross generates trades based on moving average crossovers (EMA by default)
+- Registers a `strategy_runs` row in PostgreSQL with a unique `run_id` + `trader_id`
+- Connects to live Hyperliquid market data (real prices, simulated execution via `SandboxExecutionClient`)
+- MACross generates trades on moving-average crosses (EMA by default), gated to act only on fresh transitions (see [`STRATEGY_ENTRY_RULES.md`](STRATEGY_ENTRY_RULES.md))
 - Every fill → PersistenceActor writes to `order_fills` + AlertActor sends Telegram
-- Every position close → writes to `positions` + Telegram
+- Every position close → writes to `positions` + Telegram WIN/LOSS message
+- Every bar (after warmup) → `signal_events` row with the per-bar gate state
 - Every 60s → account balance snapshot to `account_snapshots`
+- 5% protective stop fires reduce-only when an open position moves 5% against entry
 - Ctrl+C → graceful shutdown, `strategy_runs.stopped_at` updated
 
-**First trade timing:** MACross needs `slow_period` bars before generating signals. With default EMA(10,20) on 1-hour bars and historical bar request on start, the first signal may come within a few hours.
+**First trade timing:** MACross needs `MA_SLOW` bars of warmup before producing signals. At the default `MA_SLOW=100` on 4-hour bars, that's **100 × 4h = ~17 days** of warmup before the first cross can fire. NT backfills historical bars on start, so warmup completes within minutes of process start — but the first ACTED signal then requires a fresh cross transition, which on slow MAs at 4h is roughly once every 1-3 weeks under typical conditions.
+
+**Skip the wait with `BOOTSTRAP_ON_DEPLOY=true`:** the strategy treats the first observed signal direction after warmup as a synthetic cross and fires immediately. Useful for **live deploys mid-trend** where you want to catch the current move. **Leave `false` for Phase 2.5/2.6 verification** — a synthetic deploy-time entry muddies the backtest-vs-paper signal-alignment analysis (Tool 1). See [`STRATEGY_ENTRY_RULES.md`](STRATEGY_ENTRY_RULES.md) for the rationale.
 
 ## 3b. Start Paper Trading (Docker)
 
@@ -159,11 +163,13 @@ docker exec -it ntp-postgres-1 psql -U nautilus -d nautilus_platform
 ```
 
 ```sql
--- Active run
-SELECT id, strategy_id, instrument_id, run_mode, started_at FROM strategy_runs;
+-- Active runs (with trader_id for multi-instrument filtering)
+SELECT id, trader_id, strategy_id, instrument_id, run_mode, started_at, stopped_at
+FROM strategy_runs ORDER BY started_at DESC LIMIT 10;
 
 -- Fills (after first trade)
-SELECT ts, order_side, last_qty, last_px FROM order_fills ORDER BY ts DESC LIMIT 5;
+SELECT ts, strategy_id, order_side, last_qty, last_px
+FROM order_fills ORDER BY ts DESC LIMIT 5;
 
 -- Account snapshots (every 60s from start)
 SELECT ts, balance_total FROM account_snapshots ORDER BY ts DESC LIMIT 5;
@@ -193,32 +199,38 @@ You should receive messages for fills, position closes (WIN/LOSS with PnL), and 
 
 ## 5. Switch Strategies
 
-All hyperparameters flow from `.env`. Edit, restart `python scripts/run_sandbox.py` (or `docker compose restart trader`). No code edits required.
+All hyperparameters flow from `.env`. Edit, then restart your trader:
+
+| Deploy mode | Restart command |
+|---|---|
+| Native | Ctrl+C the running process, then `python scripts/run_sandbox.py` |
+| Single-instrument Docker | `docker compose --profile single restart trader` |
+| Per-instrument Docker | `docker compose restart trader-eth` (or `trader-btc` / `trader-sol`) |
+
+No code edits required.
 
 ```bash
 # Strategy + instrument
-STRATEGY=MACross                          # MACross | …Cross | MACrossLongOnly | …CrossLongOnly | MACrossATR | MACDRSI
+STRATEGY=MACross                          # MACross | EMACross | SMACross | HMACross | DEMACross | AMACross | VIDYACross
+                                          # | MACrossLongOnly | <prefix>CrossLongOnly | MACrossATR | MACDRSI
 INSTRUMENT_ID=BTC-USD-PERP.HYPERLIQUID    # BTC | ETH | SOL
 BAR_INTERVAL=4h                           # friendly form — converted to NT bar-type at the boundary
 TRADE_NOTIONAL=2000
 
+# Risk management
+STOP_PCT=0.05                             # protective-stop fraction (5%). Applies to MACross only.
+                                          # Set to a blank string to disable the stop entirely.
+
 # MA crossover family (MACross, *Cross, MACrossLongOnly, *CrossLongOnly)
 MA_FAST=10
-MA_SLOW=40
+MA_SLOW=100
 MA_TYPE=EMA                               # EMA | SMA | HMA | DEMA | AMA | VIDYA
                                           # (family-specific aliases like EMACross pin MA_TYPE by name)
-
-# MACrossATR
-MACROSS_ATR_PERIOD=14
-MACROSS_ATR_SL_MULT=1.5
-MACROSS_ATR_TP_MULT=3.0
-
-# MACDRSI
-MACDRSI_MACD_FAST=12
-MACDRSI_MACD_SLOW=26
-MACDRSI_MACD_SIGNAL=9
-MACDRSI_RSI_PERIOD=14
+BOOTSTRAP_ON_DEPLOY=false                 # `true` = act on first observed signal as a synthetic cross
+                                          # (use for live mid-trend deploys; keep `false` for verification)
 ```
+
+Other strategies (MACrossATR, MACDRSI, etc.) have their own env vars — see `src/config/settings.py` for the field names and defaults. Add them to `.env` only when switching to one of those strategies.
 
 ### Available strategies
 
@@ -234,7 +246,9 @@ MACDRSI_RSI_PERIOD=14
 | AMACross | AMA | Kaufman Adaptive MA — volatility-adaptive (pinned) |
 | VIDYACross | VIDYA | Variable Index Dynamic Average — CMO-adaptive (pinned) |
 
-All MA crossover strategies share `MA_FAST`, `MA_SLOW`. Family-specific aliases override `MA_TYPE`.
+All MA crossover strategies share `MA_FAST`, `MA_SLOW`, and (for MACross only) `STOP_PCT`. Family-specific aliases override `MA_TYPE`.
+
+The `STOP_PCT` protective stop applies only to `MACross` / `EMACross` / `SMACross` / `HMACross` / `DEMACross` / `AMACross` / `VIDYACross`. The long-only variants and `MACrossATR` / `MACDRSI` do not use the `ProtectiveStopAware` mixin — their stops are baked into their strategy logic differently (long-only has none; ATR uses an ATR-multiple bracket).
 
 **MA crossover long-only variants** (`ma_cross_long_only.py` — never shorts):
 
@@ -270,33 +284,58 @@ behaves the same in paper as in backtest. Two stages:
 
 ### Stage A — Sandbox revalidation (~1 week)
 
-Smoke-tests the new wiring (signal_events, AccountAliveMonitor) before
-committing to a 2-week testnet run.
+Smoke-tests the new wiring (signal_events, AccountAliveMonitor, the
+protective-stop mixin) before committing to a 2-week testnet run.
 
 ```bash
-alembic upgrade head                      # picks up 002_signal_events
-docker compose up -d                      # or python scripts/run_sandbox.py natively
+# Migrations (one-shot via single profile)
+docker compose --profile single run --rm trader alembic upgrade head
+
+# Pick ONE deploy mode:
+
+# (A) Single-instrument BTC 4h × MACross (legacy / live target shape)
+docker compose --profile single up -d
+
+# (B) Per-instrument 15m × tailored MACross config — needs .env.{asset} files
+docker compose --profile eth up -d trader-eth
+# (and/or trader-btc, trader-sol)
+
+# OR run natively for tighter feedback during initial debugging:
+python scripts/run_sandbox.py
 ```
 
-**Verify after ~16 hours (4 bars at 4h):**
+**Verify after ~4 bars of runtime:**
+
+- 4h bars → ~16 hours wall-clock
+- 15m bars → ~1 hour wall-clock
+- 1h bars → ~4 hours wall-clock
 
 ```sql
--- Per-bar gate stream is flowing
-SELECT COUNT(*) FROM signal_events WHERE run_id = '<id>';   -- should be > 0
+-- Per-bar gate stream is flowing (substitute your run_id from strategy_runs)
+SELECT COUNT(*) FROM signal_events WHERE run_id = '<run_id>';   -- should be > 0
 
 -- Acted vs observed split
-SELECT acted, COUNT(*) FROM signal_events WHERE run_id = '<id>' GROUP BY acted;
+SELECT acted, COUNT(*) FROM signal_events WHERE run_id = '<run_id>' GROUP BY acted;
+
+-- Cross-container check (multi-instrument): every trader gets its own run_id
+SELECT trader_id, COUNT(*) AS bars
+FROM signal_events s JOIN strategy_runs r ON s.run_id = r.id
+WHERE r.started_at > NOW() - INTERVAL '1 day'
+GROUP BY trader_id;
 ```
 
 ```bash
-# AccountAliveMonitor is subscribed
-docker compose logs trader | grep "AccountAliveMonitor started"
+# AccountAliveMonitor is subscribed (substitute trader-eth/btc/sol or trader)
+docker compose logs trader-eth | grep "AccountAliveMonitor started"
 
 # Per-bar log line from MACross (one per bar after warmup)
-docker compose logs trader | grep "cross_gate:"
+docker compose logs trader-eth | grep "cross_gate:"
+
+# Sanity: no blocked-callback warnings
+docker compose logs trader-eth | grep -i "blocked"
 ```
 
-**Stage A pass-through:** any of `{signal_events empty, no AccountAliveMonitor log, blocked-callback warnings}` → fix and re-do. Do NOT proceed to Stage B with broken plumbing.
+**Stage A pass-through:** any of `{signal_events empty, no AccountAliveMonitor log, blocked-callback warnings, no per-bar `cross_gate:` log}` → fix and re-do. Do NOT proceed to Stage B with broken plumbing.
 
 ### Stage B — HL testnet (~2 weeks)
 
@@ -304,21 +343,28 @@ The real revalidation. Uses `scripts/run_live.py` against the actual HL
 testnet exchange (real orders, fake money).
 
 ```bash
-# .env settings:
+# .env settings to switch into live mode:
+#   TRADING_SCRIPT=scripts/run_live.py
 #   HL_PRIVATE_KEY=<testnet key>
 #   HL_TESTNET=true
 #   LIVE_CONFIRM=yes
+
 docker compose build trader
-docker compose up -d trader
+
+# Pick ONE — same profile choice as Stage A, just with live-mode env vars:
+docker compose --profile single up -d                       # single-instrument
+docker compose --profile eth up -d trader-eth               # per-instrument ETH
+# docker compose --profile multi up -d                      # all three at once
 ```
 
 Pass criteria (gates Phase 2.6):
 
-- [ ] ≥20 closed positions in `positions` table for the run.
-- [ ] Every fill in `order_fills` matches an HL testnet UI fill (spot-check 5).
-- [ ] `docker compose logs trader | grep -c "blocked-callback"` == 0.
-- [ ] At least one drawdown alert OR documented reason none fired.
-- [ ] No unhandled exceptions in `docker compose logs trader`.
+- [ ] **Closed positions** — at least enough to spot-check the persistence + alert pipeline. Original plan target was ≥20; multi-instrument deploys may hit this combined across containers, single-slow-MA deploys may not. Document the actual count + your justification.
+- [ ] Every fill in `order_fills` matches an HL testnet UI fill (spot-check 5 random rows).
+- [ ] `docker compose logs <trader-service> | grep -c "blocked-callback"` == 0 for each running trader container.
+- [ ] At least one drawdown alert OR documented reason none fired (e.g. peak drawdown stayed under the 10% threshold).
+- [ ] No unhandled exceptions in `docker compose logs <trader-service>`.
+- [ ] At least one protective-stop fill present (`order_side` matching a closing direction within 5% of entry price) — verifies the `STOP_PCT` wiring fired.
 
 ### Signal alignment analysis (the roadmap's open question)
 
@@ -375,9 +421,11 @@ upgrading NautilusTrader in future:
 3. Confirm no missed fills in persistence pipeline
 4. Verify drawdown stays within acceptable bounds
 5. Compare paper vs backtest results (expect 30-40% haircut)
-6. Then: set `HL_TESTNET=false` and add `HL_PRIVATE_KEY` in `.env`.
+6. Then in `.env`: set `HL_TESTNET=false`, add `HL_PRIVATE_KEY` + `HL_WALLET_ADDRESS`, set `TRADING_SCRIPT=scripts/run_live.py`.
    - **Native:** `python scripts/run_live.py` (interactive confirmation prompt)
-   - **Docker:** Also set `TRADING_SCRIPT=scripts/run_live.py` and `LIVE_CONFIRM=yes` in `.env`, then `docker compose restart trader`
+   - **Docker:** Also set `LIVE_CONFIRM=yes` in `.env` (bypasses the interactive prompt — `input()` requires a TTY which containers don't have), then start using the same profile flag you've been using:
+     - Single-instrument: `docker compose --profile single restart trader` (or `up -d` if not running)
+     - Per-instrument: `docker compose restart trader-eth` (or btc/sol)
 
 ## Troubleshooting
 
@@ -390,18 +438,27 @@ upgrading NautilusTrader in future:
 | `ModuleNotFoundError` | `pip install -e ".[dev]"` in activated venv |
 | Redis connection error | `docker compose ps` — check Redis is running on port 6379 |
 | Grafana panels empty | Data needs time to accumulate. Check datasource in Grafana → Settings → Data sources. |
-| Trader container restart loop | Check `docker compose logs trader --tail 50`. Common cause: migrations not run — run `docker compose run --rm trader alembic upgrade head`. |
-| `docker compose stop` but `stopped_at` is NULL | SIGTERM handler issue — verify `scripts/run_sandbox.py` has the `signal.signal(signal.SIGTERM, ...)` handler at the top of `main()`. |
+| Trader container restart loop | Check `docker compose logs <service> --tail 50` (e.g. `trader`, `trader-eth`). Common cause: migrations not run — run `docker compose --profile single run --rm trader alembic upgrade head`. |
+| `docker compose stop` but `stopped_at` is NULL | SIGTERM handler issue — verify the runner has the `signal.signal(signal.SIGTERM, ...)` handler at the top of `main()`. |
 | Live trading restart loop in Docker | `input()` requires a TTY. Set `LIVE_CONFIRM=yes` in `.env` for containerized live trading. |
+| `env file .env.eth not found` | You're starting a per-instrument profile but haven't copied the template. Run `cp .env.eth.example .env.eth` (or `.env.btc` / `.env.sol`) and fill in the values. |
+| `docker compose up -d` doesn't start any trader | Expected. Trader services are profile-gated since the multi-instrument PR. Use `--profile single` (legacy) or `--profile eth`/`btc`/`sol`/`multi`. |
+| Protective stop never fires | After PR #29, `STOP_PCT` in `.env` (or `.env.{asset}` for per-instrument) is read by the runner and threaded into `MACrossConfig.stop_pct`. If you see no protective-stop fills, verify `STOP_PCT` is set non-blank in the right file. Blank or unset → mixin disabled by design. |
 
 ## Files Reference
 
 | File | Purpose |
 |------|---------|
-| `scripts/run_sandbox.py` | Paper trading runner |
-| `scripts/run_live.py` | Live trading runner (after paper validation) |
-| `src/actors/persistence.py` | Writes fills/positions/snapshots to PostgreSQL |
+| `scripts/run_sandbox.py` | Paper trading runner (sandbox exec — simulated fills against real HL data) |
+| `scripts/run_live.py` | Live / testnet trading runner (real exec — testnet or mainnet via `HL_TESTNET`) |
+| `src/actors/persistence.py` | Writes fills, positions, account snapshots, and signal events to PostgreSQL |
 | `src/actors/alert.py` | Telegram notifications |
+| `src/actors/account_alive.py` | `AccountAliveMonitor` actor — halts trading when equity drops below alive floor |
 | `src/config/settings.py` | All settings from `.env` |
-| `.env` | Your local configuration (gitignored) |
+| `src/core/protective_stop_mixin.py` | `ProtectiveStopAware` strategy mixin — armed via `STOP_PCT` |
+| `docker-compose.yml` | Infra + trader services (profile-gated `single` / `eth` / `btc` / `sol` / `multi`) |
+| `.env` | Your local base config (gitignored) |
+| `.env.example` | Template for base config (committed) |
+| `.env.{eth,btc,sol}` | Per-instrument overrides for multi-instrument deploys (gitignored) |
+| `.env.{eth,btc,sol}.example` | Templates showing the schema of per-instrument files (committed) |
 | `grafana/dashboards/trading.json` | Grafana dashboard definition |

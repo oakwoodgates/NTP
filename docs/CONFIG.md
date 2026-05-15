@@ -60,7 +60,8 @@ Which system reads which setting:
 | `starting_capital` | ✓ | ✓ | ✓ (`SimulatedExchange.starting_balances`) | ✓ (alive-floor math) | ✓ |
 | `trade_notional` | ✓ | ✓ | ✓ | ✓ | — |
 | `leverage` | ✓ | ✓ | ✓ | ✓ (exchange config) | — |
-| `default_stop_pct` | ✓ default for `STOP_PCT` | ✓ default | — (set explicitly per strategy) | — | — |
+| `stop_pct` | ✓ override in cell 1 | ✓ default for `--stop-pcts` | ✓ passed into `MACrossConfig.stop_pct` | ✓ same | — |
+| `bootstrap_on_deploy` | — (backtest starts flat, first cross fires naturally) | — | ✓ passed into `MACrossConfig.bootstrap_on_deploy` | ✓ same (set `true` for mid-trend live deploys) | — |
 | **Venue / data** |  |  |  |  |  |
 | `data_source` | ✓ catalog dir | ✓ | — (live data feed) | — | ✓ |
 | `exec_venue` | ✓ fees | ✓ | ✓ adapter | ✓ adapter | — |

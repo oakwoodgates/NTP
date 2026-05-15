@@ -452,7 +452,7 @@ def main() -> int:
     parser.add_argument("--assets",     nargs="+", default=settings.default_assets)
     parser.add_argument("--intervals",  nargs="+", default=settings.default_intervals)
     parser.add_argument("--stop-pcts",  nargs="+", type=float,
-                        default=[settings.default_stop_pct] if settings.default_stop_pct else [0.05])
+                        default=[settings.stop_pct] if settings.stop_pct else [0.05])
     parser.add_argument("--ma-type",    default=DEFAULT_MA_TYPE)
     parser.add_argument("--fast-ma",    type=int, default=DEFAULT_FAST_MA)
     parser.add_argument("--slow-ma",    type=int, default=DEFAULT_SLOW_MA)

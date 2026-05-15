@@ -82,6 +82,8 @@ move rather than wait for the next cross, set
 signal then counts as a synthetic cross. Default is `False` (wait
 for a real transition).
 
+In code (notebook / backtest):
+
 ```python
 MACrossConfig(
     instrument_id=instrument_id,
@@ -92,6 +94,18 @@ MACrossConfig(
     bootstrap_on_deploy=True,   # only set this for live mid-trend deploy
 )
 ```
+
+At runtime (sandbox / live runners):
+
+```bash
+# In .env (or .env.{asset} for multi-instrument)
+BOOTSTRAP_ON_DEPLOY=true        # only for live mid-trend deploy
+```
+
+The sandbox + live runners read `settings.bootstrap_on_deploy` and pass
+it into `MACrossConfig`. Default is `false` so paper trading and
+verification flows wait for real crosses, keeping backtest ↔ paper
+signal alignment honest.
 
 This handles every "fresh start" case uniformly — initial deploy,
 restart after crash, parameter swap mid-run. Once the bootstrap fires
