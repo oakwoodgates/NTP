@@ -21,23 +21,34 @@ you're exploring one config interactively.
 python scripts/batch_backtest.py
 ```
 
-Defaults from `src/config/settings.py`: BTC/ETH/SOL × 4h/1d × 5%/10% stop,
-EMA `MA_TYPE`, fast=10 / slow=40 single-config plus full 12×12 grid sweep.
-12 combos, ~14 minutes wall-clock.
+Defaults from `src/config/settings.py`: BTC/ETH/SOL × 4h/1d × single
+stop (from `settings.stop_pct`, default 5%), EMA `MA_TYPE`, with
+spotlight (single-config) backtest at the script's `DEFAULT_FAST_MA=10`
+/ `DEFAULT_SLOW_MA=40` plus the full 12 × 12 grid sweep around it.
+6 combos at default settings, ~14 minutes wall-clock.
+
+Note: the spotlight `DEFAULT_SLOW_MA=40` constant in
+`scripts/batch_backtest.py` is intentionally decoupled from the
+runner's `settings.ma_slow` default (100). The batch script's
+spotlight is a visualization choice; the runner default is a
+deployment choice.
 
 ## CLI
 
 ```
 --assets BTC ETH SOL              # default from settings.default_assets
 --intervals 1d 4h                  # default from settings.default_intervals
---stop-pcts 0.05 0.10              # default from [settings.stop_pct]
+--stop-pcts 0.05 0.10              # default from [settings.stop_pct] (single value)
 --ma-type EMA                      # one of: EMA SMA HMA DEMA AMA VIDYA
 --fast-ma 10                       # primary single-config fast period
---slow-ma 40                       # primary single-config slow period
+--slow-ma 40                       # primary single-config slow period (script default;
+                                   #   independent of settings.ma_slow)
 --data-source BINANCE_PERP         # default from settings.data_source
 --exec-venue HYPERLIQUID_PERP      # default from settings.exec_venue
 --starting-capital 1000            # default from settings.starting_capital
 --leverage 20                      # default from settings.leverage
+--date-start 2024-05-01            # ISO date — clip bars before this; None = catalog earliest
+--date-end 2026-03-29              # ISO date — clip bars after this;  None = catalog latest
 --catalog-path data/catalog        # default = project root + /data/catalog
 --dry-run                          # list combos and exit; no execution
 ```
@@ -45,6 +56,11 @@ EMA `MA_TYPE`, fast=10 / slow=40 single-config plus full 12×12 grid sweep.
 CLI flags > settings > class defaults. So `STARTING_CAPITAL=500 python
 scripts/batch_backtest.py` works (env-var override), and `python
 scripts/batch_backtest.py --starting-capital 500` works (CLI override).
+
+The `--date-start` / `--date-end` flags are useful for excluding regimes
+you don't want in a sweep (e.g. avoiding the COVID-era data) or running
+identical-window sweeps for paper-vs-backtest comparison work in
+Phase 2.6.
 
 ## What you get per combo
 

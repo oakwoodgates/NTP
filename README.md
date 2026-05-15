@@ -230,18 +230,29 @@ jupyter notebook notebooks/
 
 ```bash
 cp .env.example .env
-# Edit .env — fill in POSTGRES_PASSWORD, TELEGRAM_TOKEN, HL credentials
+# Edit .env — POSTGRES_PASSWORD required; TELEGRAM_TOKEN/CHAT_ID recommended;
+# HL credentials only needed for live (sandbox does NOT need them).
 
 # Build trader image
 docker compose build trader
 
-# Run migrations (first time only)
-docker compose run --rm trader alembic upgrade head
-
-# Start everything — infra + trader container
+# Start infra (postgres + redis + grafana). Trader services are profile-gated;
+# `up -d` alone no longer starts a trader.
 docker compose up -d
 
-# Tail trader logs
+# Run migrations once before starting any trader
+docker compose --profile single run --rm trader alembic upgrade head
+
+# Pick a profile and bring up a trader.
+# (A) Single-instrument (legacy default):
+docker compose --profile single up -d trader
+
+# (B) OR per-instrument multi-instrument deploy (Phase 2.5/2.6 verification):
+cp .env.eth.example .env.eth          # then edit with your picks
+docker compose --profile eth up -d trader-eth
+# (similarly trader-btc / trader-sol; or `--profile multi` for all three)
+
+# Tail logs (substitute trader-eth/btc/sol if multi)
 docker compose logs -f trader --tail 200
 
 # Monitoring
@@ -251,7 +262,7 @@ open http://localhost:3000   # Grafana (admin / your GRAFANA_PASSWORD)
 To run the trader natively instead (quick iteration / debugging):
 
 ```bash
-docker compose up -d postgres redis grafana
+docker compose up -d                  # just infra (postgres, redis, grafana)
 alembic upgrade head
 python scripts/run_sandbox.py
 ```
@@ -286,21 +297,25 @@ This is the current focus. The research workflow:
 
 ### Run paper trading (Phase 2)
 
-Requires infrastructure running first (`docker compose up -d` + migrations).
+Requires infrastructure running first (`docker compose up -d` + migrations). All trader services are profile-gated — see [`docs/PAPER_TRADING_GUIDE.md`](docs/PAPER_TRADING_GUIDE.md) for the full single-vs-multi-instrument walkthrough.
 
 **Docker (recommended for multi-day runs):**
 
 ```bash
-docker compose up -d          # starts infra + trader container; auto-restarts on crash
-docker compose logs -f trader  # tail logs
-docker compose stop trader     # graceful shutdown (SIGTERM → node.stop() → DB updated)
+docker compose up -d                       # infra only (postgres + redis + grafana)
+docker compose --profile single up -d trader   # single-instrument legacy path
+# OR
+docker compose --profile eth up -d trader-eth  # per-instrument (needs .env.eth)
+
+docker compose logs -f trader              # tail logs (or trader-eth/btc/sol)
+docker compose stop trader                 # graceful shutdown (SIGTERM → node.stop())
 ```
 
 **Native (quick iteration):**
 
 ```bash
-docker compose up -d postgres redis grafana
-python scripts/run_sandbox.py  # Ctrl+C for graceful shutdown
+docker compose up -d                       # just infra
+python scripts/run_sandbox.py              # Ctrl+C for graceful shutdown
 ```
 
 Uses NT's `SandboxExecutionClient` against live Hyperliquid market data. Every fill and closed position persists to PostgreSQL via `PersistenceActor`. Telegram alerts fire on fills and position changes (if `TELEGRAM_TOKEN` and `TELEGRAM_CHAT_ID` are set in `.env`). Monitor at `http://localhost:3000`.
