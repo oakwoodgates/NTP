@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
 import pandas as pd
 from nautilus_trader.common.actor import Actor
 from nautilus_trader.config import ActorConfig
-from nautilus_trader.model.currencies import USDC
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.events import OrderFilled, PositionClosed
 from nautilus_trader.model.identifiers import InstrumentId, Venue
+
+if TYPE_CHECKING:
+    from nautilus_trader.model.objects import Currency
 
 
 def _valid_instrument_id(s: str) -> bool:
@@ -50,6 +52,14 @@ class AlertActor(Actor):
         self._peak_balance: Decimal | None = None
         self._alerted_drawdown = False
         self._venue = Venue(config.venue)
+        self._instrument_id = (
+            InstrumentId.from_str(config.instrument_id) if config.instrument_id else None
+        )
+        # Account currency for balance lookups — resolved lazily from the
+        # account's own ``currencies()`` set, not from the instrument. See
+        # the matching comment in PersistenceActor for why we don't use
+        # ``instrument.get_cost_currency()`` (HL-specific quirk).
+        self._account_currency: Currency | None = None
 
     def on_start(self) -> None:
         if self.config.instrument_id:
@@ -132,7 +142,12 @@ class AlertActor(Actor):
         account = self.cache.account_for_venue(self._venue)
         if account is None:
             return
-        balance = account.balance(USDC)
+        if self._account_currency is None:
+            currencies = list(account.currencies())
+            if not currencies:
+                return  # no AccountState yet — retry next tick
+            self._account_currency = currencies[0]
+        balance = account.balance(self._account_currency)
         if balance is None:
             return
         current = balance.total.as_decimal()
@@ -145,10 +160,11 @@ class AlertActor(Actor):
         drawdown = (self._peak_balance - current) / self._peak_balance
         if drawdown >= self._drawdown_threshold and not self._alerted_drawdown:
             self._alerted_drawdown = True
+            ccy = str(self._account_currency)
             self._send(
                 f"<b>DRAWDOWN ALERT</b>: {drawdown * 100:.1f}%\n"
-                f"Peak: {self._peak_balance} USDC\n"
-                f"Current: {current} USDC"
+                f"Peak: {self._peak_balance} {ccy}\n"
+                f"Current: {current} {ccy}"
             )
 
     def on_stop(self) -> None:

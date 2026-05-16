@@ -214,7 +214,15 @@ def main() -> None:
         exec_clients={
             "HYPERLIQUID": SandboxExecutionClientConfig(
                 venue="HYPERLIQUID",
-                starting_balances=[f"{settings.starting_capital} USDC"],
+                # HL-specific currency quirk: HyperliquidInstrumentProvider resolves
+                # settlement_currency=USD from /info, while our local make_hl_perp
+                # helper (used in backtests) overrides it to USDC. Seeding USDC here
+                # would create a stranded balance bucket — fills credit _balances[USD],
+                # account.balance(USDC) stays flat at starting_capital forever.
+                # Seeding USD matches the live adapter's currency. Other exchanges
+                # (Binance USDT pairs, etc.) need their own currency here; will lift
+                # into settings.account_currency when we deploy on a second venue.
+                starting_balances=[f"{settings.starting_capital} USD"],
             ),
         },
     ))
@@ -246,7 +254,17 @@ def main() -> None:
     monitor = AccountAliveMonitor(
         AccountAliveMonitorConfig(
             venue="HYPERLIQUID",
-            settlement_currency=venue_config.settlement_currency,
+            # HL-specific: AccountAliveMonitor reads `account.balance_total(<this>)`
+            # and venue_config.settlement_currency is "USDC" (matches the local
+            # make_hl_perp backtest helper). But the live HL adapter funds the
+            # account in USD (the cost currency — where PnL flows), so reading
+            # USDC returns None and the alive predicate never fires. Hardcoding
+            # USD here matches the live runtime; the backtest path in
+            # src/backtesting/engine.py uses venue_config.settlement_currency
+            # unchanged, which is correct for that codepath. TODO: refactor
+            # AccountAliveMonitor to lazy-resolve via instrument.get_cost_currency()
+            # like PersistenceActor does, so this hardcode goes away.
+            settlement_currency="USD",
             venue_leverage=settings.leverage,
             min_trade_notional=settings.liquidation_min_trade_notional,
             fee_rate=venue_config.taker_fee,

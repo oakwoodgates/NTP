@@ -460,11 +460,21 @@ class MACross(ProtectiveStopAware, LiquidationAware, Strategy):
 
         venue = self.config.instrument_id.venue
         account = self.cache.account_for_venue(venue)
-        equity = (
-            account.balance_total(self.instrument.settlement_currency).as_decimal()
-            if account is not None
-            else Decimal("0")
-        )
+        # Read account equity using the account's own currency set — not
+        # an instrument-derived currency. On Hyperliquid the instrument's
+        # cost_currency reports USDC (the on-chain collateral) but the
+        # account is funded in USD (the quote currency where PnL flows);
+        # those differ. ``account.currencies()`` returns what the account
+        # actually has — for single-instrument deployments that's the
+        # currency we seeded with, which matches where PnL credits land.
+        # See PersistenceActor for the full HL-specific rationale.
+        equity = Decimal("0")
+        if account is not None:
+            currencies = list(account.currencies())
+            if currencies:
+                balance = account.balance_total(currencies[0])
+                if balance is not None:
+                    equity = balance.as_decimal()
         notional = compute_notional(equity, self._sizing, self.instrument)
         if notional <= 0:
             self.log.warning(

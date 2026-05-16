@@ -232,7 +232,11 @@ def main() -> None:
         risk_engine=LiveRiskEngineConfig(
             max_order_submit_rate="100/00:00:01",
             max_order_modify_rate="100/00:00:01",
-            max_notional_per_order={"USDC": 500},
+            # HL-specific: see run_sandbox.py for the USD vs USDC explanation.
+            # The live HyperliquidExecClient denominates orders in USD per the
+            # adapter's /info convention; the RiskEngine's max_notional_per_order
+            # dict must key off the same currency.
+            max_notional_per_order={"USD": 500},
         ),
         data_clients={
             "HYPERLIQUID": HyperliquidDataClientConfig(
