@@ -110,8 +110,8 @@
         "type": "custom",
         "label": "Bar Interval",
         "description": "Used by the Bars-Since-Last-Bar-Open stat to normalise the freshness metric. Pick the interval matching the trader you're monitoring.",
-        "query": "900 : 15m, 3600 : 1h, 14400 : 4h, 86400 : 1d",
-        "current": { "text": "15m", "value": "900" },
+        "query": "15m : 900,1h : 3600,4h : 14400,1d : 86400",
+        "current": { "text": "15m", "value": "900", "selected": true },
         "options": [
           { "text": "15m", "value": "900", "selected": true },
           { "text": "1h", "value": "3600", "selected": false },
