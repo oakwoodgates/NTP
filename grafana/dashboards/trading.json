@@ -536,11 +536,12 @@
       ]
     },
     {
-      "title": "Position PnL Distribution",
-      "type": "barchart",
+      "title": "Realized PnL Distribution",
+      "type": "histogram",
       "id": 4,
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 14 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "description": "Histogram of realized_pnl across closed positions. Shape tells you about edge: tight cluster near zero = chop / cross-flip churn; fat right tail = trend-rider with occasional big wins.",
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
@@ -556,15 +557,34 @@
         },
         "overrides": []
       },
-      "options": {
-        "orientation": "vertical",
-        "colorByField": "PnL",
-        "xTickLabelRotation": -45,
-        "showValue": "auto"
-      },
+      "options": { "bucketSize": null, "combine": false },
       "targets": [
         {
-          "rawSql": "SELECT position_id AS \"Position\", realized_pnl AS \"PnL\" FROM positions WHERE run_id::text LIKE '$run_id' ORDER BY ts_closed DESC LIMIT 30",
+          "rawSql": "SELECT realized_pnl AS \"PnL\" FROM positions WHERE run_id::text LIKE '$run_id'",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Position Duration Distribution",
+      "type": "histogram",
+      "id": 15,
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 14 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "description": "Histogram of how long positions stayed open, in minutes. Short tail (< 1 bar interval) = stops or instant flips; long tail = trend-rides. For cross-only strategies expect clusters around N × bar_interval.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "custom": { "fillOpacity": 80 },
+          "color": { "mode": "fixed", "fixedColor": "blue" }
+        },
+        "overrides": []
+      },
+      "options": { "bucketSize": null, "combine": false },
+      "targets": [
+        {
+          "rawSql": "SELECT duration_ns::float / 1e9 / 60 AS \"Minutes\" FROM positions WHERE run_id::text LIKE '$run_id' AND duration_ns IS NOT NULL",
           "format": "table",
           "refId": "A"
         }
@@ -645,6 +665,37 @@
       "targets": [
         {
           "rawSql": "SELECT COUNT(*) AS \"Fills\" FROM order_fills WHERE run_id::text LIKE '$run_id'",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Profit Factor",
+      "type": "stat",
+      "id": 14,
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 22 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "description": "Gross winning PnL / |gross losing PnL| across closed positions. Reads NaN until at least one loss closes. PF > 1 = net profitable; project convention is ≥ 1.5 as 'meaningful'.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 1.0 },
+              { "color": "green", "value": 1.5 }
+            ]
+          },
+          "noValue": "n/a"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT SUM(realized_pnl) FILTER (WHERE realized_pnl > 0) / NULLIF(ABS(SUM(realized_pnl) FILTER (WHERE realized_pnl < 0)), 0) AS \"Profit Factor\" FROM positions WHERE run_id::text LIKE '$run_id'",
           "format": "table",
           "refId": "A"
         }
@@ -732,10 +783,135 @@
       ]
     },
     {
+      "type": "row",
+      "id": 300,
+      "title": "Commission & Slippage",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 30 },
+      "collapsed": true,
+      "panels": [
+        {
+          "title": "Total Commission",
+          "type": "stat",
+          "id": 301,
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 31 },
+          "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+          "description": "Cumulative commission paid across all fills for the selected run. Sandbox returns 0 (no fees modeled); will populate on HL testnet (Stage B).",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "decimals": 4,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "blue", "value": null }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": { "colorMode": "value", "graphMode": "none" },
+          "targets": [
+            {
+              "rawSql": "SELECT COALESCE(SUM(commission), 0) AS \"Total Commission\" FROM order_fills WHERE run_id::text LIKE '$run_id'",
+              "format": "table",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "title": "Commission % of Gross PnL",
+          "type": "stat",
+          "id": 302,
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 31 },
+          "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+          "description": "Total commission as a fraction of gross PnL (sum of absolute realized_pnl values). Watch this on HL testnet — if it climbs past ~25%, fees are eating the edge.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "decimals": 2,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 0.15 },
+                  { "color": "red", "value": 0.25 }
+                ]
+              },
+              "noValue": "n/a"
+            },
+            "overrides": []
+          },
+          "options": { "colorMode": "background", "graphMode": "none" },
+          "targets": [
+            {
+              "rawSql": "WITH c AS (SELECT COALESCE(SUM(commission), 0) AS comm FROM order_fills WHERE run_id::text LIKE '$run_id'), p AS (SELECT COALESCE(SUM(ABS(realized_pnl)), 0) AS gross FROM positions WHERE run_id::text LIKE '$run_id') SELECT CASE WHEN p.gross > 0 THEN c.comm / p.gross ELSE NULL END AS \"Comm/Gross\" FROM c, p",
+              "format": "table",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "title": "TAKER Ratio",
+          "type": "stat",
+          "id": 303,
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 31 },
+          "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+          "description": "Fraction of fills tagged TAKER (vs MAKER or NO_LIQUIDITY_SIDE). MACross uses MARKET orders so expect ~1.0 here.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "decimals": 2,
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 0.7 },
+                  { "color": "red", "value": 0.9 }
+                ]
+              },
+              "noValue": "n/a"
+            },
+            "overrides": []
+          },
+          "options": { "colorMode": "value", "graphMode": "none" },
+          "targets": [
+            {
+              "rawSql": "SELECT CASE WHEN COUNT(*) > 0 THEN COUNT(*) FILTER (WHERE liquidity_side = 'TAKER')::float / COUNT(*) ELSE NULL END AS \"TAKER Ratio\" FROM order_fills WHERE run_id::text LIKE '$run_id'",
+              "format": "table",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "title": "Cumulative Commission Paid",
+          "type": "timeseries",
+          "id": 304,
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 35 },
+          "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+          "description": "Cumulative commission paid over time. Slope = fee burn rate. Stays flat in sandbox (commission = 0).",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "decimals": 4,
+              "custom": { "lineWidth": 2, "fillOpacity": 10, "spanNulls": true }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "rawSql": "SELECT ts AS time, SUM(commission) OVER (ORDER BY ts) AS \"Cumulative Commission\" FROM order_fills WHERE $__timeFilter(ts) AND run_id::text LIKE '$run_id' ORDER BY ts",
+              "format": "time_series",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "title": "Recent Fills",
       "type": "table",
       "id": 11,
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 30 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 31 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
       "fieldConfig": { "defaults": {}, "overrides": [] },
       "targets": [
@@ -750,7 +926,7 @@
       "title": "Recent Positions",
       "type": "table",
       "id": 12,
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 38 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 39 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
       "fieldConfig": {
         "defaults": {},
@@ -782,39 +958,54 @@
       ]
     },
     {
-      "title": "All Runs (matching filters)",
+      "title": "Active Runs",
       "type": "table",
       "id": 13,
-      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 46 },
+      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 47 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
-      "description": "All matching runs (active and completed) — Active = stopped_at IS NULL (green). Filtered by trader/strategy/instrument/mode pickers but ignores the run_id picker.",
+      "description": "Currently running strategies (stopped_at IS NULL). Count should match your expected container count. Includes hours_running for at-a-glance uptime.",
       "fieldConfig": {
         "defaults": {},
         "overrides": [
           {
-            "matcher": { "id": "byName", "options": "stopped_at" },
+            "matcher": { "id": "byName", "options": "hours_running" },
             "properties": [
-              {
-                "id": "custom.cellOptions",
-                "value": { "type": "color-background" }
-              },
-              {
-                "id": "thresholds",
-                "value": {
-                  "mode": "absolute",
-                  "steps": [
-                    { "color": "green", "value": null },
-                    { "color": "transparent", "value": 1 }
-                  ]
-                }
-              }
+              { "id": "unit", "value": "h" },
+              { "id": "decimals", "value": 1 }
             ]
           }
         ]
       },
       "targets": [
         {
-          "rawSql": "SELECT id, trader_id, strategy_id, instrument_id, run_mode, started_at, stopped_at FROM strategy_runs WHERE trader_id LIKE '$trader_id' AND strategy_id LIKE '$strategy_id' AND instrument_id LIKE '$instrument_id' AND run_mode LIKE '$run_mode' ORDER BY started_at DESC LIMIT 20",
+          "rawSql": "SELECT id, trader_id, strategy_id, instrument_id, run_mode, started_at, EXTRACT(EPOCH FROM (NOW() - started_at)) / 3600 AS hours_running FROM strategy_runs WHERE stopped_at IS NULL AND trader_id LIKE '$trader_id' AND strategy_id LIKE '$strategy_id' AND instrument_id LIKE '$instrument_id' AND run_mode LIKE '$run_mode' ORDER BY started_at DESC LIMIT 10",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Completed Runs",
+      "type": "table",
+      "id": 16,
+      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 47 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "description": "Runs that have shut down (stopped_at IS NOT NULL). Includes duration_hours for the full run window.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "duration_hours" },
+            "properties": [
+              { "id": "unit", "value": "h" },
+              { "id": "decimals", "value": 1 }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "rawSql": "SELECT id, trader_id, instrument_id, run_mode, started_at, stopped_at, EXTRACT(EPOCH FROM (stopped_at - started_at)) / 3600 AS duration_hours FROM strategy_runs WHERE stopped_at IS NOT NULL AND trader_id LIKE '$trader_id' AND strategy_id LIKE '$strategy_id' AND instrument_id LIKE '$instrument_id' AND run_mode LIKE '$run_mode' ORDER BY started_at DESC LIMIT 10",
           "format": "table",
           "refId": "A"
         }

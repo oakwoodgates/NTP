@@ -216,10 +216,16 @@ The "Trading Overview" dashboard has six template variables (the first five casc
    - *MA Divergence* — relative gap `(fast - slow) / slow`; zero-crossings cause flips.
    - *Bars Since Last Flip*, *Acted / Emitted (24h)*, *Bootstrap Bars* — gate-health stats.
    - *Recent Signal Events* — last 50 rows with `acted=true` highlighted yellow.
-3. Balance / PnL / Drawdown / Position-PnL panels (unchanged from prior version).
-4. Stats row: Win Rate, Total PnL, Total Trades, Positions Closed, Avg Win / Avg Loss, Max Drawdown.
-5. Recent Fills, Recent Positions tables.
-6. *All Runs (matching filters)* table — active runs (no `stopped_at`) highlighted green.
+3. Balance / Cumulative PnL / Drawdown timeseries panels.
+4. **Position analytics**:
+   - *Realized PnL Distribution* — histogram of `realized_pnl` per closed position. Tight cluster near zero = chop / cross-flip churn; fat right tail = trend-rider.
+   - *Position Duration Distribution* — histogram in minutes (`duration_ns`). For cross-only strategies expect clusters around N × bar_interval.
+5. Stats row: Win Rate, Total PnL, Total Trades, **Profit Factor**, Positions Closed, Avg Win / Avg Loss, Max Drawdown. PF reads `n/a` until at least one winner and one loser have closed.
+6. **Commission & Slippage** row (collapsed by default — most useful on HL testnet where commissions are non-zero):
+   - *Total Commission*, *Commission % of Gross PnL* (yellow > 15%, red > 25%), *TAKER Ratio*.
+   - *Cumulative Commission Paid* timeseries.
+7. Recent Fills, Recent Positions tables.
+8. *Active Runs* (`stopped_at IS NULL`, includes `hours_running`) and *Completed Runs* (`stopped_at IS NOT NULL`, includes `duration_hours`) — side-by-side tables.
 
 **Annotations** are rendered as vertical lines on every timeseries panel:
 - *Run starts* (blue) — `started_at` markers for matching runs.
