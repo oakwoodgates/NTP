@@ -120,11 +120,24 @@ class LiquidationAware:
         return cfg.mm_rate
 
     def _liq_get_equity(self) -> Decimal:
-        """Read current account equity from cache."""
+        """Read current account equity from cache.
+
+        Uses ``account.currencies()`` (what's actually in the account)
+        rather than an instrument-derived currency. On Hyperliquid the
+        instrument's cost_currency reports USDC (on-chain collateral)
+        but the account is funded in USD (quote_currency, where PnL
+        flows). See PersistenceActor for the full HL-specific rationale.
+        """
         venue = self.config.instrument_id.venue  # type: ignore[attr-defined]
         account = self.cache.account_for_venue(venue)  # type: ignore[attr-defined]
-        instrument = self.cache.instrument(self.config.instrument_id)  # type: ignore[attr-defined]
-        balance = account.balance_total(instrument.settlement_currency)
+        if account is None:
+            return Decimal("0")
+        currencies = list(account.currencies())
+        if not currencies:
+            return Decimal("0")
+        balance = account.balance_total(currencies[0])
+        if balance is None:
+            return Decimal("0")
         return balance.as_decimal()  # type: ignore[no-any-return]
 
     def _liq_close_side(self, position_side: PositionSide) -> OrderSide:

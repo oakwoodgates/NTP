@@ -10,17 +10,19 @@ import asyncio
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
 import pandas as pd
 from nautilus_trader.common.actor import Actor
 from nautilus_trader.config import ActorConfig
-from nautilus_trader.model.currencies import USDC
 from nautilus_trader.model.events import OrderFilled, PositionClosed
 from nautilus_trader.model.identifiers import InstrumentId, Venue
 
 from src.core.signal_event import TOPIC_SIGNAL_PREFIX, SignalEvent
+
+if TYPE_CHECKING:
+    from nautilus_trader.model.objects import Currency
 
 
 def _valid_decimal_str(s: str) -> bool:
@@ -51,6 +53,24 @@ class PersistenceActor(Actor):
     def __init__(self, config: PersistenceActorConfig) -> None:
         super().__init__(config)
         self._venue = Venue(config.venue)
+        self._instrument_id = InstrumentId.from_str(config.instrument_id)
+        # Account currency for balance lookups. Resolved lazily from the
+        # ACCOUNT itself (not the instrument) on the first snapshot tick.
+        #
+        # We deliberately don't use ``instrument.get_cost_currency()`` even
+        # though NT's docstring suggests it. On Hyperliquid, NT's
+        # CryptoPerpetual.get_cost_currency() returns settlement_currency=USDC
+        # (the on-chain collateral), but the live HL adapter funds the account
+        # in USD (the quote/contract currency where PnL flows). Reading USDC
+        # against a USD-funded account returns None and breaks every
+        # downstream code path.
+        #
+        # The honest source of truth is what's actually IN the account.
+        # ``account.currencies()`` returns the set of currencies the account
+        # has balances in. For single-instrument deployments that's a singleton
+        # — the currency we seeded with in ``run_sandbox.py`` / ``run_live.py``,
+        # which is the same currency NT credits PnL to.
+        self._account_currency: Currency | None = None
 
     def on_start(self) -> None:
         self.subscribe_order_fills(InstrumentId.from_str(self.config.instrument_id))
@@ -211,7 +231,24 @@ class PersistenceActor(Actor):
         account = self.cache.account_for_venue(self._venue)
         if account is None:
             return
-        balance = account.balance(USDC)
+        if self._account_currency is None:
+            currencies = list(account.currencies())
+            if not currencies:
+                # No AccountState received yet — wait for the next tick.
+                return
+            if len(currencies) > 1:
+                # Multi-currency account — not a deployment shape we support
+                # today. Pick the first deterministically and log so it's
+                # visible if/when this happens.
+                self.log.warning(
+                    f"PersistenceActor: account has multiple currencies "
+                    f"{[str(c) for c in currencies]}; using {currencies[0]}"
+                )
+            self._account_currency = currencies[0]
+            self.log.info(
+                f"PersistenceActor: resolved account_currency={self._account_currency}"
+            )
+        balance = account.balance(self._account_currency)
         if balance is None:
             return
         ts = datetime.now(tz=UTC)
@@ -223,7 +260,7 @@ class PersistenceActor(Actor):
                 ts,
                 uuid.UUID(self.config.run_id),
                 self.config.venue,
-                "USDC",
+                str(self._account_currency),
                 balance_total,
                 balance_free,
                 balance_locked,
