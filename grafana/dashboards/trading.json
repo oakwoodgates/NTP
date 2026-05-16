@@ -104,6 +104,22 @@
         "current": { "text": "All", "value": "$__all" },
         "multi": false,
         "refresh": 1
+      },
+      {
+        "name": "bar_interval_seconds",
+        "type": "custom",
+        "label": "Bar Interval",
+        "description": "Used by the Time-Since-Last-Bar-Close stat to subtract the bar interval from the raw gap. Pick the interval matching the trader you're monitoring.",
+        "query": "15m : 900,1h : 3600,4h : 14400,1d : 86400",
+        "current": { "text": "15m", "value": "900", "selected": true },
+        "options": [
+          { "text": "15m", "value": "900", "selected": true },
+          { "text": "1h", "value": "3600", "selected": false },
+          { "text": "4h", "value": "14400", "selected": false },
+          { "text": "1d", "value": "86400", "selected": false }
+        ],
+        "includeAll": false,
+        "multi": false
       }
     ]
   },
@@ -117,12 +133,12 @@
       "panels": []
     },
     {
-      "title": "Time Since Last Bar",
+      "title": "Time Since Last Bar Close",
       "type": "stat",
       "id": 101,
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
-      "description": "Seconds since the most recent signal_events row. A wedged trader will let this climb; for 15m bars it should stay under ~16 min between bars.",
+      "description": "Wall-clock time since the most recent bar close. Computed as (NOW() - MAX(signal_events.ts) - bar_interval), because signal_events.ts stores bar OPEN time (NT's canonical bar key). Reads ~0 right after a bar fires; climbs toward one bar interval before the next bar arrives, then resets. Yellow > one bar interval (next bar is overdue); red > two bar intervals (real wedge). Adjust the Bar Interval picker to match the trader you're monitoring.",
       "fieldConfig": {
         "defaults": {
           "unit": "s",
@@ -140,7 +156,7 @@
       "options": { "colorMode": "background", "graphMode": "none" },
       "targets": [
         {
-          "rawSql": "SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(ts))), -1) AS \"Seconds\" FROM signal_events WHERE run_id::text LIKE '$run_id'",
+          "rawSql": "SELECT GREATEST(0, EXTRACT(EPOCH FROM (NOW() - MAX(ts))) - ${bar_interval_seconds}::numeric) AS \"Seconds Since Close\" FROM signal_events WHERE run_id::text LIKE '$run_id'",
           "format": "table",
           "refId": "A"
         }
