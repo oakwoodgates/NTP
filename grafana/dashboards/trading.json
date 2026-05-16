@@ -1,5 +1,44 @@
 {
-  "annotations": { "list": [] },
+  "annotations": {
+    "list": [
+      {
+        "name": "Run starts",
+        "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+        "enable": true,
+        "hide": false,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "target": {
+          "rawQuery": true,
+          "rawSql": "SELECT started_at AS time, 'Run started: ' || strategy_id || ' / ' || instrument_id AS text FROM strategy_runs WHERE $__timeFilter(started_at) AND strategy_id LIKE '$strategy_id' AND trader_id LIKE '$trader_id' AND instrument_id LIKE '$instrument_id' AND run_mode LIKE '$run_mode' ORDER BY started_at",
+          "format": "table"
+        }
+      },
+      {
+        "name": "Run stops",
+        "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+        "enable": true,
+        "hide": false,
+        "iconColor": "rgba(255, 96, 96, 1)",
+        "target": {
+          "rawQuery": true,
+          "rawSql": "SELECT stopped_at AS time, 'Run stopped: ' || strategy_id || ' / ' || instrument_id AS text FROM strategy_runs WHERE stopped_at IS NOT NULL AND $__timeFilter(stopped_at) AND strategy_id LIKE '$strategy_id' AND trader_id LIKE '$trader_id' AND instrument_id LIKE '$instrument_id' AND run_mode LIKE '$run_mode' ORDER BY stopped_at",
+          "format": "table"
+        }
+      },
+      {
+        "name": "Acted signals",
+        "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+        "enable": false,
+        "hide": false,
+        "iconColor": "rgba(255, 204, 0, 1)",
+        "target": {
+          "rawQuery": true,
+          "rawSql": "SELECT ts AS time, 'Acted: signal=' || signal::text || CASE WHEN bootstrap THEN ' (bootstrap)' ELSE '' END AS text FROM signal_events WHERE acted = true AND $__timeFilter(ts) AND run_id::text LIKE '$run_id' ORDER BY ts",
+          "format": "table"
+        }
+      }
+    ]
+  },
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -7,10 +46,11 @@
   "templating": {
     "list": [
       {
-        "name": "strategy_id",
+        "name": "trader_id",
         "type": "query",
+        "label": "Trader",
         "datasource": { "type": "postgres", "uid": "PostgreSQL" },
-        "query": "SELECT DISTINCT strategy_id FROM strategy_runs ORDER BY strategy_id",
+        "query": "SELECT DISTINCT trader_id FROM strategy_runs ORDER BY trader_id",
         "includeAll": true,
         "allValue": "%",
         "current": { "text": "All", "value": "$__all" },
@@ -18,10 +58,23 @@
         "refresh": 1
       },
       {
-        "name": "run_id",
+        "name": "strategy_id",
         "type": "query",
+        "label": "Strategy",
         "datasource": { "type": "postgres", "uid": "PostgreSQL" },
-        "query": "SELECT id::text FROM strategy_runs WHERE strategy_id LIKE '$strategy_id' ORDER BY started_at DESC LIMIT 20",
+        "query": "SELECT DISTINCT strategy_id FROM strategy_runs WHERE trader_id LIKE '$trader_id' ORDER BY strategy_id",
+        "includeAll": true,
+        "allValue": "%",
+        "current": { "text": "All", "value": "$__all" },
+        "multi": false,
+        "refresh": 1
+      },
+      {
+        "name": "instrument_id",
+        "type": "query",
+        "label": "Instrument",
+        "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+        "query": "SELECT DISTINCT instrument_id FROM strategy_runs WHERE trader_id LIKE '$trader_id' AND strategy_id LIKE '$strategy_id' ORDER BY instrument_id",
         "includeAll": true,
         "allValue": "%",
         "current": { "text": "All", "value": "$__all" },
@@ -31,8 +84,21 @@
       {
         "name": "run_mode",
         "type": "query",
+        "label": "Mode",
         "datasource": { "type": "postgres", "uid": "PostgreSQL" },
         "query": "SELECT DISTINCT run_mode FROM strategy_runs ORDER BY run_mode",
+        "includeAll": true,
+        "allValue": "%",
+        "current": { "text": "All", "value": "$__all" },
+        "multi": false,
+        "refresh": 1
+      },
+      {
+        "name": "run_id",
+        "type": "query",
+        "label": "Run",
+        "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+        "query": "SELECT id::text FROM strategy_runs WHERE trader_id LIKE '$trader_id' AND strategy_id LIKE '$strategy_id' AND instrument_id LIKE '$instrument_id' AND run_mode LIKE '$run_mode' ORDER BY started_at DESC LIMIT 20",
         "includeAll": true,
         "allValue": "%",
         "current": { "text": "All", "value": "$__all" },
@@ -43,10 +109,345 @@
   },
   "panels": [
     {
+      "type": "row",
+      "id": 100,
+      "title": "Operational Health",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "title": "Time Since Last Bar",
+      "type": "stat",
+      "id": 101,
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "description": "Seconds since the most recent signal_events row. A wedged trader will let this climb; for 15m bars it should stay under ~16 min between bars.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 900 },
+              { "color": "red", "value": 1800 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "none" },
+      "targets": [
+        {
+          "rawSql": "SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(ts))), -1) AS \"Seconds\" FROM signal_events WHERE run_id::text LIKE '$run_id'",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Time Since Last Fill",
+      "type": "stat",
+      "id": 102,
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 1 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "description": "Seconds since the most recent order_fills row. High values during ranging markets are normal; investigate if no fills for > 1 day during active hours.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 86400 },
+              { "color": "red", "value": 172800 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "none" },
+      "targets": [
+        {
+          "rawSql": "SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(ts))), -1) AS \"Seconds\" FROM order_fills WHERE run_id::text LIKE '$run_id'",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Last Account Snapshot Age",
+      "type": "stat",
+      "id": 103,
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "description": "PersistenceActor writes an account_snapshots row every 60s. Warning > 2 min means executor lag or wedge.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 120 },
+              { "color": "red", "value": 300 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "none" },
+      "targets": [
+        {
+          "rawSql": "SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(ts))), -1) AS \"Seconds\" FROM account_snapshots WHERE run_id::text LIKE '$run_id'",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "title": "Active Runs",
+      "type": "stat",
+      "id": 104,
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "description": "Number of strategy_runs rows with stopped_at IS NULL, filtered by trader/strategy/instrument/mode pickers. Should equal the number of trader containers you expect running.",
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "colorMode": "background", "graphMode": "none" },
+      "targets": [
+        {
+          "rawSql": "SELECT COUNT(*) AS \"Active\" FROM strategy_runs WHERE stopped_at IS NULL AND trader_id LIKE '$trader_id' AND strategy_id LIKE '$strategy_id' AND instrument_id LIKE '$instrument_id' AND run_mode LIKE '$run_mode'",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "id": 200,
+      "title": "Signal Gate (Phase 2.5)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "collapsed": true,
+      "panels": [
+        {
+          "title": "Signal Stream",
+          "type": "timeseries",
+          "id": 201,
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+          "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+          "description": "Per-bar signal gate state. +1 = LONG, -1 = SHORT, 0 = NONE. Stepwise interpolation shows the gate as a square wave; flips align with acted=true bars.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "min": -1.5,
+              "max": 1.5,
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 0,
+                "lineInterpolation": "stepBefore",
+                "showPoints": "always",
+                "pointSize": 5,
+                "spanNulls": true
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "grey", "value": -0.5 },
+                  { "color": "green", "value": 0.5 }
+                ]
+              },
+              "color": { "mode": "thresholds" }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "rawSql": "SELECT ts AS time, signal AS \"Signal\" FROM signal_events WHERE $__timeFilter(ts) AND run_id::text LIKE '$run_id' ORDER BY ts",
+              "format": "time_series",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "title": "MA Divergence ((fast - slow) / slow)",
+          "type": "timeseries",
+          "id": 202,
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+          "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+          "description": "Relative gap between fast and slow MA from signal_events. Zero-crossings drive cross-gate flips. Shows how 'close to a flip' the gate is at any moment.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "custom": {
+                "lineWidth": 2,
+                "fillOpacity": 10,
+                "spanNulls": true,
+                "gradientMode": "scheme"
+              },
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "red", "value": null },
+                  { "color": "green", "value": 0 }
+                ]
+              },
+              "color": { "mode": "thresholds" }
+            },
+            "overrides": []
+          },
+          "targets": [
+            {
+              "rawSql": "SELECT ts AS time, (fast_value - slow_value) / NULLIF(slow_value, 0) AS \"Divergence\" FROM signal_events WHERE $__timeFilter(ts) AND run_id::text LIKE '$run_id' ORDER BY ts",
+              "format": "time_series",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "title": "Bars Since Last Flip",
+          "type": "stat",
+          "id": 203,
+          "gridPos": { "h": 4, "w": 6, "x": 0, "y": 14 },
+          "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+          "description": "Count of signal_events rows since the last acted=true row. A trader stuck flipping every bar would read 0-1; a trader holding a trend would read in the tens.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "blue", "value": null }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": { "colorMode": "value", "graphMode": "none" },
+          "targets": [
+            {
+              "rawSql": "WITH last_acted AS (SELECT COALESCE(MAX(ts), '-infinity'::timestamptz) AS last_ts FROM signal_events WHERE run_id::text LIKE '$run_id' AND acted = true) SELECT COUNT(*) AS \"Bars\" FROM signal_events s, last_acted l WHERE s.run_id::text LIKE '$run_id' AND s.ts > l.last_ts",
+              "format": "table",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "title": "Acted / Emitted (24h)",
+          "type": "stat",
+          "id": 204,
+          "gridPos": { "h": 4, "w": 6, "x": 6, "y": 14 },
+          "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+          "description": "Acted vs emitted bar count in the last 24h. Acted should be small (0-5 typically); high acted/emitted ratio is a warning sign for a flapping gate.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "blue", "value": null }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": { "colorMode": "value", "graphMode": "none" },
+          "targets": [
+            {
+              "rawSql": "SELECT COUNT(*) FILTER (WHERE acted) AS \"Acted\", COUNT(*) AS \"Emitted\" FROM signal_events WHERE run_id::text LIKE '$run_id' AND ts > NOW() - INTERVAL '24 hours'",
+              "format": "table",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "title": "Bootstrap Bars",
+          "type": "stat",
+          "id": 205,
+          "gridPos": { "h": 4, "w": 6, "x": 12, "y": 14 },
+          "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+          "description": "Count of signal_events with bootstrap=true. Should be 0 unless BOOTSTRAP_ON_DEPLOY is enabled and we're inside the bootstrap window.",
+          "fieldConfig": {
+            "defaults": {
+              "unit": "none",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  { "color": "green", "value": null },
+                  { "color": "yellow", "value": 1 }
+                ]
+              }
+            },
+            "overrides": []
+          },
+          "options": { "colorMode": "value", "graphMode": "none" },
+          "targets": [
+            {
+              "rawSql": "SELECT COUNT(*) AS \"Bootstrap\" FROM signal_events WHERE run_id::text LIKE '$run_id' AND bootstrap = true",
+              "format": "table",
+              "refId": "A"
+            }
+          ]
+        },
+        {
+          "title": "Recent Signal Events",
+          "type": "table",
+          "id": 206,
+          "gridPos": { "h": 8, "w": 6, "x": 18, "y": 14 },
+          "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+          "description": "Most recent 50 signal_events rows. Use to spot-check that acted=true aligns with the cross_gate log lines.",
+          "fieldConfig": {
+            "defaults": {},
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "acted" },
+                "properties": [
+                  {
+                    "id": "custom.cellOptions",
+                    "value": { "type": "color-background" }
+                  },
+                  {
+                    "id": "thresholds",
+                    "value": {
+                      "mode": "absolute",
+                      "steps": [
+                        { "color": "transparent", "value": null },
+                        { "color": "yellow", "value": 1 }
+                      ]
+                    }
+                  }
+                ]
+              }
+            ]
+          },
+          "targets": [
+            {
+              "rawSql": "SELECT ts, signal, acted, bootstrap FROM signal_events WHERE run_id::text LIKE '$run_id' ORDER BY ts DESC LIMIT 50",
+              "format": "table",
+              "refId": "A"
+            }
+          ]
+        }
+      ]
+    },
+    {
       "title": "Account Balance",
       "type": "timeseries",
       "id": 1,
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
       "fieldConfig": {
         "defaults": {
@@ -67,7 +468,7 @@
       "title": "Cumulative PnL",
       "type": "timeseries",
       "id": 2,
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
       "fieldConfig": {
         "defaults": {
@@ -88,7 +489,7 @@
       "title": "Drawdown %",
       "type": "timeseries",
       "id": 3,
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
       "fieldConfig": {
         "defaults": {
@@ -122,7 +523,7 @@
       "title": "Position PnL Distribution",
       "type": "barchart",
       "id": 4,
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
       "fieldConfig": {
         "defaults": {
@@ -157,7 +558,7 @@
       "title": "Win Rate",
       "type": "stat",
       "id": 5,
-      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 16 },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 22 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
       "fieldConfig": {
         "defaults": {
@@ -185,7 +586,7 @@
       "title": "Total PnL",
       "type": "stat",
       "id": 6,
-      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 16 },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 22 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
       "fieldConfig": {
         "defaults": {
@@ -212,7 +613,7 @@
       "title": "Total Trades",
       "type": "stat",
       "id": 7,
-      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 16 },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 22 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
       "fieldConfig": {
         "defaults": {
@@ -237,7 +638,7 @@
       "title": "Positions Closed",
       "type": "stat",
       "id": 8,
-      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 20 },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 26 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
       "fieldConfig": {
         "defaults": {
@@ -262,7 +663,7 @@
       "title": "Avg Win / Avg Loss",
       "type": "stat",
       "id": 9,
-      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 20 },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 26 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
       "fieldConfig": {
         "defaults": {
@@ -290,7 +691,7 @@
       "title": "Max Drawdown",
       "type": "stat",
       "id": 10,
-      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 20 },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 26 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
       "fieldConfig": {
         "defaults": {
@@ -318,7 +719,7 @@
       "title": "Recent Fills",
       "type": "table",
       "id": 11,
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 30 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
       "fieldConfig": { "defaults": {}, "overrides": [] },
       "targets": [
@@ -333,7 +734,7 @@
       "title": "Recent Positions",
       "type": "table",
       "id": 12,
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 32 },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 38 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
       "fieldConfig": {
         "defaults": {},
@@ -365,15 +766,39 @@
       ]
     },
     {
-      "title": "Active Runs",
+      "title": "All Runs (matching filters)",
       "type": "table",
       "id": 13,
-      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 40 },
+      "gridPos": { "h": 6, "w": 24, "x": 0, "y": 46 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "description": "All matching runs (active and completed) — Active = stopped_at IS NULL (green). Filtered by trader/strategy/instrument/mode pickers but ignores the run_id picker.",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "stopped_at" },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": { "type": "color-background" }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "transparent", "value": 1 }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
       "targets": [
         {
-          "rawSql": "SELECT id, strategy_id, instrument_id, run_mode, started_at, stopped_at FROM strategy_runs WHERE strategy_id LIKE '$strategy_id' ORDER BY started_at DESC LIMIT 20",
+          "rawSql": "SELECT id, trader_id, strategy_id, instrument_id, run_mode, started_at, stopped_at FROM strategy_runs WHERE trader_id LIKE '$trader_id' AND strategy_id LIKE '$strategy_id' AND instrument_id LIKE '$instrument_id' AND run_mode LIKE '$run_mode' ORDER BY started_at DESC LIMIT 20",
           "format": "table",
           "refId": "A"
         }
@@ -381,7 +806,7 @@
     }
   ],
   "schemaVersion": 39,
-  "tags": ["trading"],
+  "tags": ["trading", "phase-2.5"],
   "time": { "from": "now-7d", "to": "now" },
   "timepicker": {},
   "timezone": "utc",
