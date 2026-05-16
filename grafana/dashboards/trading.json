@@ -109,7 +109,7 @@
         "name": "bar_interval_seconds",
         "type": "custom",
         "label": "Bar Interval",
-        "description": "Used by the Bars-Since-Last-Bar-Open stat to normalise the freshness metric. Pick the interval matching the trader you're monitoring.",
+        "description": "Used by the Time-Since-Last-Bar-Close stat to subtract the bar interval from the raw gap. Pick the interval matching the trader you're monitoring.",
         "query": "15m : 900,1h : 3600,4h : 14400,1d : 86400",
         "current": { "text": "15m", "value": "900", "selected": true },
         "options": [
@@ -133,22 +133,21 @@
       "panels": []
     },
     {
-      "title": "Bars Since Last Bar Open",
+      "title": "Time Since Last Bar Close",
       "type": "stat",
       "id": 101,
       "gridPos": { "h": 4, "w": 6, "x": 0, "y": 1 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
-      "description": "Gap between NOW() and the most recent signal_events row, expressed in bar-intervals. signal_events.ts stores the bar OPEN timestamp (NT's canonical bar key), so this gauge oscillates between 1.0 (right after a bar fires) and 2.0 (right before the next bar arrives) during healthy operation. Yellow > 1.5 means the next bar is overdue; red > 2.0 means at least one bar was missed (real wedge). Adjust the Bar Interval picker if monitoring a non-15m trader.",
+      "description": "Wall-clock time since the most recent bar close. Computed as (NOW() - MAX(signal_events.ts) - bar_interval), because signal_events.ts stores bar OPEN time (NT's canonical bar key). Reads ~0 right after a bar fires; climbs toward one bar interval before the next bar arrives, then resets. Yellow > one bar interval (next bar is overdue); red > two bar intervals (real wedge). Adjust the Bar Interval picker to match the trader you're monitoring.",
       "fieldConfig": {
         "defaults": {
-          "unit": "none",
-          "decimals": 2,
+          "unit": "s",
           "thresholds": {
             "mode": "absolute",
             "steps": [
               { "color": "green", "value": null },
-              { "color": "yellow", "value": 1.5 },
-              { "color": "red", "value": 2.0 }
+              { "color": "yellow", "value": 900 },
+              { "color": "red", "value": 1800 }
             ]
           }
         },
@@ -157,7 +156,7 @@
       "options": { "colorMode": "background", "graphMode": "none" },
       "targets": [
         {
-          "rawSql": "SELECT COALESCE(EXTRACT(EPOCH FROM (NOW() - MAX(ts))) / NULLIF(${bar_interval_seconds}::numeric, 0), -1) AS \"Bars\" FROM signal_events WHERE run_id::text LIKE '$run_id'",
+          "rawSql": "SELECT GREATEST(0, EXTRACT(EPOCH FROM (NOW() - MAX(ts))) - ${bar_interval_seconds}::numeric) AS \"Seconds Since Close\" FROM signal_events WHERE run_id::text LIKE '$run_id'",
           "format": "table",
           "refId": "A"
         }
