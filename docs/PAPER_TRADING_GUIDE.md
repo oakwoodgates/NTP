@@ -193,7 +193,7 @@ ssh -L 3000:localhost:3000 root@<droplet-ip>
 # then open http://localhost:3000 in your browser
 ```
 
-The "Trading Overview" dashboard has five template variables (cascade in this order):
+The "Trading Overview" dashboard has six template variables (the first five cascade in order):
 
 | Variable | Filters |
 |---|---|
@@ -202,11 +202,12 @@ The "Trading Overview" dashboard has five template variables (cascade in this or
 | `instrument_id` | `ETH-USD-PERP.HYPERLIQUID` etc. |
 | `run_mode` | `sandbox` \| `live` |
 | `run_id` | UUID of the strategy run; refreshes when an upstream variable changes |
+| `bar_interval_seconds` | Used by the *Bars Since Last Bar Open* stat. Pick the interval matching the trader you're monitoring (15m / 1h / 4h / 1d). Does not affect any other panel. |
 
 **Panel rows (top to bottom):**
 
 1. **Operational Health** (always visible) — four stats that turn yellow/red when the trader is not keeping up:
-   - *Time Since Last Bar* — seconds since the last `signal_events` row. For 15m bars, stays under ~16 min in normal operation; yellow at 15 min, red at 30 min.
+   - *Bars Since Last Bar Open* — `(NOW() - MAX(signal_events.ts)) / bar_interval_seconds`. `signal_events.ts` stores the bar's OPEN timestamp (NT's canonical bar key — see `src/strategies/ma_cross.py`), so this gauge oscillates between 1.0 (right after a bar fires) and 2.0 (right before the next bar arrives) during healthy operation. Yellow > 1.5 means the next bar is overdue; red > 2.0 means at least one bar was missed (real wedge). Make sure the *Bar Interval* picker matches the trader.
    - *Time Since Last Fill* — seconds since the last `order_fills` row. High during ranging markets is normal; investigate after > 1 day of no fills.
    - *Last Account Snapshot Age* — `PersistenceActor` writes one every 60s. Yellow > 2 min, red > 5 min indicates executor lag or wedge.
    - *Active Runs* — count of `strategy_runs` with `stopped_at IS NULL` matching the picker filters. Should equal your expected container count.
