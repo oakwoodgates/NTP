@@ -220,95 +220,111 @@ def main() -> None:
         config_dict,
     ))
 
-    node = TradingNode(config=TradingNodeConfig(
-        trader_id=settings.trader_id,
-        logging=LoggingConfig(log_level="INFO"),
-        # Startup reconciliation MUST stay on for live trading. Without it,
-        # any restart (crash, redeploy, migration) leaves the cache empty
-        # while the exchange still holds the open position + protective stop
-        # — the next cross signal would double the position size and leave
-        # the prior reduce-only stop orphaned. With reconciliation=True the
-        # exec engine queries the venue on startup, replays order/fill/
-        # position status reports through the HL adapter's generate_*
-        # hooks, and rehydrates the cache to match server state before
-        # the strategy receives any bars. Continuous open/position checks
-        # (open_check_interval_secs, position_check_interval_secs) are
-        # left off; revisit after Stage B if drift is observed.
-        # NT's default is already True — set explicitly so it can't be
-        # silently flipped, and so the regression test in
-        # tests/unit/test_runner_kernel_paths.py has something to pin.
-        exec_engine=LiveExecEngineConfig(
-            reconciliation=True,
-        ),
-        cache=CacheConfig(
-            database=DatabaseConfig(
-                host=settings.redis_host,
-                port=settings.redis_port,
-            ),
-        ),
-        risk_engine=LiveRiskEngineConfig(
-            max_order_submit_rate="100/00:00:01",
-            max_order_modify_rate="100/00:00:01",
-            # HL-specific: see run_sandbox.py for the USD vs USDC explanation.
-            # The live HyperliquidExecClient denominates orders in USD per the
-            # adapter's /info convention; the RiskEngine's max_notional_per_order
-            # dict must key off the same currency.
-            max_notional_per_order={"USD": 500},
-        ),
-        data_clients={
-            "HYPERLIQUID": HyperliquidDataClientConfig(
-                environment=(
-                    HyperliquidEnvironment.TESTNET
-                    if settings.hl_testnet
-                    else HyperliquidEnvironment.MAINNET
-                ),
-            ),
-        },
-        exec_clients={
-            "HYPERLIQUID": HyperliquidExecClientConfig(
-                private_key=settings.hl_private_key,
-                vault_address=settings.hl_wallet_address or None,
-                environment=(
-                    HyperliquidEnvironment.TESTNET
-                    if settings.hl_testnet
-                    else HyperliquidEnvironment.MAINNET
-                ),
-            ),
-        },
-    ))
-
-    node.add_data_client_factory("HYPERLIQUID", HyperliquidLiveDataClientFactory)
-    node.add_exec_client_factory("HYPERLIQUID", HyperliquidLiveExecClientFactory)
-
-    node.trader.add_actor(PersistenceActor(PersistenceActorConfig(
-        postgres_dsn=settings.postgres_dsn,
-        run_id=run_id,
-        venue="HYPERLIQUID",
-        instrument_id=settings.instrument_id,
-    )))
-    node.trader.add_actor(AlertActor(AlertActorConfig(
-        telegram_token=settings.telegram_token,
-        telegram_chat_id=settings.telegram_chat_id,
-        enabled=settings.telegram_enabled,
-        venue="HYPERLIQUID",
-    )))
-
-    node.trader.add_strategy(strategy)
-
-    node.build()
+    # Recurrence guard for orphan strategy_runs rows — mirrors run_sandbox.py.
+    # Everything after `_register_run` must be wrapped so a startup crash
+    # (TradingNode init, factory registration, actor add, `node.build()`)
+    # still calls `_close_run()` to stamp `stopped_at`. Otherwise the
+    # Grafana "Active Runs" panel undercounts forever. See run_sandbox.py
+    # for the full incident context.
+    node: TradingNode | None = None
     interrupted = False
     try:
-        node.run()
-    except KeyboardInterrupt:
-        interrupted = True
-        print("KeyboardInterrupt received, coordinating shutdown...")
-    finally:
+        node = TradingNode(config=TradingNodeConfig(
+            trader_id=settings.trader_id,
+            logging=LoggingConfig(log_level="INFO"),
+            # Startup reconciliation MUST stay on for live trading. Without it,
+            # any restart (crash, redeploy, migration) leaves the cache empty
+            # while the exchange still holds the open position + protective stop
+            # — the next cross signal would double the position size and leave
+            # the prior reduce-only stop orphaned. With reconciliation=True the
+            # exec engine queries the venue on startup, replays order/fill/
+            # position status reports through the HL adapter's generate_*
+            # hooks, and rehydrates the cache to match server state before
+            # the strategy receives any bars. Continuous open/position checks
+            # (open_check_interval_secs, position_check_interval_secs) are
+            # left off; revisit after Stage B if drift is observed.
+            # NT's default is already True — set explicitly so it can't be
+            # silently flipped, and so the regression test in
+            # tests/unit/test_runner_kernel_paths.py has something to pin.
+            exec_engine=LiveExecEngineConfig(
+                reconciliation=True,
+            ),
+            cache=CacheConfig(
+                database=DatabaseConfig(
+                    host=settings.redis_host,
+                    port=settings.redis_port,
+                ),
+            ),
+            risk_engine=LiveRiskEngineConfig(
+                max_order_submit_rate="100/00:00:01",
+                max_order_modify_rate="100/00:00:01",
+                # HL-specific: see run_sandbox.py for the USD vs USDC explanation.
+                # The live HyperliquidExecClient denominates orders in USD per the
+                # adapter's /info convention; the RiskEngine's max_notional_per_order
+                # dict must key off the same currency.
+                max_notional_per_order={"USD": 500},
+            ),
+            data_clients={
+                "HYPERLIQUID": HyperliquidDataClientConfig(
+                    environment=(
+                        HyperliquidEnvironment.TESTNET
+                        if settings.hl_testnet
+                        else HyperliquidEnvironment.MAINNET
+                    ),
+                ),
+            },
+            exec_clients={
+                "HYPERLIQUID": HyperliquidExecClientConfig(
+                    private_key=settings.hl_private_key,
+                    vault_address=settings.hl_wallet_address or None,
+                    environment=(
+                        HyperliquidEnvironment.TESTNET
+                        if settings.hl_testnet
+                        else HyperliquidEnvironment.MAINNET
+                    ),
+                ),
+            },
+        ))
+
+        node.add_data_client_factory("HYPERLIQUID", HyperliquidLiveDataClientFactory)
+        node.add_exec_client_factory("HYPERLIQUID", HyperliquidLiveExecClientFactory)
+
+        node.trader.add_actor(PersistenceActor(PersistenceActorConfig(
+            postgres_dsn=settings.postgres_dsn,
+            run_id=run_id,
+            venue="HYPERLIQUID",
+            instrument_id=settings.instrument_id,
+        )))
+        node.trader.add_actor(AlertActor(AlertActorConfig(
+            telegram_token=settings.telegram_token,
+            telegram_chat_id=settings.telegram_chat_id,
+            enabled=settings.telegram_enabled,
+            venue="HYPERLIQUID",
+        )))
+
+        node.trader.add_strategy(strategy)
+
+        node.build()
         try:
-            node.stop()
+            node.run()
+        except KeyboardInterrupt:
+            interrupted = True
+            print("KeyboardInterrupt received, coordinating shutdown...")
+    finally:
+        if node is not None:
+            try:
+                node.stop()
+            except Exception as exc:
+                print(f"Warning: node.stop() raised {type(exc).__name__}: {exc}")
+            try:
+                node.dispose()
+            except Exception as exc:
+                print(f"Warning: node.dispose() raised {type(exc).__name__}: {exc}")
+        # Best-effort: never let a DB cleanup error mask the original failure.
+        try:
+            asyncio.run(_close_run(settings.postgres_dsn, run_id))
         except Exception as exc:
-            print(f"Warning: node.stop() raised {type(exc).__name__}: {exc}")
-        node.dispose()
-        asyncio.run(_close_run(settings.postgres_dsn, run_id))
+            print(f"run_live: _close_run failed: {type(exc).__name__}: {exc}")
 
     if interrupted:
         print("Interrupted by user, shutdown complete.")
