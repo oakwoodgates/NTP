@@ -41,7 +41,7 @@ from nautilus_trader.adapters.hyperliquid.factories import (
 from nautilus_trader.cache.config import CacheConfig
 from nautilus_trader.common.config import DatabaseConfig, LoggingConfig
 from nautilus_trader.config import TradingNodeConfig
-from nautilus_trader.live.config import LiveRiskEngineConfig
+from nautilus_trader.live.config import LiveExecEngineConfig, LiveRiskEngineConfig
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.data import BarType
 from nautilus_trader.model.identifiers import InstrumentId
@@ -223,6 +223,23 @@ def main() -> None:
     node = TradingNode(config=TradingNodeConfig(
         trader_id=settings.trader_id,
         logging=LoggingConfig(log_level="INFO"),
+        # Startup reconciliation MUST stay on for live trading. Without it,
+        # any restart (crash, redeploy, migration) leaves the cache empty
+        # while the exchange still holds the open position + protective stop
+        # — the next cross signal would double the position size and leave
+        # the prior reduce-only stop orphaned. With reconciliation=True the
+        # exec engine queries the venue on startup, replays order/fill/
+        # position status reports through the HL adapter's generate_*
+        # hooks, and rehydrates the cache to match server state before
+        # the strategy receives any bars. Continuous open/position checks
+        # (open_check_interval_secs, position_check_interval_secs) are
+        # left off; revisit after Stage B if drift is observed.
+        # NT's default is already True — set explicitly so it can't be
+        # silently flipped, and so the regression test in
+        # tests/unit/test_runner_kernel_paths.py has something to pin.
+        exec_engine=LiveExecEngineConfig(
+            reconciliation=True,
+        ),
         cache=CacheConfig(
             database=DatabaseConfig(
                 host=settings.redis_host,
