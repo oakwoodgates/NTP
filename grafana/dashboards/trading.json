@@ -465,6 +465,7 @@
       "id": 1,
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "description": "account_snapshots.balance_total over time. KNOWN ISSUE: in sandbox, NT's MARGIN account does not appear to publish AccountState updates when positions close — even with calculate_account_state=True. The balance therefore reads flat at starting_capital regardless of realized PnL. The Cumulative PnL panel (which reads positions.realized_pnl directly, not the cached account balance) is the reliable source until this is resolved. Investigation pending — see PR notes.",
       "fieldConfig": {
         "defaults": {
           "unit": "currencyUSD",
@@ -507,9 +508,12 @@
       "id": 3,
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "description": "Drawdown as % of running peak equity. Stays at 0 when balance is flat or rising; goes negative on drawdown. Note: this reads from account_snapshots.balance_total — if NT's MARGIN account isn't publishing balance updates on position close (a known sandbox quirk under investigation), this panel will show a flat 0 line even when realized PnL has moved. Cross-check against the Cumulative PnL panel which reads from positions.realized_pnl directly.",
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
+          "min": -0.5,
+          "max": 0.01,
           "custom": {
             "lineWidth": 2,
             "fillOpacity": 20,
@@ -651,6 +655,55 @@
       ]
     },
     {
+      "title": "Current Open Position",
+      "type": "table",
+      "id": 20,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
+      "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "description": "Derived from order_fills + positions: the opening fill whose position has not yet been closed. Empty if the strategy is flat. ``side`` is LONG/SHORT colored; ``time_open`` is duration since entry. Note: ``unrealized_pnl`` is not shown because we don't persist live mark prices in PostgreSQL — check the HL chart or terminal logs for current price to compute it yourself.",
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "side" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+              {
+                "id": "mappings",
+                "value": [
+                  { "type": "value", "options": { "LONG":  { "color": "green", "index": 0 } } },
+                  { "type": "value", "options": { "SHORT": { "color": "red",   "index": 1 } } }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "time_open" },
+            "properties": [
+              { "id": "unit", "value": "s" }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "entry_px" },
+            "properties": [
+              { "id": "unit", "value": "currencyUSD" },
+              { "id": "decimals", "value": 2 }
+            ]
+          }
+        ]
+      },
+      "options": { "showHeader": true, "footer": { "show": false, "reducer": ["sum"], "fields": "" } },
+      "targets": [
+        {
+          "rawSql": "WITH last_close AS (SELECT COALESCE(MAX(ts_closed), '-infinity'::timestamptz) AS last_close_ts FROM positions WHERE run_id::text LIKE '$run_id') SELECT CASE order_side WHEN 'BUY' THEN 'LONG' WHEN 'SELL' THEN 'SHORT' ELSE order_side END AS side, last_qty AS qty, last_px AS entry_px, ts AS opened_at, EXTRACT(EPOCH FROM (NOW() - ts)) AS time_open, instrument_id FROM order_fills, last_close WHERE order_fills.run_id::text LIKE '$run_id' AND order_fills.ts > last_close.last_close_ts ORDER BY order_fills.ts ASC LIMIT 1",
+          "format": "table",
+          "refId": "A"
+        }
+      ]
+    },
+    {
       "title": "Positions Closed",
       "type": "stat",
       "id": 8,
@@ -737,7 +790,28 @@
       "id": 11,
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 30 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
-      "fieldConfig": { "defaults": {}, "overrides": [] },
+      "description": "Per-fill rows for the selected run. ``order_side`` is color-coded (BUY green, SELL red). Whether a fill OPENS or CLOSES a position is not directly recorded in order_fills — derive by cross-referencing with the Recent Positions table's ts_opened/ts_closed columns. (A schema migration to add position_id to order_fills would let us show this directly; deferred to a future PR.)",
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "order_side" },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": { "type": "color-text" }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  { "type": "value", "options": { "BUY":  { "color": "green", "index": 0 } } },
+                  { "type": "value", "options": { "SELL": { "color": "red",   "index": 1 } } }
+                ]
+              }
+            ]
+          }
+        ]
+      },
       "targets": [
         {
           "rawSql": "SELECT ts, strategy_id, instrument_id, order_side, last_qty, last_px, commission, liquidity_side FROM order_fills WHERE run_id::text LIKE '$run_id' ORDER BY ts DESC LIMIT 50",
@@ -752,6 +826,7 @@
       "id": 12,
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 38 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
+      "description": "Closed positions for the selected run. ``side`` (LONG/SHORT) is the position direction — derived from ``entry_side`` (BUY entry → LONG, SELL entry → SHORT). ``ts_opened`` and ``ts_closed`` bracket the position's life; both rendered in the dashboard's configured timezone.",
       "fieldConfig": {
         "defaults": {},
         "overrides": [
@@ -770,12 +845,28 @@
               },
               { "id": "custom.cellOptions", "value": { "type": "color-text" } }
             ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "side" },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": { "type": "color-text" }
+              },
+              {
+                "id": "mappings",
+                "value": [
+                  { "type": "value", "options": { "LONG":  { "color": "green", "index": 0 } } },
+                  { "type": "value", "options": { "SHORT": { "color": "red",   "index": 1 } } }
+                ]
+              }
+            ]
           }
         ]
       },
       "targets": [
         {
-          "rawSql": "SELECT ts_closed, strategy_id, instrument_id, entry_side, peak_qty, avg_px_open, avg_px_close, realized_pnl, realized_return FROM positions WHERE run_id::text LIKE '$run_id' ORDER BY ts_closed DESC LIMIT 50",
+          "rawSql": "SELECT ts_opened, ts_closed, CASE entry_side WHEN 'BUY' THEN 'LONG' WHEN 'SELL' THEN 'SHORT' ELSE entry_side END AS side, strategy_id, instrument_id, peak_qty, avg_px_open, avg_px_close, realized_pnl, realized_return FROM positions WHERE run_id::text LIKE '$run_id' ORDER BY ts_closed DESC LIMIT 50",
           "format": "table",
           "refId": "A"
         }
@@ -825,7 +916,7 @@
   "tags": ["trading", "phase-2.5"],
   "time": { "from": "now-7d", "to": "now" },
   "timepicker": {},
-  "timezone": "utc",
+  "timezone": "America/New_York",
   "title": "Trading Overview",
   "uid": "trading-overview"
 }
