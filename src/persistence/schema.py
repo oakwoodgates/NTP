@@ -23,6 +23,12 @@ strategy_runs = sa.Table(
     sa.Column("started_at", sa.TIMESTAMP(timezone=True), nullable=False),
     sa.Column("stopped_at", sa.TIMESTAMP(timezone=True)),
     sa.Column("config", sa.JSON, nullable=False),
+    # Self-FK to the most-recent prior run of the same
+    # (trader_id, instrument_id, strategy_id, run_mode) tuple. Each
+    # process restart inserts a fresh row; this column lets cross-restart
+    # queries walk the chain via a recursive CTE rather than UNIONing
+    # individual UUIDs together. NULL on the first run of a tuple.
+    sa.Column("parent_run_id", sa.UUID, sa.ForeignKey("strategy_runs.id")),
 )
 
 order_fills = sa.Table(

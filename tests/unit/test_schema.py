@@ -30,6 +30,18 @@ class TestSchema:
         pk_cols = [c.name for c in strategy_runs.primary_key.columns]
         assert pk_cols == ["id"]
 
+    def test_strategy_runs_parent_run_id_self_fk(self) -> None:
+        """``parent_run_id`` is a nullable self-FK so consecutive runs of
+        the same trader can be walked via a recursive CTE without losing
+        the chain at restart boundaries. See Alembic 003.
+        """
+        col = strategy_runs.c["parent_run_id"]
+        assert col.nullable is True, "parent_run_id must be NULL on first runs"
+        fks = [fk.target_fullname for fk in col.foreign_keys]
+        assert fks == ["strategy_runs.id"], (
+            f"parent_run_id must self-reference strategy_runs.id, got {fks}"
+        )
+
     def test_order_fills_fk_to_strategy_runs(self) -> None:
         fks = [fk.target_fullname for c in order_fills.columns for fk in c.foreign_keys]
         assert "strategy_runs.id" in fks

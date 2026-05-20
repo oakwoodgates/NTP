@@ -306,13 +306,37 @@ async def _register_run(
     mode: str,
     config_dict: dict[str, object],
 ) -> None:
+    """Insert a fresh ``strategy_runs`` row, linking to the previous run.
+
+    See ``scripts/run_sandbox.py:_register_run`` for the full rationale —
+    this is the live-runner mirror. Same lookup key
+    ``(trader_id, instrument_id, strategy_id, run_mode)``, so a sandbox
+    run and a live run for the same trader never link to each other
+    even when the rest of the tuple matches.
+    """
     conn = await asyncpg.connect(dsn)
     try:
+        parent_id = await conn.fetchval(
+            """
+            SELECT id FROM strategy_runs
+            WHERE trader_id = $1
+              AND instrument_id = $2
+              AND strategy_id = $3
+              AND run_mode = $4
+            ORDER BY started_at DESC
+            LIMIT 1
+            """,
+            trader_id,
+            instrument_id,
+            strategy_id,
+            mode,
+        )
         await conn.execute(
             """
             INSERT INTO strategy_runs (
-                id, trader_id, strategy_id, instrument_id, run_mode, started_at, config
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+                id, trader_id, strategy_id, instrument_id, run_mode,
+                started_at, config, parent_run_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
             """,
             uuid.UUID(run_id),
             trader_id,
@@ -321,6 +345,7 @@ async def _register_run(
             mode,
             datetime.now(tz=UTC),
             json.dumps(config_dict),
+            parent_id,
         )
     finally:
         await conn.close()
