@@ -31,10 +31,12 @@ Does NOT handle account-level halt — that lives in
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from nautilus_trader.core.rust.model import OrderSide, PositionSide
+from nautilus_trader.model.identifiers import ClientOrderId, PositionId
 
 from src.core.liquidation import (
     TOPIC_POSITION_LIQUIDATED,
@@ -50,7 +52,6 @@ if TYPE_CHECKING:
         PositionClosed,
         PositionOpened,
     )
-    from nautilus_trader.model.identifiers import ClientOrderId, PositionId
 
 
 # Order tag used for cross-margin liquidation stops. Notebooks/tests filter
@@ -345,3 +346,76 @@ class LiquidationAware:
         """
         self._liq_order_ids = {}
         self._liq_count = 0
+
+    # ── State persistence across restarts ───────────────────────────────────
+    #
+    # NT calls ``save()`` during graceful shutdown when the kernel is built
+    # with ``save_state=True``.  We persist the ``position_id → order_id``
+    # mapping so the mixin can still cancel the right reduce-only stop on
+    # ``on_position_closed`` after a restart.  See the analogous block in
+    # ``protective_stop_mixin.py`` for the full rationale.
+    #
+    # ``on_save`` / ``on_load`` call ``super()`` here even though the
+    # legacy position-event handlers don't — the persistence chain is a
+    # NEW cooperative path that doesn't need to match the legacy handlers'
+    # non-cooperative pattern.  Any mixin combined with this one MUST
+    # implement ``on_save`` / ``on_load`` cooperatively if it wants its
+    # state persisted.
+
+    # Use mixin-prefixed attribute names so multiple mixins co-existing on
+    # the same strategy can each look up their own state key via ``self.``
+    # without colliding through Python's MRO attribute resolution.
+    # (``self._STATE_KEY_*`` would resolve to whichever mixin appears first
+    # in MRO — a footgun when two mixins independently define the same key.)
+    _LIQ_STATE_KEY_ORDER_IDS = "liq_order_ids"
+    _LIQ_STATE_KEY_COUNT = "liq_count"
+
+    def on_save(self) -> dict[str, bytes]:
+        """Persist the liquidation ``position_id → order_id`` mapping + counter.
+
+        Encodes the dict as JSON ``{position_id_str: order_id_str, ...}``.
+        ``PositionId`` and ``ClientOrderId`` round-trip via their string
+        values (verified in NT 1.226.0).
+        """
+        state: dict[str, bytes] = super().on_save()  # type: ignore[misc]
+        if hasattr(self, "_liq_order_ids"):
+            serializable = {
+                pos_id.value: order_id.value
+                for pos_id, order_id in self._liq_order_ids.items()
+            }
+            state[self._LIQ_STATE_KEY_ORDER_IDS] = json.dumps(serializable).encode()
+        if hasattr(self, "_liq_count"):
+            state[self._LIQ_STATE_KEY_COUNT] = str(self._liq_count).encode()
+        return state
+
+    def on_load(self, state: dict[str, bytes]) -> None:
+        """Restore the liquidation mapping + counter.
+
+        Defensive: missing or unparseable values fall back to empty dict /
+        zero count.  A state-load error must not stop the trader.
+        """
+        super().on_load(state)  # type: ignore[misc]
+        raw_ids = state.get(self._LIQ_STATE_KEY_ORDER_IDS)
+        if raw_ids is not None:
+            try:
+                decoded = json.loads(raw_ids.decode())
+                self._liq_order_ids = {
+                    PositionId(pos_id): ClientOrderId(order_id)
+                    for pos_id, order_id in decoded.items()
+                }
+            except (ValueError, TypeError) as exc:
+                self.log.warning(  # type: ignore[attr-defined]
+                    f"on_load: invalid {self._LIQ_STATE_KEY_ORDER_IDS}={raw_ids!r} "
+                    f"({exc}); resetting to empty",
+                )
+                self._liq_order_ids = {}
+        raw_count = state.get(self._LIQ_STATE_KEY_COUNT)
+        if raw_count is not None:
+            try:
+                self._liq_count = int(raw_count)
+            except ValueError:
+                self.log.warning(  # type: ignore[attr-defined]
+                    f"on_load: invalid {self._LIQ_STATE_KEY_COUNT}={raw_count!r}; "
+                    "resetting to 0",
+                )
+                self._liq_count = 0

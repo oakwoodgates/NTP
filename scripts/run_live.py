@@ -255,6 +255,10 @@ def main() -> None:
                     port=settings.redis_port,
                 ),
             ),
+            # Persist per-strategy user state across restarts via the
+            # Redis-backed cache. See run_sandbox.py for the rationale.
+            save_state=True,
+            load_state=True,
             risk_engine=LiveRiskEngineConfig(
                 max_order_submit_rate="100/00:00:01",
                 max_order_modify_rate="100/00:00:01",
@@ -305,6 +309,14 @@ def main() -> None:
         node.trader.add_strategy(strategy)
 
         node.build()
+
+        # NT's kernel auto-load runs during ``__init__`` against the
+        # config.strategies/actors lists.  We add strategies imperatively
+        # AFTER kernel init, so we trigger ``trader.load()`` manually to
+        # restore per-strategy state from Redis.  See run_sandbox.py for
+        # the full rationale.
+        node.trader.load()
+
         try:
             node.run()
         except KeyboardInterrupt:

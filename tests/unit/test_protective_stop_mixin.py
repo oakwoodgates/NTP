@@ -45,6 +45,8 @@ class _ChainEnd:
     def on_position_closed(self, event: object) -> None: ...
     def on_order_filled(self, event: object) -> None: ...
     def on_reset(self) -> None: ...
+    def on_save(self) -> dict[str, bytes]: return {}
+    def on_load(self, state: dict[str, bytes]) -> None: ...
 
 
 class _MixinHarness(ProtectiveStopAware, _ChainEnd):
@@ -291,6 +293,97 @@ class TestReset:
         harness.on_reset()
         assert harness._protective_stop_pct == Decimal("0.05")
         assert harness._protective_enabled() is True
+
+
+# ── State persistence (on_save / on_load round-trip) ───────────────────────
+
+
+class TestSaveLoadRoundTrip:
+    """``on_save`` / ``on_load`` must round-trip the ``position_id → order_id``
+    mapping and the fill counter across restart.
+
+    The use case: trader places a protective stop, container dies, container
+    restarts.  After ``on_load`` the mixin should still know which open order
+    is the protective stop for which position so ``on_position_closed`` can
+    cancel it cleanly instead of leaving a reduce-only orphan in the cache.
+    """
+
+    def test_empty_state_round_trips(self) -> None:
+        """Fresh harness with no positions: save → load should leave the
+        dict empty and count at 0."""
+        # Need the identifier classes here for the assertion side.
+        from nautilus_trader.model.identifiers import ClientOrderId, PositionId  # noqa: F401
+
+        h1 = _MixinHarness()
+        h1._init_protective_stop(0.05)
+        state = h1.on_save()
+        h2 = _MixinHarness()
+        h2._init_protective_stop(0.05)
+        h2.on_load(state)
+        assert h2._protective_order_ids == {}
+        assert h2._protective_count == 0
+
+    def test_populated_state_round_trips(self) -> None:
+        """A non-empty dict must come back as the same PositionId → ClientOrderId
+        mapping, with PositionId / ClientOrderId values preserved."""
+        from nautilus_trader.model.identifiers import ClientOrderId, PositionId
+
+        h1 = _MixinHarness()
+        h1._init_protective_stop(0.05)
+        h1._protective_order_ids = {
+            PositionId("P-001"): ClientOrderId("O-001"),
+            PositionId("P-002"): ClientOrderId("O-002"),
+        }
+        h1._protective_count = 3
+        state = h1.on_save()
+
+        h2 = _MixinHarness()
+        h2._init_protective_stop(0.05)
+        h2.on_load(state)
+        assert len(h2._protective_order_ids) == 2
+        # Compare by .value since PositionId/ClientOrderId equality compares
+        # underlying memory addresses.
+        as_strings = {
+            pid.value: oid.value for pid, oid in h2._protective_order_ids.items()
+        }
+        assert as_strings == {"P-001": "O-001", "P-002": "O-002"}
+        assert h2._protective_count == 3
+
+    def test_state_keys_are_bytes(self) -> None:
+        """NT's ``on_save`` contract: values must be ``bytes``."""
+        h = _MixinHarness()
+        h._init_protective_stop(0.05)
+        h._protective_count = 5
+        state = h.on_save()
+        for key, value in state.items():
+            assert isinstance(value, bytes), (
+                f"on_save key {key!r} returned {type(value).__name__}, expected bytes"
+            )
+
+    def test_load_with_missing_keys_keeps_defaults(self) -> None:
+        """Defensive against schema drift: missing keys fall back to defaults."""
+        h = _MixinHarness()
+        h._init_protective_stop(0.05)
+        # No keys at all — simulates loading from an older build.
+        h.on_load({})
+        assert h._protective_order_ids == {}
+        assert h._protective_count == 0
+
+    def test_load_with_malformed_json_logs_and_resets(self) -> None:
+        """Bad JSON should NOT crash the trader — log, reset, continue."""
+        h = _MixinHarness()
+        h._init_protective_stop(0.05)
+        # Provide a log shim since the harness skips Strategy.
+        h.log = type("L", (), {"warning": lambda self, msg: None})()  # type: ignore[attr-defined]
+        h.on_load({"protective_order_ids": b"not json {{"})
+        assert h._protective_order_ids == {}
+
+    def test_load_with_malformed_count_logs_and_resets(self) -> None:
+        h = _MixinHarness()
+        h._init_protective_stop(0.05)
+        h.log = type("L", (), {"warning": lambda self, msg: None})()  # type: ignore[attr-defined]
+        h.on_load({"protective_count": b"not_an_int"})
+        assert h._protective_count == 0
 
 
 # ── Tag constant ───────────────────────────────────────────────────────────

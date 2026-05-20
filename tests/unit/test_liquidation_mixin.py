@@ -42,7 +42,21 @@ def _resolved(mm_rate: Decimal = Decimal("0.005")) -> LiquidationConfig:
 # ── Mixin-only test harness ────────────────────────────────────────────────
 
 
-class _MixinHarness(LiquidationAware):
+class _ChainEnd:
+    """End-of-MRO sentinel — provides no-op stubs so ``super().on_save()`` /
+    ``super().on_load()`` from the mixin don't hit ``object`` and AttributeError.
+
+    In production the chain ends at NT's ``Strategy`` / ``Actor`` which
+    have concrete no-op stubs.  Here we use this lightweight sentinel.
+    """
+
+    def on_save(self) -> dict[str, bytes]:
+        return {}
+
+    def on_load(self, state: dict[str, bytes]) -> None: ...
+
+
+class _MixinHarness(LiquidationAware, _ChainEnd):
     """Concrete subclass to test mixin methods in isolation.
 
     Skipping ``Strategy`` here is deliberate — these tests don't need NT's
@@ -275,6 +289,75 @@ class TestOnReset:
 
 
 # ── MRO sanity check (the inheritance-order footgun) ─────────────────────
+
+
+# ── State persistence (on_save / on_load round-trip) ───────────────────────
+
+
+class TestSaveLoadRoundTrip:
+    """``on_save`` / ``on_load`` round-trip the ``position_id → order_id``
+    mapping and the liq-fill counter across a restart.
+
+    After a graceful shutdown + restart with reconciliation, the mixin
+    still knows which open reduce-only stop belongs to which position,
+    so ``on_position_closed`` can cancel it cleanly instead of leaving
+    an orphan stop in NT's order cache.
+    """
+
+    def test_empty_state_round_trips(self) -> None:
+        h1 = _MixinHarness()
+        h1._init_liquidation(_resolved())
+        state = h1.on_save()
+        h2 = _MixinHarness()
+        h2._init_liquidation(_resolved())
+        h2.on_load(state)
+        assert h2._liq_order_ids == {}
+        assert h2._liq_count == 0
+
+    def test_populated_state_round_trips(self) -> None:
+        from nautilus_trader.model.identifiers import ClientOrderId, PositionId
+
+        h1 = _MixinHarness()
+        h1._init_liquidation(_resolved())
+        h1._liq_order_ids = {
+            PositionId("P-001"): ClientOrderId("LIQ-001"),
+            PositionId("P-002"): ClientOrderId("LIQ-002"),
+        }
+        h1._liq_count = 2
+        state = h1.on_save()
+
+        h2 = _MixinHarness()
+        h2._init_liquidation(_resolved())
+        h2.on_load(state)
+        as_strings = {
+            pid.value: oid.value for pid, oid in h2._liq_order_ids.items()
+        }
+        assert as_strings == {"P-001": "LIQ-001", "P-002": "LIQ-002"}
+        assert h2._liq_count == 2
+
+    def test_state_values_are_bytes(self) -> None:
+        h = _MixinHarness()
+        h._init_liquidation(_resolved())
+        h._liq_count = 4
+        state = h.on_save()
+        for key, value in state.items():
+            assert isinstance(value, bytes), (
+                f"on_save key {key!r} returned {type(value).__name__}, expected bytes"
+            )
+
+    def test_load_with_missing_keys_keeps_defaults(self) -> None:
+        h = _MixinHarness()
+        h._init_liquidation(_resolved())
+        h.on_load({})
+        assert h._liq_order_ids == {}
+        assert h._liq_count == 0
+
+    def test_load_with_malformed_json_resets(self) -> None:
+        h = _MixinHarness()
+        h._init_liquidation(_resolved())
+        h.log = type("L", (), {"warning": lambda self, msg: None})()  # type: ignore[attr-defined]
+        h.on_load({"liq_order_ids": b"not json"})
+        assert h._liq_order_ids == {}
 
 
 class TestInheritanceOrderDocumented:

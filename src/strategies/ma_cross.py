@@ -549,3 +549,63 @@ class MACross(ProtectiveStopAware, LiquidationAware, Strategy):
         self.slow_ma.reset()
         self._last_signal = 0
         self._bootstrap_pending = bool(self.config.bootstrap_on_deploy)
+
+    # ── Cross-gate state persistence across restarts ──────────────────────
+    #
+    # NT calls ``Strategy.save()`` during graceful shutdown when the
+    # kernel is built with ``save_state=True`` (and ``Strategy.load()``
+    # on startup with ``load_state=True``).  The state lives in NT's
+    # cache database (Redis in production), keyed by ``trader_id`` +
+    # ``strategy_id``.  See ``docs/STRATEGY_ENTRY_RULES.md`` for the
+    # operator-facing description.
+    #
+    # The cooperative-super() pattern lets the mixins (``ProtectiveStopAware``,
+    # ``LiquidationAware``) layer their own keys onto the same dict.
+    # This class adds the cross-gate keys at the top of the chain.
+
+    _STATE_KEY_LAST_SIGNAL = "cross_gate_last_signal"
+    _STATE_KEY_BOOTSTRAP_PENDING = "cross_gate_bootstrap_pending"
+
+    def on_save(self) -> dict[str, bytes]:
+        """Persist cross-gate state for restart.
+
+        Walks the mixin MRO via ``super().on_save()`` so each mixin can
+        layer its own keys onto the same dict; the merged dict is what
+        NT writes to the cache database.
+
+        Keys:
+
+        * ``cross_gate_last_signal`` — ``"-1" | "0" | "1"``
+        * ``cross_gate_bootstrap_pending`` — ``"0" | "1"``
+
+        Values are bytes per NT's ``on_save`` contract.
+        """
+        state: dict[str, bytes] = super().on_save()
+        state[self._STATE_KEY_LAST_SIGNAL] = str(self._last_signal).encode()
+        state[self._STATE_KEY_BOOTSTRAP_PENDING] = (
+            b"1" if self._bootstrap_pending else b"0"
+        )
+        return state
+
+    def on_load(self, state: dict[str, bytes]) -> None:
+        """Restore cross-gate state from a prior run.
+
+        Defensive against schema drift: missing keys fall back to the
+        post-``__init__`` defaults, so an upgraded build can read state
+        written by an older build (or vice versa) without crashing.
+        Walks ``super().on_load(state)`` so mixins downstream in the
+        MRO get a chance to restore their own keys.
+        """
+        super().on_load(state)
+        last_signal_raw = state.get(self._STATE_KEY_LAST_SIGNAL)
+        if last_signal_raw is not None:
+            try:
+                self._last_signal = int(last_signal_raw)
+            except ValueError:
+                self.log.warning(
+                    f"on_load: invalid cross_gate_last_signal={last_signal_raw!r}, "
+                    "keeping default 0",
+                )
+        bootstrap_raw = state.get(self._STATE_KEY_BOOTSTRAP_PENDING)
+        if bootstrap_raw is not None:
+            self._bootstrap_pending = bootstrap_raw == b"1"

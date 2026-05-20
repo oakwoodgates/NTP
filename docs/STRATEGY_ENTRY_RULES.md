@@ -74,6 +74,87 @@ disagrees with the signal at the trigger price. Re-entering on the
 unchanged signal denies that information. Wait for a new statement
 from the market — i.e., a new cross — before placing a fresh bet.
 
+## Cross-gate state persists across container restarts
+
+`_last_signal` is in-process Python state — gone when the container
+dies. Without a persistence story this would re-create the original
+bug under a different name: every container restart would reset the
+strategy to `_last_signal=0`, then the first observed signal post-
+restart would be treated as a fresh cross and acted upon — closing or
+flipping a position that the prior run had already committed to.
+
+The strategy now uses NT's `on_save` / `on_load` hooks
+(`nautilus_trader/common/actor.pyx`) to write the cross-gate state to
+the cache database (Redis in production, in-memory in tests) on
+graceful shutdown and read it back on the next start:
+
+| State | Why it's persisted |
+|---|---|
+| `_last_signal` | Without this, the first post-restart signal looks like a fresh cross — re-arms the gate against the position we just reconciled |
+| `_bootstrap_pending` | Set by `bootstrap_on_deploy=True` and consumed by the first bar; persisted as `False` after firing so a restart doesn't re-trigger it |
+| `_protective_order_ids` (mixin) | Maps reconciled positions back to their reduce-only protective stops so `on_position_closed` can cancel cleanly |
+| `_liq_order_ids` (mixin) | Same, for the cross-margin liquidation stops |
+
+The runners (`scripts/run_sandbox.py`, `scripts/run_live.py`) enable
+this by setting `save_state=True` + `load_state=True` on
+`TradingNodeConfig` and calling `node.trader.load()` manually after
+`add_strategy` (NT's kernel autoload runs only against
+`config.strategies`, but we add strategies imperatively, so the
+autoload skips us).
+
+### When state is saved
+
+NT's `kernel.stop_async()` calls `trader.save()` after stopping the
+trader but before disconnecting clients (`system/kernel.py`). That
+means `on_save` fires on every graceful shutdown — Ctrl+C in dev,
+`docker stop` / SIGTERM in container, `node.stop()` from a wrapper.
+
+It does **not** fire on hard kill (SIGKILL, OOM, host crash). In
+those cases the state is whatever was last persisted by the prior
+graceful shutdown, which can be stale. That's a known limitation — a
+hard kill in the middle of a position open would leave Redis with the
+pre-open state and `_last_signal=0` on next start. The same issue
+exists for NT's own order/position cache, so a hard kill always
+implies a reconcile-and-re-evaluate cycle on next start.
+
+### When state is loaded
+
+`node.trader.load()` is called once after all strategies and actors
+are registered, before `node.run()`. NT's `cache.load_strategy` is a
+silent no-op when no prior state exists (first run, fresh Redis), so
+the load step is idempotent — safe to call even on the very first
+container start.
+
+If the state schema changes between builds (added key, renamed key,
+changed encoding), the load code is defensive: missing keys fall
+back to the post-`__init__` defaults, malformed values log a warning
+and reset to defaults. A state-load error must never stop the trader
+from running.
+
+### Restart from a reconciled position
+
+The intended scenario:
+
+1. Strategy was long BTC, `_last_signal=+1`, position open on HL.
+2. Operator restarts the container (`docker compose restart`).
+3. SIGTERM → graceful shutdown → `on_save` writes
+   `_last_signal=+1` to Redis.
+4. Container starts → `on_load` reads `_last_signal=+1`. NT's exec
+   reconciliation pulls the open BTC long back into the cache.
+5. First post-restart bar with a LONG signal: gate says
+   "same direction, no action" — position stays untouched.
+6. Eventually a SHORT signal appears: gate says "new direction,
+   act" — strategy closes the long and enters short, exactly as
+   if the restart had never happened.
+
+Without `on_save` / `on_load`, step 5 would see
+`_last_signal=0 != +1` → `should_act=True` → `_last_signal` gets
+written to +1 on the same bar. No order is submitted (we're already
+long), but the gate has "consumed" a transition that wasn't real.
+The bug becomes visible on the bar AFTER that: any flip is
+genuinely missed because we've already credited ourselves with
+acting on the long signal.
+
 ## Bootstrap on deploy (the legitimate exception)
 
 When you deploy a strategy mid-trend and want it to catch the current

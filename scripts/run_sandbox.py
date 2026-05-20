@@ -220,6 +220,16 @@ def main() -> None:
                     port=settings.redis_port,
                 ),
             ),
+            # Persist per-strategy user state (``on_save``/``on_load``) across
+            # restarts via the Redis-backed cache.  Concretely: ``MACross`` saves
+            # ``_last_signal`` + ``_bootstrap_pending`` so a freshly-started
+            # container doesn't re-act on a stale signal or fire the bootstrap
+            # a second time.  Mixins (``ProtectiveStopAware``, ``LiquidationAware``)
+            # add their ``position_id → order_id`` mappings so reduce-only stops
+            # placed before the restart can still be cancelled on close.
+            # See ``docs/STRATEGY_ENTRY_RULES.md`` for the restart-semantics doc.
+            save_state=True,
+            load_state=True,
             data_clients={
                 "HYPERLIQUID": HyperliquidDataClientConfig(
                     instrument_provider=InstrumentProviderConfig(
@@ -319,6 +329,17 @@ def main() -> None:
             topic="events.account.*",
             handler=monitor._on_account_state,
         )
+
+        # NT's kernel auto-load happens in ``__init__`` based on the
+        # ``config.strategies``/``actors`` lists.  We add strategies imperatively
+        # via ``node.trader.add_strategy(...)`` AFTER kernel init, so the kernel's
+        # autoload already ran (against an empty list) and skipped us.  Trigger
+        # ``trader.load()`` manually now that all components are registered — it
+        # iterates ``self._strategies``/``self._actors`` and routes each one's
+        # persisted state to its ``on_load``.  Safe no-op on first run (no state
+        # in Redis); restores ``_last_signal`` / ``_bootstrap_pending`` on restart.
+        node.trader.load()
+
         try:
             node.run()
         except KeyboardInterrupt:
