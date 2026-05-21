@@ -305,7 +305,14 @@ class MACross(ProtectiveStopAware, LiquidationAware, Strategy):
             self.slow_ma = MovingAverageFactory.create(config.slow_period, ma_enum)
 
     def on_start(self) -> None:
-        """Register indicators, request historical bars, subscribe to bars."""
+        """Register indicators, request historical bars, subscribe to bars.
+
+        Cooperative ``super().on_start()`` first — drives ``ProtectiveStopAware``'s
+        rehydration of the position→stop-order map from cache (paper/live
+        restart recovery).  In backtests the cache is empty, so it's a
+        logged no-op.  See ``src/core/protective_stop_mixin.py`` docs.
+        """
+        super().on_start()
         self.instrument = self.cache.instrument(self.config.instrument_id)
         if self.instrument is None:
             self.log.error(f"Could not find instrument {self.config.instrument_id}")
