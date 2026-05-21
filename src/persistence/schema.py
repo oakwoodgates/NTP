@@ -60,6 +60,17 @@ positions = sa.Table(
     sa.Column("realized_return", sa.Numeric),  # fraction — 0.05 = 5%
     sa.Column("currency", sa.Text),
     sa.Column("duration_ns", sa.BigInteger),
+    # closing_order_id: the order that flattened the position. Forensic
+    # link from positions back to order_fills.client_order_id.
+    sa.Column("closing_order_id", sa.Text),
+    # close_reason: one of
+    #   'protective_stop' — the ProtectiveStopAware mixin's reduce-only stop fired
+    #   'liquidation'     — the LiquidationAware mixin's reduce-only stop fired
+    #   'strategy_exit'   — the strategy's cross-flip exit market order
+    #   'unknown'         — closing order had no recognised tag, or order not in cache
+    # Populated by PersistenceActor by inspecting the closing order's tags
+    # at PositionClosed event time. NULL for rows written before migration 003.
+    sa.Column("close_reason", sa.Text),
 )
 
 account_snapshots = sa.Table(
@@ -91,4 +102,8 @@ signal_events = sa.Table(
     sa.Column("slow_value", sa.Numeric, nullable=False),
     sa.Column("acted", sa.Boolean, nullable=False),
     sa.Column("bootstrap", sa.Boolean, nullable=False),
+    # bar_close: the closing price of the bar at the moment SignalEvent
+    # fired. Used by dashboard for mark-to-market unrealized PnL on the
+    # open position. NULL for rows written before migration 004.
+    sa.Column("bar_close", sa.Numeric),
 )

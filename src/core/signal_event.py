@@ -56,6 +56,11 @@ class SignalEvent:
         True iff this firing was the bootstrap-on-deploy synthesizer
         rather than a genuine signal transition. Always False after the
         first bootstrap bar.
+    bar_close : Decimal
+        Closing price of the bar this signal was computed at. Used by
+        downstream consumers (dashboard, analysis) to compute
+        mark-to-market metrics like unrealized PnL on the open position
+        without needing a separate mark-price feed.
 
     """
 
@@ -67,3 +72,4 @@ class SignalEvent:
     slow_value: Decimal
     acted: bool
     bootstrap: bool
+    bar_close: Decimal

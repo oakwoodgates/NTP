@@ -24,6 +24,7 @@ class TestSignalEvent:
             slow_value=Decimal("50100.000"),
             acted=True,
             bootstrap=False,
+            bar_close=Decimal("50130.250"),
         )
         assert ev.ts_event == 1_700_000_000_000_000_000
         assert ev.strategy_id == "MACross-EMA-10-40"
@@ -33,12 +34,14 @@ class TestSignalEvent:
         assert ev.slow_value == Decimal("50100.000")
         assert ev.acted is True
         assert ev.bootstrap is False
+        assert ev.bar_close == Decimal("50130.250")
 
     def test_frozen(self) -> None:
         ev = SignalEvent(
             ts_event=0, strategy_id="s", instrument_id="i",
             signal=-1, fast_value=Decimal(0), slow_value=Decimal(0),
             acted=False, bootstrap=False,
+            bar_close=Decimal(0),
         )
         with pytest.raises((AttributeError, Exception)):
             ev.signal = 1  # type: ignore[misc]
