@@ -149,6 +149,15 @@ crashes and host reboots, stays stopped after `docker compose stop`.
 Each restart creates a new `run_id` in `strategy_runs`. Filter by
 `(trader_id, strategy_id)` in Grafana to keep the three streams separate.
 
+**Restart semantics** — every process start inserts a fresh row.
+A redeploy that takes 5 minutes shows up as two rows, not one. The new
+row's `parent_run_id` column points at the previous row for the same
+`(trader_id, instrument_id, strategy_id, run_mode)` tuple so you can
+walk the chain forward or backward — see
+[Cross-restart queries](#cross-restart-queries) below. First-ever run
+for a tuple has `parent_run_id IS NULL`; a sandbox → live transition
+also breaks the chain (`run_mode` is part of the lookup key).
+
 **Important:** Multi-instrument deploys do NOT include the legacy
 single-instrument `trader` service. If you previously had `trader`
 running and switch to multi-instrument, `docker compose stop trader`
@@ -181,6 +190,48 @@ SELECT * FROM positions ORDER BY ts_closed DESC LIMIT 5;
 SELECT ts, signal, fast_value, slow_value, acted, bootstrap
 FROM signal_events ORDER BY ts DESC LIMIT 10;
 ```
+
+#### Cross-restart queries
+
+A restart cycle (e.g. redeploying the trader) inserts a new
+`strategy_runs` row rather than reusing the previous one. The
+`parent_run_id` column links each row to the one that immediately
+preceded it for the same
+`(trader_id, instrument_id, strategy_id, run_mode)` tuple, so all the
+activity across an outage is still walkable in a single query.
+
+```sql
+-- All run_ids in this trader's chain, newest first (give it any one
+-- run_id from the chain — the CTE walks both directions).
+WITH RECURSIVE chain AS (
+    SELECT id, parent_run_id, started_at, stopped_at
+    FROM strategy_runs WHERE id = '<any run_id in the chain>'
+    UNION ALL
+    SELECT r.id, r.parent_run_id, r.started_at, r.stopped_at
+    FROM strategy_runs r JOIN chain c ON r.parent_run_id = c.id OR r.id = c.parent_run_id
+)
+SELECT * FROM chain ORDER BY started_at DESC;
+
+-- All fills for an entire trader/instrument over its whole history
+-- (walk back to the chain root, then join).
+WITH RECURSIVE chain AS (
+    SELECT id, parent_run_id FROM strategy_runs
+    WHERE trader_id = 'nt-trader-eth'
+      AND instrument_id = 'ETH-USD-PERP.HYPERLIQUID'
+      AND strategy_id  = 'MACross-EMA-10-100'
+      AND run_mode     = 'sandbox'
+      AND stopped_at IS NULL                 -- start from the active row
+    UNION ALL
+    SELECT r.id, r.parent_run_id
+    FROM strategy_runs r JOIN chain c ON r.id = c.parent_run_id
+)
+SELECT f.* FROM order_fills f JOIN chain c ON f.run_id = c.id
+ORDER BY f.ts DESC;
+```
+
+Single-run queries (the common case) don't need the CTE — just filter
+`WHERE run_id = '<one uuid>'` against `order_fills`, `positions`,
+`signal_events`, `account_snapshots` as before.
 
 ### Check Grafana
 
