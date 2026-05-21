@@ -190,131 +190,157 @@ def main() -> None:
         config_dict,
     ))
 
-    node = TradingNode(config=TradingNodeConfig(
-        trader_id=settings.trader_id,
-        logging=LoggingConfig(log_level="INFO"),
-        exec_engine=LiveExecEngineConfig(
-            reconciliation=False,
-        ),
-        cache=CacheConfig(
-            database=DatabaseConfig(
-                host=settings.redis_host,
-                port=settings.redis_port,
-            ),
-        ),
-        data_clients={
-            "HYPERLIQUID": HyperliquidDataClientConfig(
-                instrument_provider=InstrumentProviderConfig(
-                    load_ids=frozenset((instrument_id,)),
-                ),
-                # Real market data; simulated execution happens via SandboxExecutionClient.
-                environment=HyperliquidEnvironment.MAINNET,
-            ),
-        },
-        exec_clients={
-            "HYPERLIQUID": SandboxExecutionClientConfig(
-                venue="HYPERLIQUID",
-                # HL-specific currency quirk: HyperliquidInstrumentProvider resolves
-                # settlement_currency=USD from /info, while our local make_hl_perp
-                # helper (used in backtests) overrides it to USDC. Seeding USDC here
-                # would create a stranded balance bucket — fills credit _balances[USD],
-                # account.balance(USDC) stays flat at starting_capital forever.
-                # Seeding USD matches the live adapter's currency. Other exchanges
-                # (Binance USDT pairs, etc.) need their own currency here; will lift
-                # into settings.account_currency when we deploy on a second venue.
-                starting_balances=[f"{settings.starting_capital} USD"],
-            ),
-        },
-    ))
-
-    # Register adapter factories
-    node.add_data_client_factory("HYPERLIQUID", HyperliquidLiveDataClientFactory)
-    node.add_exec_client_factory("HYPERLIQUID", SandboxLiveExecClientFactory)
-
-    # Add actors
-    node.trader.add_actor(PersistenceActor(PersistenceActorConfig(
-        postgres_dsn=settings.postgres_dsn,
-        run_id=run_id,
-        venue="HYPERLIQUID",
-        instrument_id=instrument_id_str,
-    )))
-    node.trader.add_actor(AlertActor(AlertActorConfig(
-        telegram_token=settings.telegram_token,
-        telegram_chat_id=settings.telegram_chat_id,
-        enabled=settings.telegram_enabled,
-        venue="HYPERLIQUID",
-        instrument_id=instrument_id_str,
-    )))
-
-    # AccountAliveMonitor — halts the trader when equity drops below the
-    # alive floor. Wired in sandbox only; run_live.py leaves it disabled
-    # because the real venue handles its own liquidation. See the matching
-    # pattern in src/backtesting/engine.py:_register_account_alive_monitor.
-    venue_config = get_venue_config(settings.exec_venue)
-    monitor = AccountAliveMonitor(
-        AccountAliveMonitorConfig(
-            venue="HYPERLIQUID",
-            # HL-specific: AccountAliveMonitor reads `account.balance_total(<this>)`
-            # and venue_config.settlement_currency is "USDC" (matches the local
-            # make_hl_perp backtest helper). But the live HL adapter funds the
-            # account in USD (the cost currency — where PnL flows), so reading
-            # USDC returns None and the alive predicate never fires. Hardcoding
-            # USD here matches the live runtime; the backtest path in
-            # src/backtesting/engine.py uses venue_config.settlement_currency
-            # unchanged, which is correct for that codepath. TODO: refactor
-            # AccountAliveMonitor to lazy-resolve via instrument.get_cost_currency()
-            # like PersistenceActor does, so this hardcode goes away.
-            settlement_currency="USD",
-            venue_leverage=settings.leverage,
-            min_trade_notional=settings.liquidation_min_trade_notional,
-            fee_rate=venue_config.taker_fee,
-            alive_trades_buffer=1,
-        ),
-        # Lazy callback — resolves node.kernel.risk_engine at fire time,
-        # after node.build() has populated it. The kernel lives directly
-        # on TradingNode; Trader does NOT have a .kernel attribute.
-        halt_callback=lambda: node.kernel.risk_engine.set_trading_state(
-            TradingState.HALTED,
-        ),
-    )
-    node.trader.add_actor(monitor)
-
-    # Add strategy
-    node.trader.add_strategy(strategy)
-
-    node.build()
-
-    # NT MessageBus caches concrete-topic → subscriber lists on first publish.
-    # The exec client publishes an initial AccountState as soon as it starts;
-    # a wildcard subscription added later (e.g. inside actor.on_start during
-    # node.run()) misses that and any subsequent AccountState whose cache is
-    # already populated. Subscribe BEFORE node.run(). See the long comment
-    # at _register_account_alive_monitor in src/backtesting/engine.py for
-    # the full mechanics.
+    # Recurrence guard for orphan strategy_runs rows.
     #
-    # NB: msgbus lives on `node.kernel`, NOT `node.trader.kernel` (Trader has
-    # no .kernel attribute; the original Phase 2.5 plan doc had this wrong
-    # and the original commit slipped through CI because none of the wiring
-    # tests construct a real TradingNode).
-    node.kernel.msgbus.subscribe(
-        topic="events.account.*",
-        handler=monitor._on_account_state,
-    )
+    # Everything from `_register_run` onward must be wrapped so that if
+    # any wiring step (TradingNode init, factory registration, actor add,
+    # `node.build()`, `msgbus.subscribe`) raises, we still call
+    # `_close_run()` to stamp `stopped_at`. Without this, a startup crash
+    # leaves an orphan row with `stopped_at = NULL`, which makes the
+    # Grafana "Active Runs" panel (COUNT WHERE stopped_at IS NULL) read
+    # high forever. One real incident produced 51 orphans during a debug
+    # loop; never again.
+    #
+    # `node` may be None if construction itself failed — guard with
+    # `is not None` before stop/dispose. The cleanup branch swallows
+    # secondary exceptions (stop/dispose/_close_run) so they can't mask
+    # the original startup error reported to the operator.
+    node: TradingNode | None = None
     interrupted = False
     try:
-        node.run()
-    except KeyboardInterrupt:
-        interrupted = True
-    except Exception as exc:
-        print(f"run_sandbox: node.run() raised {type(exc).__name__}: {exc}")
-        raise
-    finally:
+        node = TradingNode(config=TradingNodeConfig(
+            trader_id=settings.trader_id,
+            logging=LoggingConfig(log_level="INFO"),
+            exec_engine=LiveExecEngineConfig(
+                reconciliation=False,
+            ),
+            cache=CacheConfig(
+                database=DatabaseConfig(
+                    host=settings.redis_host,
+                    port=settings.redis_port,
+                ),
+            ),
+            data_clients={
+                "HYPERLIQUID": HyperliquidDataClientConfig(
+                    instrument_provider=InstrumentProviderConfig(
+                        load_ids=frozenset((instrument_id,)),
+                    ),
+                    # Real market data; simulated execution happens via SandboxExecutionClient.
+                    environment=HyperliquidEnvironment.MAINNET,
+                ),
+            },
+            exec_clients={
+                "HYPERLIQUID": SandboxExecutionClientConfig(
+                    venue="HYPERLIQUID",
+                    # HL-specific currency quirk: HyperliquidInstrumentProvider resolves
+                    # settlement_currency=USD from /info, while our local make_hl_perp
+                    # helper (used in backtests) overrides it to USDC. Seeding USDC here
+                    # would create a stranded balance bucket — fills credit _balances[USD],
+                    # account.balance(USDC) stays flat at starting_capital forever.
+                    # Seeding USD matches the live adapter's currency. Other exchanges
+                    # (Binance USDT pairs, etc.) need their own currency here; will lift
+                    # into settings.account_currency when we deploy on a second venue.
+                    starting_balances=[f"{settings.starting_capital} USD"],
+                ),
+            },
+        ))
+
+        # Register adapter factories
+        node.add_data_client_factory("HYPERLIQUID", HyperliquidLiveDataClientFactory)
+        node.add_exec_client_factory("HYPERLIQUID", SandboxLiveExecClientFactory)
+
+        # Add actors
+        node.trader.add_actor(PersistenceActor(PersistenceActorConfig(
+            postgres_dsn=settings.postgres_dsn,
+            run_id=run_id,
+            venue="HYPERLIQUID",
+            instrument_id=instrument_id_str,
+        )))
+        node.trader.add_actor(AlertActor(AlertActorConfig(
+            telegram_token=settings.telegram_token,
+            telegram_chat_id=settings.telegram_chat_id,
+            enabled=settings.telegram_enabled,
+            venue="HYPERLIQUID",
+            instrument_id=instrument_id_str,
+        )))
+
+        # AccountAliveMonitor — halts the trader when equity drops below the
+        # alive floor. Wired in sandbox only; run_live.py leaves it disabled
+        # because the real venue handles its own liquidation. See the matching
+        # pattern in src/backtesting/engine.py:_register_account_alive_monitor.
+        venue_config = get_venue_config(settings.exec_venue)
+        _node_ref = node  # capture for the lazy lambda below
+        monitor = AccountAliveMonitor(
+            AccountAliveMonitorConfig(
+                venue="HYPERLIQUID",
+                # HL-specific: AccountAliveMonitor reads `account.balance_total(<this>)`
+                # and venue_config.settlement_currency is "USDC" (matches the local
+                # make_hl_perp backtest helper). But the live HL adapter funds the
+                # account in USD (the cost currency — where PnL flows), so reading
+                # USDC returns None and the alive predicate never fires. Hardcoding
+                # USD here matches the live runtime; the backtest path in
+                # src/backtesting/engine.py uses venue_config.settlement_currency
+                # unchanged, which is correct for that codepath. TODO: refactor
+                # AccountAliveMonitor to lazy-resolve via instrument.get_cost_currency()
+                # like PersistenceActor does, so this hardcode goes away.
+                settlement_currency="USD",
+                venue_leverage=settings.leverage,
+                min_trade_notional=settings.liquidation_min_trade_notional,
+                fee_rate=venue_config.taker_fee,
+                alive_trades_buffer=1,
+            ),
+            # Lazy callback — resolves node.kernel.risk_engine at fire time,
+            # after node.build() has populated it. The kernel lives directly
+            # on TradingNode; Trader does NOT have a .kernel attribute.
+            halt_callback=lambda: _node_ref.kernel.risk_engine.set_trading_state(
+                TradingState.HALTED,
+            ),
+        )
+        node.trader.add_actor(monitor)
+
+        # Add strategy
+        node.trader.add_strategy(strategy)
+
+        node.build()
+
+        # NT MessageBus caches concrete-topic → subscriber lists on first publish.
+        # The exec client publishes an initial AccountState as soon as it starts;
+        # a wildcard subscription added later (e.g. inside actor.on_start during
+        # node.run()) misses that and any subsequent AccountState whose cache is
+        # already populated. Subscribe BEFORE node.run(). See the long comment
+        # at _register_account_alive_monitor in src/backtesting/engine.py for
+        # the full mechanics.
+        #
+        # NB: msgbus lives on `node.kernel`, NOT `node.trader.kernel` (Trader has
+        # no .kernel attribute; the original Phase 2.5 plan doc had this wrong
+        # and the original commit slipped through CI because none of the wiring
+        # tests construct a real TradingNode).
+        node.kernel.msgbus.subscribe(
+            topic="events.account.*",
+            handler=monitor._on_account_state,
+        )
         try:
-            node.stop()
+            node.run()
+        except KeyboardInterrupt:
+            interrupted = True
         except Exception as exc:
-            print(f"run_sandbox: node.stop() raised {type(exc).__name__}: {exc}")
-        node.dispose()
-        asyncio.run(_close_run(settings.postgres_dsn, run_id))
+            print(f"run_sandbox: node.run() raised {type(exc).__name__}: {exc}")
+            raise
+    finally:
+        if node is not None:
+            try:
+                node.stop()
+            except Exception as exc:
+                print(f"run_sandbox: node.stop() raised {type(exc).__name__}: {exc}")
+            try:
+                node.dispose()
+            except Exception as exc:
+                print(f"run_sandbox: node.dispose() raised {type(exc).__name__}: {exc}")
+        # Best-effort: never let a DB cleanup error mask the original failure.
+        try:
+            asyncio.run(_close_run(settings.postgres_dsn, run_id))
+        except Exception as exc:
+            print(f"run_sandbox: _close_run failed: {type(exc).__name__}: {exc}")
     if interrupted:
         print("Interrupted by user, shutdown complete.")
 
