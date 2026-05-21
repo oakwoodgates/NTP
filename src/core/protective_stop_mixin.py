@@ -104,10 +104,12 @@ mode enumeration and the NT 1.226 reconciliation references.
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
 from nautilus_trader.core.rust.model import OrderSide, OrderType, PositionSide
+from nautilus_trader.model.identifiers import ClientOrderId, PositionId
 
 if TYPE_CHECKING:
     from nautilus_trader.model.events import (
@@ -116,7 +118,7 @@ if TYPE_CHECKING:
         PositionClosed,
         PositionOpened,
     )
-    from nautilus_trader.model.identifiers import ClientOrderId, InstrumentId, PositionId
+    from nautilus_trader.model.identifiers import InstrumentId
     from nautilus_trader.model.orders import Order
 
 
@@ -527,3 +529,78 @@ class ProtectiveStopAware:
         super().on_reset()  # type: ignore[misc]
         self._protective_order_ids = {}
         self._protective_count = 0
+
+    # ── State persistence across restarts ───────────────────────────────────
+    #
+    # NT calls ``save()`` during graceful shutdown when the kernel is built
+    # with ``save_state=True``.  We persist the ``position_id → order_id``
+    # mapping so that, after a restart with reconciliation, the mixin can
+    # still cancel the right reduce-only stop on ``on_position_closed``.
+    #
+    # Without restoring this dict, the protective stop placed before the
+    # restart would orphan in NT's order cache: ``_protective_cancel_stop``
+    # would no-op on close (empty dict), leaving an open reduce-only order
+    # against an instrument with no live position.  Reduce-only stops can
+    # accumulate as junk if the strategy keeps restarting.
+    #
+    # The cooperative-super() pattern is required here too — see the
+    # position-handler block.
+
+    # Mixin-prefixed class attribute names so this mixin's keys don't
+    # collide via MRO with another mixin's (e.g. ``LiquidationAware`` also
+    # has an ``order_ids`` dict).  See the matching block in
+    # ``liquidation_mixin.py`` for the gotcha.
+    _PROT_STATE_KEY_ORDER_IDS = "protective_order_ids"
+    _PROT_STATE_KEY_COUNT = "protective_count"
+
+    def on_save(self) -> dict[str, bytes]:
+        """Persist the ``position_id → order_id`` mapping + counter.
+
+        Encodes the dict as JSON ``{position_id_str: order_id_str, ...}``.
+        Both ``PositionId`` and ``ClientOrderId`` round-trip via their
+        string values (verified in NT 1.226.0 — see ``identifiers.pyx``).
+        """
+        state: dict[str, bytes] = super().on_save()  # type: ignore[misc]
+        if hasattr(self, "_protective_order_ids"):
+            serializable = {
+                pos_id.value: order_id.value
+                for pos_id, order_id in self._protective_order_ids.items()
+            }
+            state[self._PROT_STATE_KEY_ORDER_IDS] = json.dumps(serializable).encode()
+        if hasattr(self, "_protective_count"):
+            state[self._PROT_STATE_KEY_COUNT] = str(self._protective_count).encode()
+        return state
+
+    def on_load(self, state: dict[str, bytes]) -> None:
+        """Restore the ``position_id → order_id`` mapping + counter.
+
+        Defensive against partial/missing state: each key falls back to
+        the post-``_init_protective_stop`` default (empty dict, count=0)
+        on parse failure or missing keys.  Logs and continues rather than
+        crashing — a state-load error must not stop the trader from running.
+        """
+        super().on_load(state)  # type: ignore[misc]
+        raw_ids = state.get(self._PROT_STATE_KEY_ORDER_IDS)
+        if raw_ids is not None:
+            try:
+                decoded = json.loads(raw_ids.decode())
+                self._protective_order_ids = {
+                    PositionId(pos_id): ClientOrderId(order_id)
+                    for pos_id, order_id in decoded.items()
+                }
+            except (ValueError, TypeError) as exc:
+                self.log.warning(  # type: ignore[attr-defined]
+                    f"on_load: invalid {self._PROT_STATE_KEY_ORDER_IDS}={raw_ids!r} "
+                    f"({exc}); resetting to empty",
+                )
+                self._protective_order_ids = {}
+        raw_count = state.get(self._PROT_STATE_KEY_COUNT)
+        if raw_count is not None:
+            try:
+                self._protective_count = int(raw_count)
+            except ValueError:
+                self.log.warning(  # type: ignore[attr-defined]
+                    f"on_load: invalid {self._PROT_STATE_KEY_COUNT}={raw_count!r}; "
+                    "resetting to 0",
+                )
+                self._protective_count = 0
