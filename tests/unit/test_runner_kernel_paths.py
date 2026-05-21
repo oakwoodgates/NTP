@@ -110,3 +110,64 @@ class TestNTApiSurfaceForRunners:
         """Sanity: the scripts the other tests scan must actually be on disk."""
         for script in _RUNNER_SCRIPTS:
             assert script.is_file(), f"missing runner script: {script}"
+
+
+class TestRunLiveEnablesStartupReconciliation:
+    """Pin `reconciliation=True` for live trading.
+
+    The live runner persists exchange-side state (positions, protective
+    stops) on Hyperliquid. On restart (crash, redeploy, migration) the
+    in-process cache is empty but the venue still holds the position.
+    Without startup reconciliation the strategy treats the account as
+    flat and the next cross signal doubles the position; the prior
+    reduce-only stop is left orphaned.
+
+    NT's `LiveExecEngineConfig.reconciliation` defaults to True, but the
+    runner sets it explicitly so:
+
+    1. The intent is visible in the file.
+    2. This test can pin it — a future PR that flips it to False (or
+       drops the explicit config and lets a future NT default change
+       silently disable it) trips this guard.
+
+    Sandbox (`run_sandbox.py`) intentionally sets `reconciliation=False`
+    because the simulated exchange has no server-side state to query.
+    Asking the sandbox executor to reconcile would error; do not touch.
+    """
+
+    def test_run_live_sets_reconciliation_true_explicitly(self) -> None:
+        src = (_REPO_ROOT / "scripts" / "run_live.py").read_text(encoding="utf-8")
+        code_only = _strip_comments(src)
+        assert "reconciliation=True" in code_only, (
+            "scripts/run_live.py must explicitly set "
+            "`LiveExecEngineConfig(reconciliation=True, ...)`. Without it, "
+            "a restart in live trading leaves the cache empty while the "
+            "exchange still holds the open position — the next cross signal "
+            "doubles position size and orphans the protective stop."
+        )
+        assert "reconciliation=False" not in code_only, (
+            "scripts/run_live.py must NOT set `reconciliation=False`. That "
+            "is the sandbox-only setting (run_sandbox.py); using it on a "
+            "real venue causes doubled positions on restart."
+        )
+        assert "LiveExecEngineConfig" in code_only, (
+            "scripts/run_live.py must import and construct LiveExecEngineConfig "
+            "explicitly rather than relying on the NT default — pinning it "
+            "in source guards against a silent default change in a future NT "
+            "version."
+        )
+
+    def test_nautilus_live_exec_engine_config_exposes_reconciliation(self) -> None:
+        """NT's LiveExecEngineConfig must keep its `reconciliation` field.
+
+        If a future NT upgrade renames or removes this knob, the runner
+        line above silently becomes a no-op. Catch it here.
+        """
+        from nautilus_trader.live.config import LiveExecEngineConfig
+
+        cfg = LiveExecEngineConfig(reconciliation=True)
+        assert cfg.reconciliation is True, (
+            "LiveExecEngineConfig.reconciliation no longer accepts True or "
+            "no longer exists — the live runner needs updating to match the "
+            "new NT API."
+        )
