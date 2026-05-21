@@ -660,7 +660,7 @@
       "id": 20,
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 22 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
-      "description": "Derived from order_fills + positions: the opening fill whose position has not yet been closed. Empty if the strategy is flat. ``side`` is LONG/SHORT colored; ``time_open`` is duration since entry. Note: ``unrealized_pnl`` is not shown because we don't persist live mark prices in PostgreSQL — check the HL chart or terminal logs for current price to compute it yourself.",
+      "description": "Currently-open position. Derived from order_fills + positions; cross-references the most recent signal_events row for mark-to-market unrealized PnL. ``current_px`` is the close of the most recent bar (lags by up to one bar_interval); ``price_age`` shows how stale that read is. ``unrealized_pnl = (current - entry) * qty`` for LONGs, ``(entry - current) * qty`` for SHORTs. Empty if flat.",
       "fieldConfig": {
         "defaults": {
           "custom": { "align": "auto" }
@@ -686,10 +686,59 @@
             ]
           },
           {
+            "matcher": { "id": "byName", "options": "price_age" },
+            "properties": [
+              { "id": "unit", "value": "s" }
+            ]
+          },
+          {
             "matcher": { "id": "byName", "options": "entry_px" },
             "properties": [
               { "id": "unit", "value": "currencyUSD" },
               { "id": "decimals", "value": 2 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "current_px" },
+            "properties": [
+              { "id": "unit", "value": "currencyUSD" },
+              { "id": "decimals", "value": 2 }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "unrealized_pnl" },
+            "properties": [
+              { "id": "unit", "value": "currencyUSD" },
+              { "id": "decimals", "value": 4 },
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "red", "value": null },
+                    { "color": "green", "value": 0 }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "unrealized_return" },
+            "properties": [
+              { "id": "unit", "value": "percentunit" },
+              { "id": "decimals", "value": 4 },
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "red", "value": null },
+                    { "color": "green", "value": 0 }
+                  ]
+                }
+              }
             ]
           }
         ]
@@ -697,7 +746,7 @@
       "options": { "showHeader": true, "footer": { "show": false, "reducer": ["sum"], "fields": "" } },
       "targets": [
         {
-          "rawSql": "WITH last_close AS (SELECT COALESCE(MAX(ts_closed), '-infinity'::timestamptz) AS last_close_ts FROM positions WHERE run_id::text LIKE '$run_id') SELECT CASE order_side WHEN 'BUY' THEN 'LONG' WHEN 'SELL' THEN 'SHORT' ELSE order_side END AS side, last_qty AS qty, last_px AS entry_px, ts AS opened_at, EXTRACT(EPOCH FROM (NOW() - ts)) AS time_open, instrument_id FROM order_fills, last_close WHERE order_fills.run_id::text LIKE '$run_id' AND order_fills.ts > last_close.last_close_ts ORDER BY order_fills.ts ASC LIMIT 1",
+          "rawSql": "WITH last_close AS (SELECT COALESCE(MAX(ts_closed), '-infinity'::timestamptz) AS last_close_ts FROM positions WHERE run_id::text LIKE '$run_id'), closing_oids AS (SELECT closing_order_id FROM positions WHERE run_id::text LIKE '$run_id' AND closing_order_id IS NOT NULL), latest_price AS (SELECT bar_close, ts AS price_ts FROM signal_events WHERE run_id::text LIKE '$run_id' AND bar_close IS NOT NULL ORDER BY ts DESC LIMIT 1), opening_fill AS (SELECT order_side, last_qty, last_px, ts AS opened_at, instrument_id FROM order_fills, last_close WHERE order_fills.run_id::text LIKE '$run_id' AND order_fills.ts >= last_close.last_close_ts AND order_fills.client_order_id NOT IN (SELECT closing_order_id FROM closing_oids) ORDER BY order_fills.ts ASC LIMIT 1) SELECT CASE order_side WHEN 'BUY' THEN 'LONG' WHEN 'SELL' THEN 'SHORT' ELSE order_side END AS side, last_qty AS qty, last_px AS entry_px, latest_price.bar_close AS current_px, CASE WHEN latest_price.bar_close IS NULL THEN NULL WHEN order_side = 'BUY'  THEN (latest_price.bar_close - last_px) * last_qty WHEN order_side = 'SELL' THEN (last_px - latest_price.bar_close) * last_qty END AS unrealized_pnl, CASE WHEN latest_price.bar_close IS NULL OR last_px = 0 THEN NULL WHEN order_side = 'BUY'  THEN (latest_price.bar_close - last_px) / last_px WHEN order_side = 'SELL' THEN (last_px - latest_price.bar_close) / last_px END AS unrealized_return, opened_at, EXTRACT(EPOCH FROM (NOW() - opened_at)) AS time_open, EXTRACT(EPOCH FROM (NOW() - latest_price.price_ts)) AS price_age, instrument_id FROM opening_fill LEFT JOIN latest_price ON TRUE",
           "format": "table",
           "refId": "A"
         }
@@ -826,7 +875,7 @@
       "id": 12,
       "gridPos": { "h": 8, "w": 24, "x": 0, "y": 38 },
       "datasource": { "type": "postgres", "uid": "PostgreSQL" },
-      "description": "Closed positions for the selected run. ``side`` (LONG/SHORT) is the position direction — derived from ``entry_side`` (BUY entry → LONG, SELL entry → SHORT). ``ts_opened`` and ``ts_closed`` bracket the position's life; both rendered in the dashboard's configured timezone.",
+      "description": "Closed positions for the selected run. ``side`` (LONG/SHORT) is derived from ``entry_side``. ``close_reason`` explains WHY each position closed: ``strategy_exit`` (cross-flip, blue), ``protective_stop`` (yellow), ``liquidation`` (red), ``shutdown_flatten`` (trader was shutting down), ``unknown`` (couldn't resolve from order tags), or NULL for rows closed before migration 003.",
       "fieldConfig": {
         "defaults": {},
         "overrides": [
@@ -861,12 +910,28 @@
                 ]
               }
             ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "close_reason" },
+            "properties": [
+              { "id": "custom.cellOptions", "value": { "type": "color-text" } },
+              {
+                "id": "mappings",
+                "value": [
+                  { "type": "value", "options": { "strategy_exit":    { "color": "blue",       "index": 0 } } },
+                  { "type": "value", "options": { "protective_stop":  { "color": "yellow",     "index": 1 } } },
+                  { "type": "value", "options": { "liquidation":      { "color": "red",        "index": 2 } } },
+                  { "type": "value", "options": { "shutdown_flatten": { "color": "text",       "index": 3 } } },
+                  { "type": "value", "options": { "unknown":          { "color": "light-text", "index": 4 } } }
+                ]
+              }
+            ]
           }
         ]
       },
       "targets": [
         {
-          "rawSql": "SELECT ts_opened, ts_closed, CASE entry_side WHEN 'BUY' THEN 'LONG' WHEN 'SELL' THEN 'SHORT' ELSE entry_side END AS side, strategy_id, instrument_id, peak_qty, avg_px_open, avg_px_close, realized_pnl, realized_return FROM positions WHERE run_id::text LIKE '$run_id' ORDER BY ts_closed DESC LIMIT 50",
+          "rawSql": "SELECT ts_opened, ts_closed, CASE entry_side WHEN 'BUY' THEN 'LONG' WHEN 'SELL' THEN 'SHORT' ELSE entry_side END AS side, close_reason, peak_qty, avg_px_open, avg_px_close, realized_pnl, realized_return, strategy_id, instrument_id FROM positions WHERE run_id::text LIKE '$run_id' ORDER BY ts_closed DESC LIMIT 50",
           "format": "table",
           "refId": "A"
         }

@@ -40,6 +40,37 @@ def _valid_instrument_id(s: str) -> bool:
     return len(s) >= 2 and "." in s and "-" in s
 
 
+def _close_reason_from_tags(tags: list[str] | None) -> str:
+    """Map an order's tag list to a ``positions.close_reason`` value.
+
+    Recognised tags (kept in lockstep with the mixin/strategy modules
+    that originate them — see the regression test in
+    ``tests/unit/test_close_reason.py``):
+
+    * ``"protective_stop"``  — ``ProtectiveStopAware`` mixin stop fired
+    * ``"liquidation"``      — ``LiquidationAware`` mixin stop fired
+    * ``"strategy_exit"``    — strategy cross-flip exit
+    * ``"shutdown_flatten"`` — strategy ``on_stop`` lifecycle flatten
+
+    Anything else (empty list, ``None``, or only unrecognised tags) maps
+    to ``"unknown"``.
+
+    Extracted as a module-level pure function so unit tests can exercise
+    the mapping without mocking NT's Cython ``Actor.cache`` descriptor.
+    """
+    if not tags:
+        return "unknown"
+    if "protective_stop" in tags:
+        return "protective_stop"
+    if "liquidation" in tags:
+        return "liquidation"
+    if "strategy_exit" in tags:
+        return "strategy_exit"
+    if "shutdown_flatten" in tags:
+        return "shutdown_flatten"
+    return "unknown"
+
+
 class PersistenceActorConfig(ActorConfig, frozen=True):
     postgres_dsn: str
     run_id: str  # UUID string — ties rows to this TradingNode run
@@ -91,7 +122,31 @@ class PersistenceActor(Actor):
 
     def on_event(self, event: Any) -> None:
         if isinstance(event, PositionClosed):
-            self.run_in_executor(self._persist_position, (event,))
+            # Resolve close_reason on the actor's thread (cache lookup is
+            # cheap and safer here than in the executor — the closing order
+            # is guaranteed to be in cache by the time PositionClosed fires,
+            # since OrderFilled → PositionClosed in NT's event order).
+            close_reason = self._derive_close_reason(event)
+            self.run_in_executor(self._persist_position, (event, close_reason))
+
+    def _derive_close_reason(self, event: PositionClosed) -> str:
+        """Look up the closing order in cache and return its close reason.
+
+        Thin wrapper that fetches the order from the NT cache and delegates
+        the tag → reason mapping to the module-level
+        ``_close_reason_from_tags`` helper (which is unit-tested directly).
+
+        Returns ``"unknown"`` if the closing_order_id is missing or the
+        order isn't in cache. The actor doesn't import strategy/mixin
+        modules — see CLAUDE.md "Module Dependency Direction".
+        """
+        if event.closing_order_id is None:
+            return "unknown"
+        order = self.cache.order(event.closing_order_id)
+        if order is None:
+            return "unknown"
+        tags = list(order.tags) if order.tags else None
+        return _close_reason_from_tags(tags)
 
     def _on_snapshot_timer(self, event: Any) -> None:
         self.run_in_executor(self._persist_account_snapshot)
@@ -151,13 +206,14 @@ class PersistenceActor(Actor):
         except Exception as e:
             self.log.error(f"PersistenceActor: fill insert failed: {e}")
 
-    def _persist_position(self, event: PositionClosed) -> None:
+    def _persist_position(self, event: PositionClosed, close_reason: str) -> None:
         ts_opened = datetime.fromtimestamp(event.ts_opened / 1e9, tz=UTC)
         ts_closed = datetime.fromtimestamp(event.ts_closed / 1e9, tz=UTC)
         instrument_id_str = str(event.instrument_id)
         peak_qty_str = str(event.peak_qty)
         avg_px_open_str = str(event.avg_px_open)
         avg_px_close_str = str(event.avg_px_close)
+        closing_order_id = str(event.closing_order_id) if event.closing_order_id else None
         if not _valid_instrument_id(instrument_id_str):
             self.log.warning(
                 "PersistenceActor: skipping position — unexpected instrument_id shape (PositionClosed)",
@@ -196,6 +252,8 @@ class PersistenceActor(Actor):
                 str(event.realized_return),
                 str(event.currency),
                 event.duration_ns,
+                closing_order_id,
+                close_reason,
             ))
         except Exception as e:
             self.log.error(f"PersistenceActor: position insert failed: {e}")
@@ -223,6 +281,7 @@ class PersistenceActor(Actor):
                 str(event.slow_value),
                 event.acted,
                 event.bootstrap,
+                str(event.bar_close),
             ))
         except Exception as e:
             self.log.error(f"PersistenceActor: signal insert failed: {e}")
@@ -319,6 +378,8 @@ class PersistenceActor(Actor):
         realized_return: str,
         currency: str,
         duration_ns: int,
+        closing_order_id: str | None,
+        close_reason: str,
     ) -> None:
         conn = await asyncpg.connect(self.config.postgres_dsn)
         try:
@@ -327,12 +388,14 @@ class PersistenceActor(Actor):
                 INSERT INTO positions (
                     ts_opened, ts_closed, run_id, strategy_id, instrument_id,
                     position_id, entry_side, peak_qty, avg_px_open, avg_px_close,
-                    realized_pnl, realized_return, currency, duration_ns
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+                    realized_pnl, realized_return, currency, duration_ns,
+                    closing_order_id, close_reason
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
                 """,
                 ts_opened, ts_closed, run_id, strategy_id, instrument_id,
                 position_id, entry_side, peak_qty, avg_px_open, avg_px_close,
                 realized_pnl, realized_return, currency, duration_ns,
+                closing_order_id, close_reason,
             )
         finally:
             await conn.close()
@@ -348,6 +411,7 @@ class PersistenceActor(Actor):
         slow_value: str,
         acted: bool,
         bootstrap: bool,
+        bar_close: str,
     ) -> None:
         conn = await asyncpg.connect(self.config.postgres_dsn)
         try:
@@ -355,11 +419,11 @@ class PersistenceActor(Actor):
                 """
                 INSERT INTO signal_events (
                     ts, run_id, strategy_id, instrument_id, signal,
-                    fast_value, slow_value, acted, bootstrap
-                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+                    fast_value, slow_value, acted, bootstrap, bar_close
+                ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
                 """,
                 ts, run_id, strategy_id, instrument_id, signal,
-                fast_value, slow_value, acted, bootstrap,
+                fast_value, slow_value, acted, bootstrap, bar_close,
             )
         finally:
             await conn.close()

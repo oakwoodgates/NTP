@@ -31,6 +31,19 @@ from src.core.sizing import (
     resolve_sizing_from_strategy_config,
 )
 
+# Order tag identifying a cross-flip exit (i.e. the close order submitted
+# when the cross-gate signal flips against an open position). Mirrors
+# ``PROTECTIVE_STOP_TAG`` in ``protective_stop_mixin.py`` and ``LIQUIDATION_TAG``
+# in ``liquidation_mixin.py``. PersistenceActor reads this off the closing
+# order to populate ``positions.close_reason``.
+STRATEGY_EXIT_TAG = "strategy_exit"
+
+# Order tag identifying a shutdown flatten — the on_stop handler flattening
+# any open position before the trading node disposes. Distinct from
+# strategy_exit because it isn't a deliberate cross-flip; it's a lifecycle
+# event. Useful for filtering shutdown noise out of strategy analysis.
+SHUTDOWN_FLATTEN_TAG = "shutdown_flatten"
+
 if TYPE_CHECKING:
     from nautilus_trader.model.instruments import Instrument
 
@@ -357,6 +370,7 @@ class MACross(ProtectiveStopAware, LiquidationAware, Strategy):
         slow_value: float,
         acted: bool,
         bootstrap: bool,
+        bar_close: Decimal,
     ) -> None:
         """Publish a :class:`SignalEvent` on the message bus for persistence.
 
@@ -373,6 +387,7 @@ class MACross(ProtectiveStopAware, LiquidationAware, Strategy):
             slow_value=Decimal(str(slow_value)),
             acted=acted,
             bootstrap=bootstrap,
+            bar_close=bar_close,
         )
         self.msgbus.publish(topic=TOPIC_SIGNAL_MA_CROSS, msg=event)
 
@@ -412,6 +427,7 @@ class MACross(ProtectiveStopAware, LiquidationAware, Strategy):
             slow_value=slow_value,
             acted=should_act,
             bootstrap=self._bootstrap_pending,
+            bar_close=Decimal(str(bar.close)),
         )
         self.log.info(
             f"cross_gate: signal={signal:+d} fast={fast_value:.4f} "
@@ -434,7 +450,10 @@ class MACross(ProtectiveStopAware, LiquidationAware, Strategy):
             # cross-back when the prior position is still open — i.e.
             # no stop has fired yet).
             if is_net_short:
-                self.close_all_positions(self.config.instrument_id)
+                self.close_all_positions(
+                    self.config.instrument_id,
+                    tags=[STRATEGY_EXIT_TAG],
+                )
                 self._enter(OrderSide.BUY, price)
             elif is_flat:
                 self._enter(OrderSide.BUY, price)
@@ -443,7 +462,10 @@ class MACross(ProtectiveStopAware, LiquidationAware, Strategy):
         else:
             # Fresh SHORT signal.
             if is_net_long:
-                self.close_all_positions(self.config.instrument_id)
+                self.close_all_positions(
+                    self.config.instrument_id,
+                    tags=[STRATEGY_EXIT_TAG],
+                )
                 self._enter(OrderSide.SELL, price)
             elif is_flat:
                 self._enter(OrderSide.SELL, price)
@@ -500,7 +522,10 @@ class MACross(ProtectiveStopAware, LiquidationAware, Strategy):
         """Cancel all orders, optionally close positions, unsubscribe."""
         self.cancel_all_orders(self.config.instrument_id)
         if self.config.close_positions_on_stop:
-            self.close_all_positions(self.config.instrument_id)
+            self.close_all_positions(
+                self.config.instrument_id,
+                tags=[SHUTDOWN_FLATTEN_TAG],
+            )
         self.unsubscribe_bars(self.config.bar_type)
 
     def on_reset(self) -> None:
