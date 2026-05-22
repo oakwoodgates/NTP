@@ -288,6 +288,52 @@ class TestOnReset:
         assert harness._liq_count == 0
 
 
+class TestOnStartTerminator:
+    """``LiquidationAware.on_start`` is the cooperative-super chain
+    terminator — it must exist (so MRO doesn't fall through to NT's
+    ``Strategy.on_start``, which logs a false-positive warning) AND it
+    must NOT call ``super().on_start()`` (which would defeat the point).
+    """
+
+    def test_exists_as_no_op(self) -> None:
+        """Method is defined and runs without raising."""
+        harness = _MixinHarness()
+        harness.on_start()  # must not raise
+
+    def test_does_not_call_super(self) -> None:
+        """If ``on_start`` were to call ``super().on_start()``, the chain
+        would reach our ``_ChainEnd`` sentinel (which has no
+        ``on_start``) and AttributeError. The terminator silences that
+        by not calling super at all.
+
+        We assert this structurally by replacing the chain-end with a
+        spy that records calls; if super() is called, the spy fires.
+        """
+        calls: list[str] = []
+
+        class _SpyChainEnd:
+            def on_start(self) -> None:
+                calls.append("chain_end.on_start")
+
+            def on_save(self) -> dict[str, bytes]:
+                return {}
+
+            def on_load(self, state: dict[str, bytes]) -> None: ...
+
+        class _SpyHarness(LiquidationAware, _SpyChainEnd):
+            pass
+
+        harness = _SpyHarness()
+        harness.on_start()
+
+        assert calls == [], (
+            "LiquidationAware.on_start called super().on_start(), which "
+            "defeats the chain-terminator pattern. In production this lets "
+            "the chain reach NT's Strategy.on_start, which logs a "
+            "false-positive 'handler was called when not overridden' warning."
+        )
+
+
 # ── MRO sanity check (the inheritance-order footgun) ─────────────────────
 
 

@@ -337,6 +337,28 @@ class LiquidationAware:
             msg=liq_event,
         )
 
+    def on_start(self) -> None:
+        """Terminate the cooperative ``super().on_start()`` chain.
+
+        Deliberately does NOT call ``super().on_start()``. Without this,
+        the chain ``MACross.on_start → ProtectiveStopAware.on_start →
+        super → ...`` falls through to NT's ``Strategy.on_start``, which
+        logs ``"The Strategy.on_start handler was called when not
+        overridden"`` even though every level above IS overridden. The
+        warning is a false positive — NT's base is a no-op stub that
+        isn't designed to be reached via cooperative super().
+
+        ``LiquidationAware`` is the last mixin in the MACross MRO before
+        Strategy, so this is the right place to terminate. Mirrors the
+        existing ``on_reset`` pattern in this same class (also no
+        ``super()`` call).
+
+        If a future mixin is inserted BELOW LiquidationAware in the MRO,
+        this terminator will swallow its ``on_start`` — that future
+        mixin should add its own terminator or document the constraint.
+        """
+        # Intentionally no super().on_start() call — see docstring.
+
     def on_reset(self) -> None:
         """Clear liquidation state between sweep iterations.
 
