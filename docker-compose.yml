@@ -42,8 +42,23 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-nautilus_platform}
       POSTGRES_USER: ${POSTGRES_USER:-nautilus}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-nautilus_dev}
+    # MOUNT TARGET MUST MATCH THE IMAGE'S PGDATA ENV VAR.
+    # timescale/timescaledb:2.17.2-pg16 sets PGDATA=/var/lib/postgresql/data
+    # (verified inside the running container with `docker exec ntp-postgres-1
+    #  env | grep PGDATA`). Older timescale images used /home/postgres/pgdata/data
+    # — if you ever bump the image, re-verify PGDATA and update this target.
+    #
+    # If the target doesn't match, Postgres writes data to its container
+    # writable layer instead of the named volume. Every container removal
+    # (any `docker compose down`) silently destroys the database. This bug
+    # was latent in this repo from May 15 → May 22 2026 and cost us
+    # six days of paper-trade history when the hardening PR's recreate
+    # finally tripped it.
+    #
+    # Regression test in tests/unit/test_compose_pgdata_mount.py asserts
+    # this invariant.
     volumes:
-      - pgdata:/home/postgres/pgdata/data
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-nautilus} -d ${POSTGRES_DB:-nautilus_platform}"]
       interval: 5s
