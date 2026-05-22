@@ -218,6 +218,10 @@ def main() -> None:
                 database=DatabaseConfig(
                     host=settings.redis_host,
                     port=settings.redis_port,
+                    # MUST be set; the Redis container is launched with
+                    # --requirepass and rejects unauthenticated connections.
+                    # See docs/DEPLOY.md for password-generation recipe.
+                    password=settings.redis_password,
                 ),
             ),
             # Persist per-strategy user state (``on_save``/``on_load``) across

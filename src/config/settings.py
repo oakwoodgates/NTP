@@ -42,6 +42,12 @@ class Settings(BaseSettings):
     # ── Redis ───────────────────────────────────────────────────────────
     redis_host: str = "localhost"
     redis_port: int = 6379
+    # MUST be set in deployment .env. The Redis container's docker-compose
+    # entry is launched with ``--requirepass ${REDIS_PASSWORD}``. With this
+    # field empty the trader can't authenticate and will fail at
+    # ``node.build()``. See ``docs/DEPLOY.md`` for the password-generation
+    # recipe (``openssl rand -base64 32``).
+    redis_password: str = ""
 
     # ── Telegram ────────────────────────────────────────────────────────
     telegram_token: str = ""

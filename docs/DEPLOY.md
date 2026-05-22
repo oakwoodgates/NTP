@@ -38,7 +38,13 @@ cd ~/NTP
 # 3. Create base .env
 cp .env.example .env
 nano .env
-# Required: POSTGRES_PASSWORD
+# REQUIRED — set strong values for the secrets:
+#   POSTGRES_PASSWORD
+#   REDIS_PASSWORD   (Redis container is launched with --requirepass; trader
+#                     can't connect without this)
+#   GRAFANA_PASSWORD
+# Generate any of these with: openssl rand -base64 32
+#
 # Recommended: TELEGRAM_TOKEN, TELEGRAM_CHAT_ID for alerts
 # Default behaviour: TRADING_SCRIPT=scripts/run_sandbox.py (paper trading via sandbox exec)
 # Sandbox runs against MAINNET HL data feed with simulated fills — you do NOT
@@ -171,6 +177,59 @@ docker compose --profile sol up -d trader-sol
 # OR all at once:
 docker compose --profile multi up -d
 ```
+
+## One-time hardening upgrade (Redis auth + loopback binding)
+
+If your droplet was set up before the Redis-auth requirement landed (i.e.
+your current `.env` has no `REDIS_PASSWORD` and your `docker-compose.yml`
+binds Postgres/Redis on `0.0.0.0`), follow this procedure exactly once.
+The order matters — wrong order leaves the trader unable to authenticate
+to Redis after restart.
+
+```bash
+ssh root@<droplet-ip>
+cd ~/NTP
+
+# 1. Pull the hardened compose + code
+git pull
+
+# 2. Generate a strong Redis password and add it to .env BEFORE restarting
+#    anything. The trader reads REDIS_PASSWORD from .env via settings.py.
+PASS=$(openssl rand -base64 32)
+echo "REDIS_PASSWORD=$PASS" >> .env
+# Also confirm POSTGRES_PASSWORD and GRAFANA_PASSWORD are strong.
+
+# 3. Stop EVERYTHING (trader + infra) — clean handover required because
+#    the running Redis has no auth, the new one will demand it.
+docker compose --profile single --profile eth --profile btc --profile sol --profile multi down
+
+# 4. Recreate Redis with the new password and the loopback-only binding.
+docker compose up -d redis postgres grafana
+docker compose ps   # all should be healthy
+
+# 5. Sanity-check: confirm Redis now requires auth.
+docker exec ntp-redis-1 redis-cli ping
+# Expected: (error) NOAUTH Authentication required.
+docker exec ntp-redis-1 redis-cli -a "$PASS" --no-auth-warning ping
+# Expected: PONG
+
+# 6. Confirm ports are no longer publicly exposed.
+ss -tlnp | grep -E '6379|5434'
+# Expected: 127.0.0.1:6379 and 127.0.0.1:5434 only — no 0.0.0.0.
+
+# 7. Restart trader(s) with the new compose env. They'll pick up
+#    REDIS_PASSWORD via .env / x-trader-env.
+docker compose --profile single up -d trader              # or eth/btc/sol/multi
+docker logs ntp-trader-eth-1 --since 60s | grep -i 'redis\|connected'
+# Expected: connections succeed; no "NOAUTH" errors.
+```
+
+After this upgrade, every future deploy follows the standard "code
+changes" flow above — REDIS_PASSWORD is sticky in `.env`.
+
+**Forgot to set REDIS_PASSWORD before step 3?** The trader will hard-fail
+at `node.build()` with `NOAUTH Authentication required`. Add the env var,
+recreate the trader: `docker compose up -d --force-recreate trader-eth`.
 
 ## .env-Only Changes (strategy, trade size, instrument)
 
