@@ -18,19 +18,26 @@ x-trader-common: &trader-common
       max-file: "3"
 
 # Environment overrides every trader needs (Docker DNS names for infra +
-# Postgres/Redis ports). Compose `environment:` shadows `env_file:`, so these
-# stay in YAML rather than .env.
+# Postgres/Redis ports + Redis auth). Compose `environment:` shadows
+# `env_file:`, so these stay in YAML rather than .env.
 x-trader-env: &trader-env
   POSTGRES_HOST: postgres
   POSTGRES_PORT: "5432"
   REDIS_HOST: redis
   REDIS_PORT: "6379"
+  REDIS_PASSWORD: ${REDIS_PASSWORD}
 
 services:
   postgres:
     image: timescale/timescaledb:2.17.2-pg16
+    # Bind ONLY to the loopback interface. Docker's iptables manipulation
+    # bypasses UFW: a bare "5434:5432" mapping exposes Postgres to the
+    # public internet even when UFW says only 22 and 3000 are allowed.
+    # See https://github.com/docker/for-linux/issues/690.
+    # If you need external psql access from your laptop, SSH-tunnel:
+    #     ssh -L 5434:127.0.0.1:5434 root@<droplet>
     ports:
-      - "${POSTGRES_PORT:-5434}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5434}:5432"
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-nautilus_platform}
       POSTGRES_USER: ${POSTGRES_USER:-nautilus}
@@ -45,15 +52,25 @@ services:
 
   redis:
     image: redis:7-alpine
+    # Same loopback-bind reason as postgres above. Plus: require a password.
+    # Without `requirepass`, an unauthenticated attacker who reaches port
+    # 6379 can delete keys, write arbitrary values, and attempt the
+    # `CONFIG SET dir + SAVE` cron-write exploit (which one DID try on
+    # 2026-05-22 — see commit log + reports/restart_tests/).
+    # Container isolation prevented the cron-write step but the keys
+    # being deleted broke NT's strategy save/load until the next clean
+    # restart. Never again.
     ports:
-      - "${REDIS_PORT:-6379}:6379"
-    volumes:
-      - redisdata:/data
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # `redis-cli ping` needs the password too.
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
       interval: 5s
       timeout: 5s
       retries: 5
+    volumes:
+      - redisdata:/data
 
   grafana:
     image: grafana/grafana:10.4.2
@@ -67,8 +84,16 @@ services:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning
       - ./grafana/dashboards:/var/lib/grafana/dashboards
+    # Grafana also gets loopback-bind by default. Two access patterns:
+    # 1) SSH tunnel from your laptop (recommended):
+    #      ssh -L 3000:127.0.0.1:3000 root@<droplet>
+    #    then open http://localhost:3000 locally.
+    # 2) Public exposure (if you really want it): set GRAFANA_BIND=0.0.0.0
+    #    in .env on the droplet, AND set a strong GRAFANA_PASSWORD,
+    #    AND consider putting Grafana behind an HTTPS reverse proxy.
+    #    Default is loopback-bind — safer-by-default.
     ports:
-      - "3000:3000"
+      - "${GRAFANA_BIND:-127.0.0.1}:3000:3000"
     depends_on:
       postgres:
         condition: service_healthy

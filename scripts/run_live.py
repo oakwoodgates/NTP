@@ -253,6 +253,8 @@ def main() -> None:
                 database=DatabaseConfig(
                     host=settings.redis_host,
                     port=settings.redis_port,
+                    # MUST be set; see run_sandbox.py for full rationale.
+                    password=settings.redis_password,
                 ),
             ),
             # Persist per-strategy user state across restarts via the
