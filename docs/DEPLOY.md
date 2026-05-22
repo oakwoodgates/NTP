@@ -385,11 +385,49 @@ docker compose restart trader
 docker compose restart trader-eth trader-btc trader-sol
 ```
 
+## Bumping the timescale image
+
+The Postgres named volume `pgdata` MUST be mounted at the path the
+running container uses as `PGDATA`. If the mount target doesn't match,
+Postgres silently writes to its container writable layer instead of the
+volume, and every container removal destroys the database.
+
+This is exactly what bit us 2026-05-15 → 2026-05-22: the compose file
+had a stale mount at `/home/postgres/pgdata/data` (older timescale image
+convention), the running image's actual PGDATA was
+`/var/lib/postgresql/data`, and the hardening PR's `docker compose down`
+silently wiped six days of paper-trade history. Regression test at
+[`tests/unit/test_compose_pgdata_mount.py`](../tests/unit/test_compose_pgdata_mount.py)
+now pins the invariant.
+
+When bumping the `timescale/timescaledb` image version in
+`docker-compose.yml`, follow these steps in order:
+
+```bash
+# 1. Verify the new image's PGDATA path
+docker run --rm timescale/timescaledb:<new-version> env | grep PGDATA
+# Expected for 2.x-pg16: PGDATA=/var/lib/postgresql/data
+# If different, you MUST update both:
+#   - docker-compose.yml `volumes:` line (the mount target)
+#   - tests/unit/test_compose_pgdata_mount.py EXPECTED_PGDATA constant
+
+# 2. After bumping in a branch, run the regression test
+pytest tests/unit/test_compose_pgdata_mount.py -v
+
+# 3. Stage A smoke test on the droplet (DESTRUCTIVE — wipes pgdata):
+#    a fresh `down` + `up -d postgres` cycle must preserve data.
+#    Insert a sentinel row before `down`, verify it survives `up`.
+```
+
+The compose mount target is the load-bearing line. Get it wrong and
+every restart silently destroys your data.
+
 ## Troubleshooting
 
 | Issue | Fix |
 |-------|-----|
 | `docker compose up -d` doesn't start any trader | Expected. All traders are profile-gated. Use `--profile single` (legacy) or `--profile eth`/`btc`/`sol`/`multi`. |
+| Postgres data gone after `docker compose down` | The `pgdata` volume mount target doesn't match the image's PGDATA. See "Bumping the timescale image" above; check `docker-compose.yml` mounts `pgdata:/var/lib/postgresql/data` and the regression test passes. |
 | `env file .env.eth not found` | You're starting a per-instrument profile but haven't copied the template. Run `cp .env.eth.example .env.eth` (or btc/sol) and fill in the values. |
 | Trader container restart loop | `docker compose logs <svc> --tail 50`. Common cause: migrations not run. Fix: `docker compose --profile single run --rm trader alembic upgrade head`. |
 | Protective stop never fires | After PR #29, `STOP_PCT` (not `DEFAULT_STOP_PCT`) is read at runtime. Verify it's set in `.env` (or `.env.{asset}`) — blank or unset → mixin disabled by design. |
