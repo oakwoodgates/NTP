@@ -67,6 +67,9 @@ cp .env.sol.example .env.sol        # then edit with your SOL picks
 
 # 5. Build the trader image (takes a few minutes first time — NT is ~1-2GB)
 docker compose build trader
+# This produces a single `ntp-trader:latest` image shared by every
+# profile-gated trader service (trader / trader-eth / trader-btc /
+# trader-sol). One build is all you need.
 
 # 6. Start infrastructure
 docker compose up -d
@@ -166,6 +169,9 @@ ssh root@<droplet-ip>
 cd ~/NTP
 git pull
 docker compose build trader
+# Rebuilds the single shared `ntp-trader:latest` image used by every
+# profile-gated trader service (trader / trader-eth / trader-btc /
+# trader-sol). The next `up -d` on any profile picks up the new image.
 
 # Single-instrument:
 docker compose --profile single up -d trader
@@ -348,7 +354,7 @@ Substitute `<svc>` with whichever service is running (`trader`,
 | Stop trading (graceful) | `docker compose stop <svc>` |
 | Start trading | `docker compose start <svc>` (only works if service was previously up) |
 | Restart after `.env` change | `docker compose restart <svc>` |
-| Restart after code change | `docker compose build trader && docker compose --profile <profile> up -d <svc>` |
+| Restart after code change | `docker compose build trader && docker compose --profile <profile> up -d <svc>` (one build produces the single `ntp-trader:latest` shared by every trader profile) |
 | Run migrations (any trader running) | `docker compose exec <svc> alembic upgrade head` |
 | Run migrations (no trader running) | `docker compose --profile single run --rm trader alembic upgrade head` |
 | Stop all multi-instrument traders | `docker compose --profile multi stop` |

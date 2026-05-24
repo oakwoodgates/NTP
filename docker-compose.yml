@@ -1,8 +1,14 @@
-# Trader services (single + multi-instrument) all share the same image, env_file,
-# infra deps, restart policy, and logging. Anchor + merge avoids duplicating
-# this in each service block.
+# Trader services (single + multi-instrument) all share the same image
+# (the explicit `image:` tag below — without it, compose would generate
+# one image per service from the same `build:` context, so a build of
+# `trader` would leave `trader-eth`/`btc`/`sol` on the previous build
+# and silently run stale code, as bit us 2026-05-22 when post-PR45
+# trader-eth crashed on NOAUTH because it hadn't picked up the Redis-
+# auth code), env_file, infra deps, restart policy, and logging. Anchor
+# + merge avoids duplicating this in each service block.
 x-trader-common: &trader-common
   build: .
+  image: ntp-trader:latest
   env_file: .env
   depends_on:
     postgres:
