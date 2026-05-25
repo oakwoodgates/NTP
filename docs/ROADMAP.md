@@ -18,8 +18,8 @@ against live Hyperliquid market data. Containerized; runs on Digital
 Ocean. The original (polling-mode) MACross was validated end-to-end on
 this stack; the cross-gated stack is revalidated in Phase 2.5.
 
-**Phase 2.5 wiring — prep complete, deploy pending.** All
-infrastructure for paper-trading revalidation is in place:
+**Phase 2.5 wiring — prep complete, Stage A live.** All
+infrastructure for paper-trading revalidation is in place AND deployed:
 - `signal_events` PG table + per-bar `SignalEvent` publication from
   MACross (the key Phase 2.5 telemetry — answers the open question
   about cross-gate firing alignment).
@@ -31,11 +31,23 @@ infrastructure for paper-trading revalidation is in place:
 - Multi-instrument compose topology: profile-gated `trader-eth` /
   `trader-btc` / `trader-sol` services, each reading per-instrument
   strategy config from gitignored `.env.{asset}` files.
+- Hardening shipped (PR #45): Redis `--requirepass` + loopback bind
+  for postgres/redis/grafana; PR #46: `pgdata` mount target pinned to
+  the image's `PGDATA` path with a regression test; PR #47: single
+  shared `ntp-trader:latest` image across every trader profile.
+- Warm-restart guarantees (PR #42): `MACross.on_save`/`on_load`
+  persist cross-gate + mixin state into NT's Redis cache so deploys
+  are state-preserving. Combined with PR #48
+  (`close_positions_on_stop=False` in the runners) every
+  `docker compose stop`/`restart` is now position-neutral.
+- `strategy_runs.parent_run_id` (PR #39) self-FK + runner orphan-row
+  cleanup on startup-failure gives a walkable chain across restarts.
 - Verification config picked locally (see project-local
   `reports/decisions/`); the picks are deployment-host-only and stay
   off GitHub per the findings-stay-local rule.
 
-What's left for Phase 2.5: actually deploy and run for 1-2 weeks.
+Stage A is live on Hyperliquid sandbox. Stage B (HL testnet, 2 weeks)
+is gated on Stage A's wiring-pass criteria.
 
 **Phase 3a — Research tooling.** Complete (this milestone). Closed with:
 
@@ -280,11 +292,12 @@ for the v2 RFC and roadmap. Things we care about most:
 - **Bar-backtest fill model improvements.** Phase 2.6 will quantify how
   much our predictions lose to the optimistic trigger-price fills NT
   does today; v2 may tighten this and shrink the haircut.
-- **Breaking changes.** Currently pinned at 1.226.0. Do not upgrade
-  without a tested branch — the 1.225 → 1.226 bump itself only required
+- **Breaking changes.** Currently pinned at 1.227.0. Do not upgrade
+  without a tested branch — the 1.225 → 1.226 bump only required
   migrating Hyperliquid configs from `testnet=` to
-  `environment=HyperliquidEnvironment.{TESTNET,MAINNET}`, but bigger
-  bumps will need full sweep + verdict re-runs.
+  `environment=HyperliquidEnvironment.{TESTNET,MAINNET}`; the 1.226 → 1.227
+  bump was Python/Cython API-clean (all upstream churn was in the v2
+  Rust core). Bigger bumps will need full sweep + verdict re-runs.
 
 Migration is opportunistic, not scheduled.
 
@@ -296,7 +309,7 @@ Migration is opportunistic, not scheduled.
 |---|---|---|
 | Live-vs-backtest comparison harness | Phase 2.6 | `paper_vs_backtest.ipynb` |
 | Rolling accuracy regression | Phase 2.6 | `scripts/check_accuracy.py` |
-| Paper-run metadata schema | Phase 2.6 | PostgreSQL — extend existing `strategy_runs` |
+| Paper-run metadata schema | Phase 2.6 | PostgreSQL — extend existing `strategy_runs` (already extended with `parent_run_id` self-FK in PR #39 for cross-restart chains) |
 | Grafana panels for live-vs-backtest divergence | Phase 2.6 | dashboard |
 | Strategy correlation matrix | Phase 4 | research notebook |
 | Portfolio-level kill switch | Phase 4 | new actor |

@@ -230,10 +230,13 @@ jupyter notebook notebooks/
 
 ```bash
 cp .env.example .env
-# Edit .env — POSTGRES_PASSWORD required; TELEGRAM_TOKEN/CHAT_ID recommended;
+# Edit .env — POSTGRES_PASSWORD, REDIS_PASSWORD, GRAFANA_PASSWORD all required
+# (generate with: openssl rand -base64 32). TELEGRAM_TOKEN/CHAT_ID recommended.
 # HL credentials only needed for live (sandbox does NOT need them).
+# REDIS_PASSWORD is load-bearing: Redis container is launched with --requirepass
+# and the trader fails at node.build() with NOAUTH if missing (PR #45).
 
-# Build trader image
+# Build trader image (single ntp-trader:latest shared by every profile per PR #47)
 docker compose build trader
 
 # Start infra (postgres + redis + grafana). Trader services are profile-gated;
@@ -308,7 +311,11 @@ docker compose --profile single up -d trader   # single-instrument legacy path
 docker compose --profile eth up -d trader-eth  # per-instrument (needs .env.eth)
 
 docker compose logs -f trader              # tail logs (or trader-eth/btc/sol)
-docker compose stop trader                 # graceful shutdown (SIGTERM → node.stop())
+docker compose stop trader                 # graceful shutdown (SIGTERM → node.stop()).
+                                           # Per PR #48, this does NOT flatten open
+                                           # positions — orders cancel, positions stay
+                                           # open in Redis cache, PR #42 persists
+                                           # strategy state, next start rehydrates.
 ```
 
 **Native (quick iteration):**

@@ -76,16 +76,25 @@ Which system reads which setting:
 | `ma_fast` / `ma_slow` / `ma_type` | — (notebook picks) | — (CLI picks) | ✓ MACross fast/slow/family | ✓ | — |
 | `macross_atr_period` / `..._sl_mult` / `..._tp_mult` | — | — | ✓ MACrossATR bracket sizing | ✓ | — |
 | `macdrsi_macd_fast` / `..._slow` / `..._signal` / `..._rsi_period` | — | — | ✓ MACDRSI windows | ✓ | — |
+| **Lifecycle / shutdown** |  |  |  |  |  |
+| `close_positions_on_stop` (strategy-config) | ✓ True default (backtest wants flat) | ✓ True default | ✗ runner forces `False` (deploys are position-neutral; PR #48) | ✗ runner forces `False` (same reason; venue holds real position) | — |
 | **Liquidation simulator** |  |  |  |  |  |
 | `liquidation_enabled` | ✓ | ✓ | (typically False) | ✗ False (venue handles) | — |
 | `liquidation_min_trade_notional` | ✓ | ✓ | ✓ AccountAliveMonitor floor | — | — |
 | **Infrastructure** |  |  |  |  |  |
-| `postgres_*` | — | — | ✓ PersistenceActor | ✓ | — |
-| `redis_*` | — | — | ✓ NT cache | ✓ | — |
+| `postgres_host` / `postgres_port` / `postgres_db` / `postgres_user` | — | — | ✓ PersistenceActor + asyncpg | ✓ same | — |
+| `postgres_password` | — | — | ✓ asyncpg connect | ✓ same | — |
+| `redis_host` / `redis_port` | — | — | ✓ `DatabaseConfig` (NT cache) | ✓ same | — |
+| `redis_password` (REQUIRED post-PR #45) | — | — | ✓ `DatabaseConfig(password=...)` | ✓ same | — |
 | `telegram_*` | — | — | ✓ AlertActor | ✓ | — |
 | `hl_private_key` / `hl_wallet_address` | — | — | — (Sandbox exec) | ✓ HL exec config | — |
 | `hl_testnet` | — | — | — | ✓ mainnet/testnet switch | — |
 | `live_confirm` | — | — | — | ✓ bypass interactive prompt | — |
+
+**Required infrastructure fields** (no usable default):
+- `postgres_password` — asyncpg auth.
+- `redis_password` — Redis container launched with `--requirepass`; trader fails at `node.build()` with `NOAUTH` if missing or wrong. Generate with `openssl rand -base64 32`.
+- `grafana_password` — initial admin password seeded into Grafana's SQLite on first container start. If you rotate it later, also run `grafana-cli admin reset-admin-password "<new>"` inside the container — env var changes don't propagate post-init. See [`DEPLOY.md`](DEPLOY.md) "One-time hardening upgrade".
 
 ## Two patterns of `.env` usage
 
