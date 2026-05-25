@@ -14,7 +14,15 @@ How to start paper trading, verify the pipeline, and iterate with different stra
 cp .env.example .env
 ```
 
-The defaults work out of the box for paper trading. Optionally set up Telegram alerts:
+**REQUIRED — set strong values before bringing infra up:**
+
+| Field | Why | How to generate |
+|---|---|---|
+| `POSTGRES_PASSWORD` | asyncpg auth | `openssl rand -base64 32` |
+| `REDIS_PASSWORD` | Redis container is launched with `--requirepass` (PR #45). Trader fails at `node.build()` with `NOAUTH` if missing. | `openssl rand -base64 32` |
+| `GRAFANA_PASSWORD` | Seeded into Grafana's SQLite on first container start (rotate via `grafana-cli admin reset-admin-password` after init). | `openssl rand -base64 32` |
+
+Optional but recommended — Telegram alerts:
 
 1. Message [@BotFather](https://t.me/BotFather) on Telegram → `/newbot` → copy the token
 2. Message your new bot, then visit `https://api.telegram.org/bot<TOKEN>/getUpdates` to find your `chat_id`
@@ -36,7 +44,9 @@ alembic upgrade head       # create tables (first time only)
 python scripts/run_sandbox.py
 ```
 
-Default config: MACross-EMA(`MA_FAST=10`, `MA_SLOW=100`) on `BTC-USD-PERP.HYPERLIQUID`, 4-hour bars, $2000 USD notional per trade, 5% protective stop. All hyperparameters flow from `.env` — see [`CONFIG.md`](CONFIG.md) for the per-system field map.
+Factory-default config (`src/config/settings.py`): MACross-EMA(`MA_FAST=10`, `MA_SLOW=100`) on `BTC-USD-PERP.HYPERLIQUID`, 4-hour bars, $1000 starting capital, $2000 USD notional per trade, 20× leverage, 5% protective stop. All hyperparameters flow from `.env` — see [`CONFIG.md`](CONFIG.md) for the per-system field map.
+
+> **Deployed configs may differ.** What's actually running on the DO box (instrument, bar interval, MA windows) lives in `.env` and per-instrument `.env.{asset}` files on the deployment host — gitignored, per the findings-stay-local rule. The factory default above is what `python scripts/run_sandbox.py` does on a freshly-cloned dev machine with no `.env` overrides.
 
 **What happens:**
 - Registers a `strategy_runs` row in PostgreSQL with a unique `run_id` + `trader_id`
@@ -52,6 +62,8 @@ Default config: MACross-EMA(`MA_FAST=10`, `MA_SLOW=100`) on `BTC-USD-PERP.HYPERL
 **First trade timing:** MACross needs `MA_SLOW` bars of warmup before producing signals. At the default `MA_SLOW=100` on 4-hour bars, that's **100 × 4h = ~17 days** of warmup before the first cross can fire. NT backfills historical bars on start, so warmup completes within minutes of process start — but the first ACTED signal then requires a fresh cross transition, which on slow MAs at 4h is roughly once every 1-3 weeks under typical conditions.
 
 **Skip the wait with `BOOTSTRAP_ON_DEPLOY=true`:** the strategy treats the first observed signal direction after warmup as a synthetic cross and fires immediately. Useful for **live deploys mid-trend** where you want to catch the current move. **Leave `false` for Phase 2.5/2.6 verification** — a synthetic deploy-time entry muddies the backtest-vs-paper signal-alignment analysis (Tool 1). See [`STRATEGY_ENTRY_RULES.md`](STRATEGY_ENTRY_RULES.md) for the rationale.
+
+**Restarts do NOT re-arm bootstrap.** PR #42's `on_save`/`on_load` persists `cross_gate_bootstrap_pending` into NT's Redis cache. After the first bootstrap fires on the first run, the flag is flipped to `False` and saved. Every subsequent restart loads `False` from Redis, so `docker compose restart`/code deploys never synthesize a second deploy-time entry. A fresh `BOOTSTRAP_ON_DEPLOY=true` window only triggers when the Redis state is wiped (clean-restart workflow — see `## Wipe Database` in [`DEPLOY.md`](DEPLOY.md)).
 
 ## 3b. Start Paper Trading (Docker)
 
@@ -523,7 +535,7 @@ GROUP BY bar_hour ORDER BY bar_hour;
 
 ## 7. NautilusTrader upgrades
 
-This project currently pins NautilusTrader `1.226.0` in `pyproject.toml`. When
+This project currently pins NautilusTrader `1.227.0` in `pyproject.toml`. When
 upgrading NautilusTrader in future:
 
 - Re-run the canonical EMA Cross backtest notebook to sanity-check P&L,
@@ -559,9 +571,12 @@ upgrading NautilusTrader in future:
 | Telegram not sending | Verify token/chat_id. Test: `curl https://api.telegram.org/bot<TOKEN>/getMe` |
 | `ModuleNotFoundError` | `pip install -e ".[dev]"` in activated venv |
 | Redis connection error | `docker compose ps` — check Redis is running on port 6379 |
+| Trader restart loop with `RuntimeError: "NOAUTH": Authentication required` | `REDIS_PASSWORD` missing/wrong in `.env`. Set it (`openssl rand -base64 32`), then `docker compose up -d --force-recreate <trader-svc>`. The redis container reads `REDIS_PASSWORD` at start time via `command: ["redis-server", "--requirepass", "${REDIS_PASSWORD}"]`; if you change the value, `docker compose up -d --force-recreate redis` too. |
+| Postgres data missing after `docker compose down` | `pgdata` volume mount target mismatch (PR #46 fix). Verify `docker-compose.yml` mounts `pgdata:/var/lib/postgresql/data`, NOT the legacy `/home/postgres/pgdata/data`. Regression test at `tests/unit/test_compose_pgdata_mount.py`. |
+| Trader on a per-instrument profile crashloops with `NOAUTH` after a `docker compose build trader` | Likely you're on an old `docker-compose.yml` without PR #47 (single shared image). Pull main, then `docker compose build trader` once rebuilds the single `ntp-trader:latest` used by every profile. |
 | Grafana panels empty | Data needs time to accumulate. Check datasource in Grafana → Settings → Data sources. |
 | Trader container restart loop | Check `docker compose logs <service> --tail 50` (e.g. `trader`, `trader-eth`). Common cause: migrations not run — run `docker compose --profile single run --rm trader alembic upgrade head`. |
-| `docker compose stop` but `stopped_at` is NULL | SIGTERM handler issue — verify the runner has the `signal.signal(signal.SIGTERM, ...)` handler at the top of `main()`. |
+| `docker compose stop` but `stopped_at` is NULL | Either: (a) SIGTERM handler issue — verify the runner has the `signal.signal(signal.SIGTERM, ...)` handler at the top of `main()`; or (b) the trader crashed during startup before `_register_run` completed. PR #39's `try/finally` guards against (b) for newer runs; legacy orphan rows from before PR #39 can be cleaned with `UPDATE strategy_runs SET stopped_at = started_at + INTERVAL '5 minutes' WHERE stopped_at IS NULL AND started_at < NOW() - INTERVAL '1 day'`. SIGKILL bypasses both — see [`PROTECTIVE_STOP_RESTART_AUDIT.md`](PROTECTIVE_STOP_RESTART_AUDIT.md). |
 | Live trading restart loop in Docker | `input()` requires a TTY. Set `LIVE_CONFIRM=yes` in `.env` for containerized live trading. |
 | `env file .env.eth not found` | You're starting a per-instrument profile but haven't copied the template. Run `cp .env.eth.example .env.eth` (or `.env.btc` / `.env.sol`) and fill in the values. |
 | `docker compose up -d` doesn't start any trader | Expected. Trader services are profile-gated since the multi-instrument PR. Use `--profile single` (legacy) or `--profile eth`/`btc`/`sol`/`multi`. |

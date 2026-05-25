@@ -2,9 +2,9 @@
 
 ## Overview
 
-This report catalogs what NautilusTrader 1.226.0 (the version pinned in `pyproject.toml`) ships with: example backtest scripts, example strategies, example execution algorithms, example indicators, and the full built-in indicator library. The goal is to provide a quick reference for strategy development and research tooling on the NTP platform.
+This report catalogs what NautilusTrader 1.227.0 (the version pinned in `pyproject.toml`) ships with: example backtest scripts, example strategies, example execution algorithms, example indicators, and the full built-in indicator library. The goal is to provide a quick reference for strategy development and research tooling on the NTP platform.
 
-> **Version note:** content was originally captured against 1.224.0 and re-checked at the 1.225.0 and 1.226.0 pins.  The indicator + execution-algo APIs are stable across these minor bumps; if you upgrade NT, re-verify with `python -c "import nautilus_trader; print(nautilus_trader.__version__)"` and refresh by browsing `.ref/nautilus_trader-<version>/` in the project tree.
+> **Version note:** content was originally captured against 1.224.0 and re-checked at the 1.225.0, 1.226.0, and 1.227.0 pins.  The indicator + execution-algo APIs are stable across these minor bumps; if you upgrade NT, re-verify with `python -c "import nautilus_trader; print(nautilus_trader.__version__)"` and refresh by browsing `.ref/nautilus_trader-<version>/` in the project tree.
 
 ---
 
@@ -414,7 +414,7 @@ From the examples, NT supports these data ingestion paths:
 
 ### Tearsheet Generation
 
-NT 1.226.0 includes interactive tearsheet generation (note: the project does NOT use this — `create_tearsheet()` is built on the broken returns analyzer; see `docs/ANALYZER_RETURNS_CAVEAT.md` and the v2 tearsheet helper `generate_v2_tearsheet` in `notebooks/charts.py` for the trustworthy replacement):
+NT 1.227.0 includes interactive tearsheet generation (note: the project does NOT use this — `create_tearsheet()` is built on the broken returns analyzer; see `docs/ANALYZER_RETURNS_CAVEAT.md` and the v2 tearsheet helper `generate_v2_tearsheet` in `notebooks/charts.py` for the trustworthy replacement):
 
 ```python
 from nautilus_trader.analysis import TearsheetConfig, create_tearsheet

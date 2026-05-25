@@ -391,6 +391,15 @@ docker compose restart trader
 docker compose restart trader-eth trader-btc trader-sol
 ```
 
+**Live restarts are position-neutral.** Per PR #48, `run_live.py` builds
+strategy configs with `close_positions_on_stop=False`. `docker compose
+restart` / `up -d --force-recreate` cancel working orders but do NOT
+submit market exits — the venue holds the real position, and PR #42
+persists strategy-private state across the restart so the strategy
+resumes exactly where it left off. To deliberately flatten before a
+risky deploy, close from the HL UI or via a one-shot reduce-only
+script first.
+
 ## Bumping the timescale image
 
 The Postgres named volume `pgdata` MUST be mounted at the path the

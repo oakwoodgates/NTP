@@ -1,4 +1,4 @@
-# Protective Stop Restart Audit (NT 1.226.0)
+# Protective Stop Restart Audit (NT 1.227.0)
 
 **Scope.** What happens to a `ProtectiveStopAware` strategy's reduce-only
 stop orders across a container restart, and the defensive hardening
@@ -29,7 +29,7 @@ State lives in three places:
 | **NT in-process state** | `Position` and `Order` Python objects | No — rebuilt from cache on startup |
 | **Mixin in-process state** | `_protective_order_ids: dict[PositionId, ClientOrderId]` | **No** — lost on every restart, rebuilt by `_protective_rehydrate` |
 
-## 2. NT 1.226.0 live reconciliation — what it actually does
+## 2. NT 1.227.0 live reconciliation — what it actually does
 
 Source: [`nautilus_trader/live/execution_engine.py`](../.venv/Lib/site-packages/nautilus_trader/live/execution_engine.py)
 + [`nautilus_trader/live/reconciliation.py`](../.venv/Lib/site-packages/nautilus_trader/live/reconciliation.py).
@@ -286,13 +286,15 @@ including the new `on_start` hop.
 
 ## 7. References
 
-- NT 1.226.0 live exec engine — [`live/execution_engine.py`](../.venv/Lib/site-packages/nautilus_trader/live/execution_engine.py),
+- NT 1.227.0 live exec engine — [`live/execution_engine.py`](../.venv/Lib/site-packages/nautilus_trader/live/execution_engine.py),
   particularly `_reconcile_order_report` (line 2985), `_generate_order`
   (line ~3470), `_reconcile_position_report_netting` (line 2443).
-- NT 1.226.0 reconciliation helpers — [`live/reconciliation.py`](../.venv/Lib/site-packages/nautilus_trader/live/reconciliation.py),
+  (Line numbers captured at the 1.226 → 1.227 upgrade — re-verify with
+  `grep -n` if a future bump shifts them.)
+- NT 1.227.0 reconciliation helpers — [`live/reconciliation.py`](../.venv/Lib/site-packages/nautilus_trader/live/reconciliation.py),
   `create_inferred_order_filled_event` (line 434), position_id fallback
   (line 510).
-- NT 1.226.0 kernel startup — [`system/kernel.py::start_async`](../.venv/Lib/site-packages/nautilus_trader/system/kernel.py)
+- NT 1.227.0 kernel startup — [`system/kernel.py::start_async`](../.venv/Lib/site-packages/nautilus_trader/system/kernel.py)
   line 999 (reconciliation completes before trader.start).
 - HL adapter execution — [`adapters/hyperliquid/execution.py`](../.venv/Lib/site-packages/nautilus_trader/adapters/hyperliquid/execution.py),
   lines 297, 337, 372, 400.
