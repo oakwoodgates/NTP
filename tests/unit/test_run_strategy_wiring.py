@@ -208,3 +208,76 @@ class TestRunLiveBootstrapOnDeployWiring:
 
         assert strategy.config.bootstrap_on_deploy is bootstrap_on_deploy
         assert config_dict["bootstrap_on_deploy"] is bootstrap_on_deploy
+
+
+# ── close_positions_on_stop wiring (both runners, every strategy) ──────────
+
+
+# All strategy branches in the runners must opt out of flatten-on-stop. If
+# True (the strategy-config default) is ever passed through, every
+# `docker compose stop` generates a synthetic `shutdown_flatten` exit that
+# pollutes the trade history and breaks PR #42's warm-restart guarantee.
+# Parameterize over one alias per strategy family so every branch in
+# _build_strategy is exercised.
+_RUNNER_STRATEGY_BRANCHES = [
+    "EMACross",              # MACross + aliases branch
+    "EMACrossLongOnly",      # MACrossLongOnly + aliases branch
+    "MACrossATR",
+    "MACDRSI",
+]
+
+
+class TestRunSandboxCloseOnStopWiring:
+    """``run_sandbox._build_strategy`` must override
+    ``close_positions_on_stop=False`` on every supported strategy.
+
+    See ``docs/PAPER_TRADING_GUIDE.md`` "Deploy lifecycle" for the
+    rationale.
+    """
+
+    @pytest.mark.parametrize("strategy_name", _RUNNER_STRATEGY_BRANCHES)
+    def test_close_on_stop_disabled(self, strategy_name: str) -> None:
+        from run_sandbox import _build_strategy
+
+        settings = _build_settings()
+        instrument_id, bar_type = _instrument_and_bar_type()
+
+        strategy, _strategy_id, _config_dict = _build_strategy(
+            strategy_name=strategy_name,
+            instrument_id=instrument_id,
+            bar_type=bar_type,
+            trade_notional=Decimal("2000"),
+            settings=settings,
+        )
+
+        assert strategy.config.close_positions_on_stop is False, (
+            f"{strategy_name} must be built with close_positions_on_stop=False "
+            "in the paper-trading runner; otherwise every graceful stop "
+            "flattens open positions and breaks PR #42's warm-restart "
+            "guarantee."
+        )
+
+
+class TestRunLiveCloseOnStopWiring:
+    """Mirror of the sandbox test against the live runner."""
+
+    @pytest.mark.parametrize("strategy_name", _RUNNER_STRATEGY_BRANCHES)
+    def test_close_on_stop_disabled(self, strategy_name: str) -> None:
+        from run_live import _build_strategy
+
+        settings = _build_settings()
+        instrument_id, bar_type = _instrument_and_bar_type()
+
+        strategy, _strategy_id, _config_dict = _build_strategy(
+            strategy_name=strategy_name,
+            instrument_id=instrument_id,
+            bar_type=bar_type,
+            trade_notional=Decimal("2000"),
+            settings=settings,
+        )
+
+        assert strategy.config.close_positions_on_stop is False, (
+            f"{strategy_name} must be built with close_positions_on_stop=False "
+            "in the live runner; otherwise every graceful stop sends real "
+            "exit orders to the venue."
+        )

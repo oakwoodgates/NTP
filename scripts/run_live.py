@@ -91,6 +91,14 @@ def _build_strategy(
             # the LiquidationAware mixin doesn't place reduce-only stops
             # on the real venue's order book. See docs/LIQUIDATION_AND_SIZING.md.
             liquidation=None,
+            # Live convention: don't flatten on graceful stop. Code deploys
+            # (docker compose stop/up -d) must be position-neutral. The
+            # exchange holds the real position; flattening on local stop
+            # would force a market exit on every deploy. PR #42 preserves
+            # cross-gate state across restarts so the strategy resumes
+            # exactly where it left off. See docs/PAPER_TRADING_GUIDE.md
+            # "Deploy lifecycle". Backtests still default to True.
+            close_positions_on_stop=False,
         )), f"MACross-{ma_type}-{fast}-{slow}", {
             "ma_type": ma_type, "fast": fast, "slow": slow,
             "notional": str(trade_notional), "stop_pct": stop_pct,
@@ -112,6 +120,7 @@ def _build_strategy(
             ma_type=ma_type,
             fast_period=fast,
             slow_period=slow,
+            close_positions_on_stop=False,  # see MACross branch
         )), f"MACrossLongOnly-{ma_type}-{fast}-{slow}", {
             "ma_type": ma_type, "fast": fast, "slow": slow, "notional": str(trade_notional),
         }
@@ -130,6 +139,7 @@ def _build_strategy(
             atr_period=atr,
             atr_sl_multiplier=sl_mult,
             atr_tp_multiplier=tp_mult,
+            close_positions_on_stop=False,  # see MACross branch
         )), f"MACrossATR-{fast}-{slow}-{atr}", {
             "fast": fast, "slow": slow, "atr": atr,
             "sl_mult": sl_mult, "tp_mult": tp_mult, "notional": str(trade_notional),
@@ -149,6 +159,7 @@ def _build_strategy(
             macd_slow_period=macd_slow,
             macd_signal_period=signal_period,
             rsi_period=rsi,
+            close_positions_on_stop=False,  # see MACross branch
         )), f"MACDRSI-{macd_fast}-{macd_slow}-{signal_period}-{rsi}", {
             "macd_fast": macd_fast, "macd_slow": macd_slow,
             "signal": signal_period, "rsi": rsi, "notional": str(trade_notional),
