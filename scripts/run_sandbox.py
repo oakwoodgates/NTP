@@ -80,6 +80,14 @@ def _build_strategy(
             slow_period=slow,
             stop_pct=stop_pct,
             bootstrap_on_deploy=bootstrap_on_deploy,
+            # Paper-trade convention: don't flatten on graceful stop.
+            # Code deploys (docker compose stop/up -d) should be position-
+            # neutral so PR #42's warm-restart guarantee actually delivers
+            # value; otherwise every deploy generates a synthetic exit that
+            # pollutes the trade history and breaks the cross-gate state
+            # vs. live-position invariant. Backtests still default to True.
+            # See docs/PAPER_TRADING_GUIDE.md "Deploy lifecycle".
+            close_positions_on_stop=False,
         )), f"MACross-{ma_type}-{fast}-{slow}", {
             "ma_type": ma_type, "fast": fast, "slow": slow,
             "notional": str(trade_notional), "stop_pct": stop_pct,
@@ -101,6 +109,7 @@ def _build_strategy(
             ma_type=ma_type,
             fast_period=fast,
             slow_period=slow,
+            close_positions_on_stop=False,  # see MACross branch
         )), f"MACrossLongOnly-{ma_type}-{fast}-{slow}", {
             "ma_type": ma_type, "fast": fast, "slow": slow, "notional": str(trade_notional),
         }
@@ -119,6 +128,7 @@ def _build_strategy(
             atr_period=atr,
             atr_sl_multiplier=sl_mult,
             atr_tp_multiplier=tp_mult,
+            close_positions_on_stop=False,  # see MACross branch
         )), f"MACrossATR-{fast}-{slow}-{atr}", {
             "fast": fast, "slow": slow, "atr": atr,
             "sl_mult": sl_mult, "tp_mult": tp_mult, "notional": str(trade_notional),
@@ -138,6 +148,7 @@ def _build_strategy(
             macd_slow_period=macd_slow,
             macd_signal_period=signal_period,
             rsi_period=rsi,
+            close_positions_on_stop=False,  # see MACross branch
         )), f"MACDRSI-{macd_fast}-{macd_slow}-{signal_period}-{rsi}", {
             "macd_fast": macd_fast, "macd_slow": macd_slow,
             "signal": signal_period, "rsi": rsi, "notional": str(trade_notional),

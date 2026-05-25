@@ -163,6 +163,44 @@ single-instrument `trader` service. If you previously had `trader`
 running and switch to multi-instrument, `docker compose stop trader`
 first or the legacy service keeps running on the old `.env` config.
 
+### Deploy lifecycle — graceful stop is position-neutral
+
+`docker compose stop <trader>` (and any restart that goes through it —
+`restart`, `up -d --force-recreate` after a code change, host shutdown)
+sends SIGTERM, the runner's signal handler raises `KeyboardInterrupt`,
+the `finally` block calls `node.stop()` → `strategy.on_stop()`.
+
+In paper/live mode this **does NOT flatten open positions**. The
+runners explicitly construct strategy configs with
+`close_positions_on_stop=False`, so `on_stop()` only cancels working
+orders and unsubscribes from market data. The position itself stays
+open in NT's Redis cache; PR #42's `on_save`/`on_load` persists the
+strategy's cross-gate + mixin state alongside it. On the next start,
+both the position and the strategy state are rehydrated — the strategy
+resumes exactly where it left off.
+
+**Why this default:** without it, every code deploy generates a
+synthetic `shutdown_flatten` exit followed by a synthetic re-entry on
+the next bar, polluting the trade history and breaking the
+"backtest-vs-paper" comparison (Phase 2.6 Tool 1).
+`shutdown_flatten`-tagged closes are easy to filter — but easier to
+just not create them.
+
+**To deliberately flatten before a code change** (e.g., shipping a
+risky strategy logic change you don't want to ride through), close
+positions from the live ExecClient first, then stop:
+
+```bash
+# (TODO: add scripts/panic_flatten.py — until then, close manually
+# via the venue UI or a one-shot script that submits reduce-only
+# market orders for each open position.)
+docker compose stop trader-eth
+```
+
+**Backtests are unaffected** — `MACrossConfig.close_positions_on_stop`
+still defaults to `True` everywhere else (notebooks, batch runner,
+sweep helpers). The override is runner-only.
+
 ## 4. Verify the Pipeline
 
 ### Check PostgreSQL
