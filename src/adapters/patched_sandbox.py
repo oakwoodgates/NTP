@@ -72,6 +72,20 @@ class PatchedSandboxLiveExecClientFactory(LiveExecClientFactory):
 
     Register via ``node.add_exec_client_factory("SANDBOX", ...)`` in
     place of NT's ``SandboxLiveExecClientFactory``.
+
+    .. warning::
+
+        NT's ``live/node_builder.py`` (line 246 in 1.227.0) special-
+        cases the factory by name string match — ``factory.__name__ ==
+        "SandboxLiveExecClientFactory"`` decides whether the
+        ``portfolio`` kwarg gets passed to ``create()``. Subclassing
+        with a different name skips the special-case, the kwarg is
+        missing, and ``create()`` raises ``TypeError`` at startup.
+
+        We override ``__name__`` at class-definition time (see below)
+        so the runtime check matches and ``portfolio`` arrives. If
+        upstream NT replaces the string check with proper subclass
+        introspection, this hack can be deleted.
     """
 
     @staticmethod
@@ -92,3 +106,9 @@ class PatchedSandboxLiveExecClientFactory(LiveExecClientFactory):
             cache=cache,
             config=config,
         )
+
+
+# Match the name string NT's node_builder hardcodes (see class docstring).
+# Do NOT remove without verifying NT no longer string-matches the factory name.
+PatchedSandboxLiveExecClientFactory.__name__ = "SandboxLiveExecClientFactory"
+PatchedSandboxLiveExecClientFactory.__qualname__ = "SandboxLiveExecClientFactory"
