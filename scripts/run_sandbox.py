@@ -28,7 +28,6 @@ from nautilus_trader.adapters.hyperliquid.config import (  # type: ignore[attr-d
 )
 from nautilus_trader.adapters.hyperliquid.factories import HyperliquidLiveDataClientFactory
 from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
-from nautilus_trader.adapters.sandbox.factory import SandboxLiveExecClientFactory
 from nautilus_trader.cache.config import CacheConfig
 from nautilus_trader.common.config import DatabaseConfig, InstrumentProviderConfig, LoggingConfig
 from nautilus_trader.config import TradingNodeConfig
@@ -41,6 +40,7 @@ from nautilus_trader.model.identifiers import InstrumentId
 from src.actors.account_alive import AccountAliveMonitor, AccountAliveMonitorConfig
 from src.actors.alert import AlertActor, AlertActorConfig
 from src.actors.persistence import PersistenceActor, PersistenceActorConfig
+from src.adapters.patched_sandbox import PatchedSandboxLiveExecClientFactory
 from src.config.settings import Settings, get_settings
 from src.core import bar_type_str, get_venue_config
 
@@ -270,9 +270,13 @@ def main() -> None:
             },
         ))
 
-        # Register adapter factories
+        # Register adapter factories. PatchedSandboxLiveExecClientFactory
+        # swaps in BestPriceFillModel — see src/adapters/patched_sandbox.py
+        # and docs/SANDBOX_PARTIAL_FILL_AUDIT.md for the NT 1.227.0 bug it
+        # works around. If/when NT fixes the underlying race, swap back
+        # to nautilus_trader.adapters.sandbox.factory.SandboxLiveExecClientFactory.
         node.add_data_client_factory("HYPERLIQUID", HyperliquidLiveDataClientFactory)
-        node.add_exec_client_factory("HYPERLIQUID", SandboxLiveExecClientFactory)
+        node.add_exec_client_factory("HYPERLIQUID", PatchedSandboxLiveExecClientFactory)
 
         # Add actors
         node.trader.add_actor(PersistenceActor(PersistenceActorConfig(
