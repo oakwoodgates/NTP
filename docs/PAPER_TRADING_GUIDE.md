@@ -50,7 +50,7 @@ Factory-default config (`src/config/settings.py`): MACross-EMA(`MA_FAST=10`, `MA
 
 **What happens:**
 - Registers a `strategy_runs` row in PostgreSQL with a unique `run_id` + `trader_id`
-- Connects to live Hyperliquid market data (real prices, simulated execution via `SandboxExecutionClient`)
+- Connects to live Hyperliquid market data (real prices, simulated execution via `PatchedSandboxExecutionClient` — our subclass of NT's `SandboxExecutionClient` that installs `BestPriceFillModel` to work around an NT 1.227.0 partial-fill race; see [`SANDBOX_PARTIAL_FILL_AUDIT.md`](SANDBOX_PARTIAL_FILL_AUDIT.md))
 - MACross generates trades on moving-average crosses (EMA by default), gated to act only on fresh transitions (see [`STRATEGY_ENTRY_RULES.md`](STRATEGY_ENTRY_RULES.md))
 - Every fill → PersistenceActor writes to `order_fills` + AlertActor sends Telegram
 - Every position close → writes to `positions` + Telegram WIN/LOSS message
