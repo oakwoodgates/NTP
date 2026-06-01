@@ -47,6 +47,24 @@ class TestClassHierarchy:
             staticmethod,
         )
 
+    def test_factory_name_matches_nt_string_check(self) -> None:
+        # NT's live/node_builder.py:246 (in 1.227.0) hardcodes a name
+        # string match: `if factory.__name__ == "SandboxLiveExecClientFactory"`
+        # decides whether to pass the `portfolio` kwarg to `create()`.
+        # If our __name__ doesn't match, `portfolio` is never passed and
+        # `PatchedSandboxLiveExecClientFactory.create(...)` raises
+        # `TypeError: missing 1 required positional argument: 'portfolio'`
+        # at TradingNode build time. We discovered this the hard way on
+        # 2026-06-01 when the first deploy crash-looped on it.
+        #
+        # Pinning the override here so a future "let's clean up this hack"
+        # commit will surface the regression in CI before deploy.
+        assert PatchedSandboxLiveExecClientFactory.__name__ == "SandboxLiveExecClientFactory", (
+            "PatchedSandboxLiveExecClientFactory.__name__ MUST match NT's "
+            "hardcoded string check in nautilus_trader.live.node_builder so "
+            "the `portfolio` kwarg is passed to create(). See class docstring."
+        )
+
 
 class TestFillModelSwap:
     """The whole point of this module: after ``__init__`` runs, the
