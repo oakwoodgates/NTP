@@ -502,8 +502,47 @@ Pass criteria (gates Phase 2.6):
 
 ### Signal alignment analysis (the roadmap's open question)
 
-After Stage B, in `notebooks/review_live_run.ipynb`, join `signal_events`
-against a fresh backtest re-run over the same window. Useful queries:
+The dedicated tool: **`notebooks/paper_vs_backtest.ipynb`** (Phase 2.6
+Tool 1). Two-layer comparison:
+
+1. **Layer 1 — signal stream (primary).** Loads `signal_events` for the
+   paper run, re-runs the same strategy in `BacktestEngine` over the
+   matched window, joins per-bar gate decisions. Headline metric is
+   **direction match rate** — what fraction of bars did paper and
+   backtest agree on `signal=+1` vs `-1`?
+2. **Layer 2 — position stream (secondary).** Only meaningful when
+   layer 1 alignment is high (≥90%). Measures entry-time, entry-price,
+   and realized-PnL gaps on positions that both sides took. Headline
+   metric is the **PnL haircut** (paper PnL / backtest PnL − 1).
+
+Driver workflow:
+
+```python
+# In paper_vs_backtest.ipynb, cell 2:
+USE_SYNTHETIC_DATA = False
+RUN_ID = '<UUID from strategy_runs>'
+INSTRUMENT_ID = 'ETH-USD-PERP.HYPERLIQUID'
+BAR_INTERVAL = '15m'
+P26_FAST, P26_SLOW, P26_MA_TYPE = 15, 35, 'EMA'  # MUST match paper
+
+# Cell 3 then handles the rest: loads paper signals + positions from
+# PG, computes the right warmup-matched backtest data window via
+# compute_backtest_warmup_start, runs the backtest, and produces both
+# stream pairs.
+```
+
+The notebook prints a verdict-snapshot block in cell 8 — paste into
+`reports/decisions/PHASE_2_6_VERDICT.md` (gitignored) when a Stage B
+run yields meaningful numbers.
+
+**If layer-1 direction match is unexpectedly low** (<90% on a clean
+v3+ run), the most common cause is EMA warmup divergence. Bump
+`WARMUP_MULTIPLIER` in cell 2 from `2.0` to `3.0` or `4.0` to load
+more pre-window data and re-run. For exact parity, extract the actual
+`RequestBars(start=...)` value from the live trader's startup log and
+pass it directly to `load_backtest_data`.
+
+For ad-hoc PG-only queries (no backtest re-run):
 
 ```sql
 -- The full per-bar gate stream for the testnet run
@@ -517,12 +556,6 @@ SELECT ts, signal, fast_value, slow_value
 FROM signal_events
 WHERE run_id = '<testnet run_id>' AND acted = TRUE
 ORDER BY ts;
-
--- Per-bar lag (paper ts_received vs bar ts_event) — currently same column,
--- but if we add ts_received later this is where it'd surface
-SELECT date_trunc('hour', ts) AS bar_hour, COUNT(*)
-FROM signal_events WHERE run_id = '<testnet run_id>'
-GROUP BY bar_hour ORDER BY bar_hour;
 ```
 
 ## 6. Daily Monitoring
