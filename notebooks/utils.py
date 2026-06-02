@@ -591,6 +591,155 @@ def join_signal_streams(
     return joined
 
 
+def compute_backtest_warmup_start(
+    paper_first_signal_ts: Any,
+    *,
+    slow_period: int,
+    bar_seconds: int,
+    multiplier: float = 2.0,
+) -> Any:
+    """Derive the backtest data-window start that approximates paper's
+    indicator warmup.
+
+    The Phase 2.6 mini-run (2026-05-30) showed that EMA values diverge
+    between paper and backtest when their warmup windows differ — and
+    at marginal MA crosses (fast/slow within ~5-15 bps) that flips the
+    signal direction outright, blowing up direction-match metrics.
+
+    NT's ``RequestBars`` on live-trader startup defaults to requesting
+    enough bars to warm up the configured indicators — empirically
+    around ``slow_period * 2`` bars in practice. This helper computes
+    the corresponding clock-time start for the backtest data load so
+    the matching engine's bar feed has the same warmup window the live
+    trader did.
+
+    For exact parity, extract the actual ``RequestBars(start=...)``
+    value from the live trader's startup log line and pass that
+    directly to :func:`load_backtest_data` instead. This helper is a
+    sane default when you don't have the log handy.
+
+    Parameters
+    ----------
+    paper_first_signal_ts
+        The earliest ``ts`` in :func:`load_signal_events` output for
+        the paper run. Accepts anything ``pd.Timestamp`` accepts
+        (str, datetime, Timestamp); will be coerced to UTC.
+    slow_period
+        Strategy's slow-MA period (the bar count needed for the
+        slowest indicator to produce a stable value).
+    bar_seconds
+        Seconds per bar (``900`` for 15m, ``14400`` for 4h, etc.).
+    multiplier
+        How many ``slow_period`` windows to pull before the comparison
+        starts. Default ``2.0`` matches NT's typical request.
+
+    Returns
+    -------
+    pd.Timestamp
+        UTC timestamp; pass as ``date_start`` to
+        :func:`load_backtest_data`.
+
+    """
+    import pandas as pd
+
+    ts = pd.Timestamp(paper_first_signal_ts)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    else:
+        ts = ts.tz_convert("UTC")
+    delta = pd.Timedelta(seconds=int(slow_period * multiplier * bar_seconds))
+    return ts - delta
+
+
+def summarize_signal_streams(joined: pd.DataFrame) -> dict[str, Any]:
+    """Compute Phase 2.6 Tool 1 headline metrics from
+    :func:`join_signal_streams` output.
+
+    The mini-run verdict (2026-05-30) flagged that the right primary
+    metric for paper-vs-backtest is **direction match rate at the
+    signal-event level**, not entry-time / entry-price gaps measured
+    at the position level. Position-level gaps are downstream — they
+    only make sense once the signal-level alignment is high. This
+    summary surfaces the right top-of-funnel numbers.
+
+    Parameters
+    ----------
+    joined
+        DataFrame from :func:`join_signal_streams`. Must have
+        ``paper_signal``, ``bt_signal``, ``paper_acted``, ``bt_acted``,
+        and ``divergent`` columns. May be empty (returns zero-counts
+        summary).
+
+    Returns
+    -------
+    dict
+        Keys:
+
+        - ``matched_bars`` — bars present in both streams.
+        - ``paper_only_bars`` / ``bt_only_bars`` — copied from
+          ``joined.attrs`` (set by :func:`join_signal_streams`).
+        - ``direction_match_rate`` — fraction of matched bars where
+          ``paper_signal == bt_signal``. ``None`` when no matched bars.
+        - ``acted_match_rate`` — fraction of matched bars where
+          ``paper_acted == bt_acted`` (both fired or both held).
+          ``None`` when no matched bars.
+        - ``paper_acted_count`` / ``bt_acted_count`` — count of bars
+          where each side actually acted (cross fired).
+        - ``acted_on_both_count`` — bars where both sides acted.
+        - ``acted_same_direction_count`` — bars where both acted AND
+          on the same direction. The good kind of acted-on-both.
+        - ``acted_opposite_direction_count`` — bars where both acted
+          but on opposite directions. **This is the smoking-gun
+          divergence** — both sides would have traded the same bar
+          but in opposite directions, the worst-case haircut scenario.
+
+    """
+    matched = int(len(joined))
+    paper_only = int(joined.attrs.get("paper_only_bars", 0))
+    bt_only = int(joined.attrs.get("bt_only_bars", 0))
+
+    if matched == 0:
+        return {
+            "matched_bars": 0,
+            "paper_only_bars": paper_only,
+            "bt_only_bars": bt_only,
+            "direction_match_rate": None,
+            "acted_match_rate": None,
+            "paper_acted_count": 0,
+            "bt_acted_count": 0,
+            "acted_on_both_count": 0,
+            "acted_same_direction_count": 0,
+            "acted_opposite_direction_count": 0,
+        }
+
+    direction_match = (joined["paper_signal"] == joined["bt_signal"]).sum()
+    acted_match = (joined["paper_acted"] == joined["bt_acted"]).sum()
+
+    paper_acted = joined["paper_acted"].astype(bool)
+    bt_acted = joined["bt_acted"].astype(bool)
+    acted_on_both = paper_acted & bt_acted
+    n_acted_on_both = int(acted_on_both.sum())
+    same_dir_on_both = (
+        acted_on_both & (joined["paper_signal"] == joined["bt_signal"])
+    )
+    opp_dir_on_both = (
+        acted_on_both & (joined["paper_signal"] != joined["bt_signal"])
+    )
+
+    return {
+        "matched_bars": matched,
+        "paper_only_bars": paper_only,
+        "bt_only_bars": bt_only,
+        "direction_match_rate": float(direction_match) / matched,
+        "acted_match_rate": float(acted_match) / matched,
+        "paper_acted_count": int(paper_acted.sum()),
+        "bt_acted_count": int(bt_acted.sum()),
+        "acted_on_both_count": n_acted_on_both,
+        "acted_same_direction_count": int(same_dir_on_both.sum()),
+        "acted_opposite_direction_count": int(opp_dir_on_both.sum()),
+    }
+
+
 # ── Phase 2.6 Tool 1: paper-vs-backtest position comparison ──────────────────
 #
 # Position-level comparison answers all four Phase 2.6 Tool 1 questions:

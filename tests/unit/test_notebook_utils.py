@@ -33,6 +33,7 @@ from utils import (  # type: ignore[import-not-found] # noqa: E402
     baselines_for_strategy,
     build_verdict_matrix,
     compare_position_streams,
+    compute_backtest_warmup_start,
     join_signal_streams,
     load_sweeps_filtered,
     load_verdict_jsons,
@@ -43,6 +44,7 @@ from utils import (  # type: ignore[import-not-found] # noqa: E402
     run_backtest_position_stream,
     run_backtest_signal_stream,
     save_notebook_snapshot,
+    summarize_signal_streams,
     wilson_score_interval,
 )
 
@@ -1835,6 +1837,178 @@ class TestJoinSignalStreams:
         # flipped but paper hasn't seen it yet.
         divergent_ts = joined[joined["divergent"]]["ts"].iloc[0]
         assert divergent_ts == pd.Timestamp("2024-01-01T08:00", tz="UTC")
+
+
+class TestComputeBacktestWarmupStart:
+    """The warmup-window helper subtracts ``slow_period * multiplier``
+    bars from the paper-first-signal timestamp. Pure function — easy
+    to test exhaustively.
+    """
+
+    def test_default_multiplier_subtracts_2x_slow_window(self) -> None:
+        first = pd.Timestamp("2026-05-25 01:30:00", tz="UTC")
+        # 35 slow bars × 2.0 × 900s = 63000s = 17.5h
+        out = compute_backtest_warmup_start(
+            first, slow_period=35, bar_seconds=900,
+        )
+        assert out == first - pd.Timedelta(hours=17, minutes=30)
+
+    def test_multiplier_override(self) -> None:
+        first = pd.Timestamp("2026-05-25 01:30:00", tz="UTC")
+        # 35 × 3.0 × 900 = 94500s = 26h 15m
+        out = compute_backtest_warmup_start(
+            first, slow_period=35, bar_seconds=900, multiplier=3.0,
+        )
+        assert out == first - pd.Timedelta(hours=26, minutes=15)
+
+    def test_string_input_coerced_to_utc(self) -> None:
+        out = compute_backtest_warmup_start(
+            "2026-05-25 01:30:00", slow_period=35, bar_seconds=900,
+        )
+        assert out.tzinfo is not None
+        assert out == pd.Timestamp("2026-05-24 08:00:00", tz="UTC")
+
+    def test_naive_timestamp_treated_as_utc(self) -> None:
+        # If a caller passes a tz-naive ts, we localize to UTC rather
+        # than infer/assume local time.
+        naive = pd.Timestamp("2026-05-25 01:30:00")
+        out = compute_backtest_warmup_start(
+            naive, slow_period=35, bar_seconds=900,
+        )
+        assert out.tzinfo is not None
+        assert out == pd.Timestamp("2026-05-24 08:00:00", tz="UTC")
+
+    def test_already_tz_aware_non_utc_converted(self) -> None:
+        # If the input is in a different tz, conversion to UTC happens
+        # before the subtraction so the offset is consistent.
+        ts_eastern = pd.Timestamp("2026-05-25 01:30:00", tz="US/Eastern")
+        out = compute_backtest_warmup_start(
+            ts_eastern, slow_period=35, bar_seconds=900,
+        )
+        # 01:30 Eastern = 05:30 UTC. Subtract 17.5h = previous day 12:00 UTC.
+        assert out == pd.Timestamp("2026-05-24 12:00:00", tz="UTC")
+
+    @pytest.mark.parametrize("bar_seconds", [60, 300, 900, 3600, 14400, 86400])
+    def test_various_bar_intervals(self, bar_seconds: int) -> None:
+        # Returns a Timestamp for every supported bar size, no overflow.
+        out = compute_backtest_warmup_start(
+            "2026-05-25 12:00:00", slow_period=100, bar_seconds=bar_seconds,
+        )
+        assert isinstance(out, pd.Timestamp)
+        expected_delta = pd.Timedelta(seconds=100 * 2 * bar_seconds)
+        assert out == pd.Timestamp("2026-05-25 12:00:00", tz="UTC") - expected_delta
+
+
+class TestSummarizeSignalStreams:
+    """Summary metrics from joined paper-vs-backtest signal streams.
+
+    Direction match rate is THE primary Phase 2.6 Tool 1 metric (per
+    the 2026-05-30 mini-run verdict). Acted-opposite-direction count
+    is the smoking-gun divergence — both sides would have traded the
+    same bar in opposite directions.
+    """
+
+    def _make_joined(
+        self,
+        rows: list[tuple[str, int, int, bool, bool]],
+        *,
+        paper_only: int = 0,
+        bt_only: int = 0,
+    ) -> pd.DataFrame:
+        """rows: list of (ts, paper_signal, bt_signal, paper_acted, bt_acted)."""
+        df = pd.DataFrame([
+            {
+                "ts": pd.Timestamp(ts, tz="UTC"),
+                "paper_signal": ps,
+                "bt_signal": bs,
+                "paper_fast": Decimal("100"),
+                "paper_slow": Decimal("99"),
+                "bt_fast": Decimal("100"),
+                "bt_slow": Decimal("99"),
+                "paper_acted": pa,
+                "bt_acted": ba,
+                "divergent": ps != bs,
+            }
+            for ts, ps, bs, pa, ba in rows
+        ])
+        df.attrs["paper_only_bars"] = paper_only
+        df.attrs["bt_only_bars"] = bt_only
+        return df
+
+    def test_perfect_alignment(self) -> None:
+        joined = self._make_joined([
+            ("2024-01-01T00:00", 1, 1, True, True),
+            ("2024-01-01T04:00", 1, 1, False, False),
+            ("2024-01-01T08:00", -1, -1, True, True),
+        ])
+        s = summarize_signal_streams(joined)
+        assert s["matched_bars"] == 3
+        assert s["direction_match_rate"] == 1.0
+        assert s["acted_match_rate"] == 1.0
+        assert s["paper_acted_count"] == 2
+        assert s["bt_acted_count"] == 2
+        assert s["acted_on_both_count"] == 2
+        assert s["acted_same_direction_count"] == 2
+        assert s["acted_opposite_direction_count"] == 0
+
+    def test_acted_opposite_direction_is_smoking_gun(self) -> None:
+        # Both sides acted on the same bar in opposite directions —
+        # this is the worst-case paper-vs-backtest divergence.
+        joined = self._make_joined([
+            ("2024-01-01T00:00", 1, -1, True, True),  # both acted, opposite dir
+            ("2024-01-01T04:00", 1, 1, True, True),   # both acted, same dir
+            ("2024-01-01T08:00", -1, 1, False, False),  # neither acted (signal differs but no fire)
+        ])
+        s = summarize_signal_streams(joined)
+        assert s["matched_bars"] == 3
+        # 2/3 direction matches (00:00 is opposite; 08:00 also differs).
+        # Actually: 00:00 differs, 04:00 matches, 08:00 differs => 1/3.
+        assert s["direction_match_rate"] == pytest.approx(1 / 3)
+        assert s["acted_match_rate"] == pytest.approx(1.0)  # all 3 have same acted-state
+        assert s["acted_on_both_count"] == 2
+        assert s["acted_same_direction_count"] == 1
+        assert s["acted_opposite_direction_count"] == 1
+
+    def test_empty_joined_returns_zero_counts(self) -> None:
+        joined = self._make_joined([], paper_only=5, bt_only=3)
+        s = summarize_signal_streams(joined)
+        assert s["matched_bars"] == 0
+        assert s["paper_only_bars"] == 5
+        assert s["bt_only_bars"] == 3
+        assert s["direction_match_rate"] is None
+        assert s["acted_match_rate"] is None
+        assert s["acted_on_both_count"] == 0
+        assert s["acted_same_direction_count"] == 0
+        assert s["acted_opposite_direction_count"] == 0
+
+    def test_paper_only_and_bt_only_bars_propagated(self) -> None:
+        joined = self._make_joined(
+            [("2024-01-01T00:00", 1, 1, True, True)],
+            paper_only=7,
+            bt_only=2,
+        )
+        s = summarize_signal_streams(joined)
+        assert s["matched_bars"] == 1
+        assert s["paper_only_bars"] == 7
+        assert s["bt_only_bars"] == 2
+
+    def test_mini_run_pattern_reproduced(self) -> None:
+        # Reproduces the 2026-05-30 mini-run pattern: 6 matched bars,
+        # all acted on both sides, all opposite direction. The
+        # smoking-gun finding from incident
+        # reports/incidents/2026-05-30_sandbox_partial_fill/.
+        joined = self._make_joined([
+            (f"2024-01-01T0{i}:00", 1 if i % 2 == 0 else -1,
+             -1 if i % 2 == 0 else 1, True, True)
+            for i in range(6)
+        ])
+        s = summarize_signal_streams(joined)
+        assert s["matched_bars"] == 6
+        assert s["direction_match_rate"] == 0.0      # 0% direction match
+        assert s["acted_match_rate"] == 1.0           # 100% acted alignment
+        assert s["acted_on_both_count"] == 6
+        assert s["acted_same_direction_count"] == 0
+        assert s["acted_opposite_direction_count"] == 6  # all 6 are smoking gun
 
 
 # ── Phase 2.6 Tool 1 position-stream helpers ─────────────────────────────────
