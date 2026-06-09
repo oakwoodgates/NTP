@@ -4,6 +4,8 @@
 
 **Do not use Sharpe, Sortino, Volatility, or returns-based Profit Factor for strategy selection or go/no-go decisions.** These numbers are unreliable in NT v1.224.0, v1.225.0, v1.226.0, **and v1.227.0** (the version currently pinned in `pyproject.toml`). The 1.226 → 1.227 upgrade did not change the methodology — re-verified at upgrade time; the analyzer outputs remain byte-for-byte identical to 1.226 for the BTC 1d MACrossTakeProfit reference run. PnL-section stats (Total PnL, Win Rate, Expectancy, PnL-based Profit Factor) are correct and consistent across versions.
 
+> **1.228.0 evaluated, caveat still holds.** 1.228's release notes mention a `statistic.rs` daily-bin compounding fix, but that fix is in the Rust core and operates *downstream* of the already-zero-padded daily returns produced by `analysis/analyzer.py::_returns()` (still `.ffill().pct_change()`, unchanged in the shipped wheel). Empirically reproduced on 1.228: ~7.8× Sharpe understatement on a sparse-trade series. See [`NT_UPGRADE_NOTES.md`](NT_UPGRADE_NOTES.md) §1.228 finding 4.
+
 Waiting for an upstream fix in NautilusTrader. The most likely resolution is NT v2 — the v2 RFC ([nautechsystems/nautilus_trader#4042](https://github.com/nautechsystems/nautilus_trader/issues/4042)) explicitly calls out portfolio analytics as an area being reworked. We're tracking it; see [`ROADMAP.md`](ROADMAP.md) Phase 5.
 
 ## What Changed in v1.225.0

@@ -2,7 +2,7 @@
 
 ## What this is and why it exists
 
-NautilusTrader 1.227.0's `SimulatedExchange` does **not enforce margin** for `MARGIN` accounts and has **no liquidation engine** — verified end to end (unchanged from 1.225 — re-checked at the 1.226 and 1.227 upgrades):
+NautilusTrader 1.227.0's `SimulatedExchange` does **not enforce margin** for `MARGIN` accounts and has **no liquidation engine** — verified end to end (unchanged from 1.225 — re-checked at the 1.226 and 1.227 upgrades; **re-confirmed at the 1.228 evaluation**, see note below):
 
 - `risk/engine.pyx:678–679` short-circuits the risk check for margin accounts with `# TODO: Determine risk controls for margin`. Returns `True` unconditionally.
 - `accounting/manager.pyx:580–586` has a commented-out `AccountMarginExceeded` raise with the TODO comment: *"Until the platform can accurately track account equity and cross-margin requirements this condition check is inaccurate and causes issues in live trading with more complex margin requirements."*
@@ -10,6 +10,8 @@ NautilusTrader 1.227.0's `SimulatedExchange` does **not enforce margin** for `MA
 - Exhaustive grep for `liquidat | margin_call | maintenance_margin | force_close | bankrupt | insolven` returns **zero matches** in `backtest/` or `risk/` — only in exchange adapters parsing inbound liquidation events from real venues.
 
 This is a deliberate policy choice (graceful degradation over enforcement) driven by live-trading-fidelity concerns. It is **unlikely to change upstream** before NT 2.0.
+
+> **1.228.0 evaluated — native liquidation is a dead field in the v1 API.** 1.228 added `BacktestVenueConfig.liquidation_enabled` / `liquidation_trigger_ratio` and a margin-enforcement path in `crates/risk/.../mod.rs`. **None of it is reachable from the shipped Python wheel:** `BacktestEngine.add_venue()` (what `make_engine` calls) has no `liquidation_enabled` parameter, the field is consumed nowhere in any `.pyx`, and `SimulatedExchange` has no liquidation method at runtime (`risk/engine.pyx` still has the `# TODO` short-circuit). It's a forward-declaration for NT v2. The mixin stays. See [`NT_UPGRADE_NOTES.md`](NT_UPGRADE_NOTES.md) §1.228 finding 3. `tests/integration/test_native_liquidation_engine.py` is the ready-to-flip A/B test that auto-activates the day the native engine becomes real.
 
 The behavioral consequence: a backtest with insufficient equity will fill orders through insolvency, post negative balances, "recover mathematically", and report PnL that would be impossible in live trading. This project closes the gap with its own simulator.
 
