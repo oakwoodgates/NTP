@@ -40,7 +40,7 @@ NT's MessageBus dispatches events synchronously on a single thread. Any blocking
 - Actor imports from `nautilus_trader.common.actor` (NOT `nautilus_trader.trading.actor`).
 
 ### Pin NT Version
-NT is pre-v2.0 with breaking changes between releases. The version is pinned in `pyproject.toml`. Never upgrade without testing in a branch first.
+NT is pre-v2.0 with breaking changes between releases. The version is pinned in `pyproject.toml`. Never upgrade without testing in a branch first. **Before evaluating any new NT release, read [`docs/NT_UPGRADE_NOTES.md`](docs/NT_UPGRADE_NOTES.md)** — it documents the "Rust crate tree ≠ shipped Python wheel" trap (a fix in `crates/**/*.rs` does nothing for us until NT flips the v1 Cython API to the Rust core) and the per-version evaluation log. 1.228.0 was evaluated and skipped for exactly this reason.
 
 ### Findings and Decision Outputs Stay Local — Never Commit to Public Repo
 This is a public GitHub repo. **Never commit research findings, picked configs, backtest result numbers, verdict files, or run summaries** — those constitute the project's edge and must not leak.

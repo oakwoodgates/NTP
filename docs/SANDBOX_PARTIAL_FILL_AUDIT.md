@@ -335,6 +335,13 @@ order sizes.
 
 ## 7. Re-verification recipe for future NT upgrades
 
+> **Before evaluating a new NT release, read [`NT_UPGRADE_NOTES.md`](NT_UPGRADE_NOTES.md).**
+> It documents the "Rust crate tree ≠ shipped Python wheel" trap — a
+> fix landing in `crates/**/*.rs` does nothing for us until NT flips the
+> v1 Cython API to the Rust core. 1.228.0 was evaluated and SKIPPED for
+> exactly this reason: the matching-engine fix is in the Rust source but
+> the shipped `.pyx` is unchanged and the repro test still passes.
+
 After every NT version bump (`pip install nautilus_trader==<new>`):
 
 1. Run `pytest tests/integration/test_sandbox_partial_fill.py -v`.
