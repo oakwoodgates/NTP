@@ -243,6 +243,17 @@ def main() -> None:
         node = TradingNode(config=TradingNodeConfig(
             trader_id=settings.trader_id,
             logging=LoggingConfig(log_level="INFO"),
+            # Pin the connection-timeout explicitly. NT 1.227 defaults to
+            # 120s; NT 1.228 changes the default to 60s. The DO box's
+            # Hyperliquid websocket sometimes takes 30-90s to first-connect
+            # on a fresh container (cold-start name resolution + TLS
+            # handshake + initial pong). Keeping 120s avoids spurious
+            # startup failures during the 1.227 -> 1.228 upgrade window.
+            # For live trading where any restart re-asserts open positions
+            # against the venue, an aggressive timeout that fails the
+            # node-build is the wrong default — better to wait the
+            # extra 60s once than crash-loop on a slow handshake.
+            timeout_connection=120.0,
             # Startup reconciliation MUST stay on for live trading. Without it,
             # any restart (crash, redeploy, migration) leaves the cache empty
             # while the exchange still holds the open position + protective stop

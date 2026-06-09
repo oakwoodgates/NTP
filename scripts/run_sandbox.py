@@ -222,6 +222,14 @@ def main() -> None:
         node = TradingNode(config=TradingNodeConfig(
             trader_id=settings.trader_id,
             logging=LoggingConfig(log_level="INFO"),
+            # Pin the connection-timeout explicitly. NT 1.227 defaults to
+            # 120s; NT 1.228 changes the default to 60s. The DO box's
+            # Hyperliquid websocket sometimes takes 30-90s to first-connect
+            # on a fresh container (cold-start name resolution + TLS
+            # handshake + initial pong). Keeping 120s avoids spurious
+            # startup failures during the 1.227 -> 1.228 upgrade window.
+            # If/when we confirm 60s is enough on the droplet, drop this.
+            timeout_connection=120.0,
             exec_engine=LiveExecEngineConfig(
                 reconciliation=False,
             ),
